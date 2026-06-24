@@ -1,0 +1,235 @@
+from __future__ import annotations
+
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class Source(Base, TimestampMixin):
+    __tablename__ = "sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    base_url: Mapped[str | None] = mapped_column(Text)
+
+
+class Brand(Base, TimestampMixin):
+    __tablename__ = "brands"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    slug: Mapped[str | None] = mapped_column(String(120), unique=True)
+
+
+class CarModel(Base, TimestampMixin):
+    __tablename__ = "car_models"
+    __table_args__ = (UniqueConstraint("brand_id", "name", name="uq_car_model_brand_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    brand_id: Mapped[int] = mapped_column(ForeignKey("brands.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    slug: Mapped[str | None] = mapped_column(String(150))
+
+
+class Generation(Base, TimestampMixin):
+    __tablename__ = "generations"
+    __table_args__ = (UniqueConstraint("car_model_id", "name", name="uq_generation_model_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    car_model_id: Mapped[int] = mapped_column(ForeignKey("car_models.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    code: Mapped[str | None] = mapped_column(String(80))
+    is_facelift: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class Listing(Base, TimestampMixin):
+    __tablename__ = "listings"
+    __table_args__ = (
+        UniqueConstraint("source_id", "external_id", name="uq_listing_source_external"),
+        Index("ix_listing_similarity", "brand_id", "car_model_id", "generation_id", "year"),
+        Index("ix_listing_active_price", "is_active", "current_price_usd"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    brand_id: Mapped[int | None] = mapped_column(ForeignKey("brands.id"), index=True)
+    car_model_id: Mapped[int | None] = mapped_column(ForeignKey("car_models.id"), index=True)
+    generation_id: Mapped[int | None] = mapped_column(ForeignKey("generations.id"), index=True)
+
+    title: Mapped[str | None] = mapped_column(Text)
+    source_slug: Mapped[str | None] = mapped_column(String(255))
+
+    year: Mapped[int | None] = mapped_column(Integer, index=True)
+    mileage_km: Mapped[int | None] = mapped_column(Integer, index=True)
+    body_type: Mapped[str | None] = mapped_column(String(80))
+    engine_volume: Mapped[Decimal | None] = mapped_column(Numeric(4, 1))
+    fuel_type: Mapped[str | None] = mapped_column(String(80))
+    gearbox: Mapped[str | None] = mapped_column(String(80))
+    drive_type: Mapped[str | None] = mapped_column(String(80))
+    steering_wheel: Mapped[str | None] = mapped_column(String(40))
+    city: Mapped[str | None] = mapped_column(String(80), index=True)
+    customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
+    seller_type: Mapped[str | None] = mapped_column(String(30))
+    is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_official_dealer: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    current_price_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    current_price_currency: Mapped[str | None] = mapped_column(String(10))
+    current_price_kgs: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    current_price_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+
+    status: Mapped[str] = mapped_column(String(30), default="active", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    source_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_upped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    missing_full_scans: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+
+class ListingPriceHistory(Base):
+    __tablename__ = "listing_price_history"
+    __table_args__ = (Index("ix_price_history_listing_observed", "listing_id", "observed_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)  # initial | price_changed
+    price_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    price_currency: Mapped[str | None] = mapped_column(String(10))
+    price_kgs: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    price_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), index=True)
+    mileage_km_snapshot: Mapped[int | None] = mapped_column(Integer)
+    customs_status_snapshot: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class ListingStatusHistory(Base):
+    __tablename__ = "listing_status_history"
+    __table_args__ = (Index("ix_status_history_listing_observed", "listing_id", "observed_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    old_status: Mapped[str | None] = mapped_column(String(30))
+    new_status: Mapped[str | None] = mapped_column(String(30))
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class SyncTarget(Base, TimestampMixin):
+    __tablename__ = "sync_targets"
+    __table_args__ = (
+        UniqueConstraint("source_id", "brand_filter", "model_filter", "generation_filter", name="uq_sync_target"),
+        Index("ix_sync_target_due", "enabled", "priority", "last_success_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), nullable=False, index=True)
+    brand_filter: Mapped[str] = mapped_column(String(100), nullable=False)
+    model_filter: Mapped[str | None] = mapped_column(String(120))
+    generation_filter: Mapped[str | None] = mapped_column(String(160))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    fresh_period: Mapped[str] = mapped_column(String(20), default="1d", nullable=False)
+    page_size: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    max_pages: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    max_items: Mapped[int] = mapped_column(Integer, default=500, nullable=False)
+    sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_full_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ParserRun(Base):
+    __tablename__ = "parser_runs"
+    __table_args__ = (Index("ix_parser_run_source_started", "source_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), nullable=False)
+    target_id: Mapped[int | None] = mapped_column(ForeignKey("sync_targets.id"))
+    mode: Mapped[str] = mapped_column(String(20), nullable=False)  # fresh | full
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
+    new_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    price_changed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reactivated_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    deactivated_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class RawPayload(Base):
+    __tablename__ = "raw_payloads"
+    __table_args__ = (Index("ix_raw_payload_source_external", "source_id", "external_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), nullable=False)
+    listing_id: Mapped[int | None] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"))
+    parser_run_id: Mapped[int | None] = mapped_column(ForeignKey("parser_runs.id", ondelete="SET NULL"))
+    external_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DailyMarketStat(Base):
+    __tablename__ = "daily_market_stats"
+    __table_args__ = (
+        UniqueConstraint(
+            "stat_date",
+            "brand_id",
+            "car_model_id",
+            "generation_id",
+            "year",
+            "mileage_bucket",
+            "customs_status",
+            name="uq_daily_market_stat",
+        ),
+        Index("ix_daily_stat_vehicle_date", "brand_id", "car_model_id", "generation_id", "year", "stat_date"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stat_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    brand_id: Mapped[int] = mapped_column(ForeignKey("brands.id"), nullable=False)
+    car_model_id: Mapped[int] = mapped_column(ForeignKey("car_models.id"), nullable=False)
+    generation_id: Mapped[int | None] = mapped_column(ForeignKey("generations.id"))
+    year: Mapped[int | None] = mapped_column(Integer)
+    mileage_bucket: Mapped[str] = mapped_column(String(30), nullable=False)
+    customs_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    avg_price_usd: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    median_price_usd: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    min_price_usd: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    max_price_usd: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)

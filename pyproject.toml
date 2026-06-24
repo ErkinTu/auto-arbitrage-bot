@@ -1,0 +1,28 @@
+[project]
+name = "car-analytics-mvp"
+version = "0.1.0"
+description = "MVP for collecting car listings, price history, and market estimates."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "httpx>=0.27,<1.0",
+    "psycopg[binary]>=3.2,<4.0",
+    "pydantic-settings>=2.6,<3.0",
+    "sqlalchemy>=2.0,<3.0",
+    "uvicorn>=0.30,<1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9.0",
+    "ruff>=0.8,<1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+norecursedirs = ["car-analytics-mvp-fixed-normalization"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
