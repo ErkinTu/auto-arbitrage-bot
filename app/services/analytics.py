@@ -78,6 +78,7 @@ def estimate_price(
     brand, car_model, generation = resolve_vehicle_ids(session, brand_name, model_name, generation_name)
     conditions = [
         Listing.is_active.is_(True),
+        Listing.analytics_eligible.is_(True),
         Listing.brand_id == brand.id,
         Listing.car_model_id == car_model.id,
         Listing.year == year,

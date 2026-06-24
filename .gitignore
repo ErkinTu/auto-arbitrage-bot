@@ -5,3 +5,32 @@ __pycache__/
 .ruff_cache/
 *.pyc
 backups/*.sql.gz
+
+# Local IDE/editor state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Local build/test/runtime output
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+*.log
+
+# Local archives and dumps
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.sql
+*.sqlite
+*.sqlite3
+*.db

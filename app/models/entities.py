@@ -67,6 +67,54 @@ class Generation(Base, TimestampMixin):
     is_facelift: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
+class ModelAlias(Base, TimestampMixin):
+    __tablename__ = "model_aliases"
+    __table_args__ = (
+        UniqueConstraint("brand_id", "normalized_alias", name="uq_model_alias_brand_normalized"),
+        Index("ix_model_alias_model", "car_model_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    brand_id: Mapped[int] = mapped_column(ForeignKey("brands.id", ondelete="CASCADE"), nullable=False)
+    car_model_id: Mapped[int] = mapped_column(ForeignKey("car_models.id", ondelete="CASCADE"), nullable=False)
+    alias: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(String(180), nullable=False)
+    source: Mapped[str] = mapped_column(String(30), default="manual", nullable=False)
+
+
+class GenerationAlias(Base, TimestampMixin):
+    __tablename__ = "generation_aliases"
+    __table_args__ = (
+        UniqueConstraint("car_model_id", "normalized_alias", name="uq_generation_alias_model_normalized"),
+        Index("ix_generation_alias_generation", "generation_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    car_model_id: Mapped[int] = mapped_column(ForeignKey("car_models.id", ondelete="CASCADE"), nullable=False)
+    generation_id: Mapped[int] = mapped_column(ForeignKey("generations.id", ondelete="CASCADE"), nullable=False)
+    alias: Mapped[str] = mapped_column(String(200), nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(String(220), nullable=False)
+    source: Mapped[str] = mapped_column(String(30), default="manual", nullable=False)
+
+
+class NormalizationIssue(Base, TimestampMixin):
+    __tablename__ = "normalization_issues"
+    __table_args__ = (
+        UniqueConstraint("brand_id", "normalized_source_model", name="uq_normalization_issue_brand_model"),
+        Index("ix_normalization_issue_status_count", "status", "occurrence_count"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    brand_id: Mapped[int] = mapped_column(ForeignKey("brands.id", ondelete="CASCADE"), nullable=False)
+    resolved_model_id: Mapped[int | None] = mapped_column(ForeignKey("car_models.id", ondelete="SET NULL"))
+    source_model_text: Mapped[str] = mapped_column(String(160), nullable=False)
+    normalized_source_model: Mapped[str] = mapped_column(String(180), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="open", nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class Listing(Base, TimestampMixin):
     __tablename__ = "listings"
     __table_args__ = (
@@ -85,6 +133,15 @@ class Listing(Base, TimestampMixin):
 
     title: Mapped[str | None] = mapped_column(Text)
     source_slug: Mapped[str | None] = mapped_column(String(255))
+    source_make_text: Mapped[str | None] = mapped_column(String(100))
+    source_model_text: Mapped[str | None] = mapped_column(String(160))
+    source_generation_text: Mapped[str | None] = mapped_column(String(200))
+    normalization_status: Mapped[str] = mapped_column(
+        String(40), default="pending_catalog_resolution", nullable=False, index=True
+    )
+    normalization_confidence: Mapped[str | None] = mapped_column(String(40))
+    quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    analytics_eligible: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
 
     year: Mapped[int | None] = mapped_column(Integer, index=True)
     mileage_km: Mapped[int | None] = mapped_column(Integer, index=True)

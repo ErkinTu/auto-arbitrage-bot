@@ -8,14 +8,16 @@ MVP-сервис для:
 - ежедневной рыночной статистики;
 - API оценки цены и графика средней цены.
 
-Стартовые марки: **BMW**.
+Марки по умолчанию задаются в `.env` через `ALLOWED_BRANDS`. В `.env.example` это `BMW,Audi,Toyota,Kia`.
 
 > Важно: внешний endpoint может быть доступен из браузера, но это не означает безусловное разрешение на массовый сбор. Проверь правила источника, не обходи защиту, используй умеренную частоту запросов и понятный User-Agent.
 
 ## Что хранит база
 
 - `sources` - источники данных.
-- `brands`, `car_models`, `generations` - справочники автомобиля.
+- `brands`, `car_models`, `generations` - канонический справочник автомобиля.
+- `model_aliases`, `generation_aliases` - варианты написания из объявлений и их канонические значения.
+- `normalization_issues` - неизвестные модели, которые ждут подтверждения, а не загрязняют справочник.
 - `listings` - текущее состояние объявления.
 - `listing_price_history` - первая цена и все дальнейшие изменения.
 - `listing_status_history` - новое, обновлено, деактивировано, реактивировано.
@@ -30,31 +32,71 @@ MVP-сервис для:
 
 ```bash
 cp .env.example .env
-# Открой .env и измени POSTGRES_PASSWORD / DATABASE_URL.
+# Открой .env и измени POSTGRES_PASSWORD.
+# DATABASE_URL в .env нужен для запуска с хоста; docker-compose переопределяет его для контейнеров.
 docker compose up --build -d
-
-# Для первого ручного заполнения только одной марки вместо worker:
-# docker compose up --build -d postgres api
 ```
 
 Проверка:
 
 ```bash
 curl http://localhost:8000/health
-uv run python -m app.cli targets
+docker compose run --rm api uv run python -m app.cli targets
 ```
 
-Первый точечный сбор Audi (первые 3 страницы, не более 200 карточек). `created_period` используется только для свежих объявлений:
+`api` при старте сам выполняет `init-db` и `seed`, затем запускает FastAPI. `worker` при старте тоже выполняет `init-db` и `seed`, затем регулярно запускает включенные `sync_targets`.
+
+### Docker-сценарии запуска
+
+Поднять только базу для ручных CLI-команд:
 
 ```bash
-uv run python -m app.cli sync \
-  --brand Audi \
-  --mode fresh \
-  --period 1d \
-  --max-pages 3 \
-  --max-items 200
+docker compose up -d postgres
 ```
 
+Инициализировать схему и стартовые targets:
+
+```bash
+docker compose run --rm api sh -c 'uv run python -m app.cli init-db && uv run python -m app.cli seed'
+```
+
+Полностью сбросить Docker-базу и начать заново:
+
+```bash
+docker compose down -v --remove-orphans
+docker compose up -d postgres
+docker compose run --rm api sh -c 'uv run python -m app.cli init-db && uv run python -m app.cli seed'
+```
+
+Первичная загрузка BMW: 5 страниц по 100 объявлений, максимум 500 карточек, задержка 10 секунд после каждого запроса к Mashina:
+
+```bash
+docker compose run --rm -e REQUEST_DELAY_SECONDS=10 api sh -c 'uv run python -m app.cli sync --brand BMW --mode full --page-size 100 --max-pages 5 --max-items 500'
+```
+
+Точечный свежий сбор Audi за последние сутки: первые 3 страницы, не более 200 карточек:
+
+```bash
+docker compose run --rm -e REQUEST_DELAY_SECONDS=10 api sh -c 'uv run python -m app.cli sync --brand Audi --mode fresh --period 1d --page-size 100 --max-pages 3 --max-items 200'
+```
+
+Пересчитать статистику после загрузки:
+
+```bash
+docker compose run --rm api uv run python -m app.cli rebuild-stats
+```
+
+Посмотреть последние runs и счетчики напрямую в PostgreSQL:
+
+```bash
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select id, mode, processed_count, new_count, updated_count, skipped_count, error_count, status from parser_runs order by id desc limit 5;"'
+```
+
+Проверить количество объявлений:
+
+```bash
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select count(*) from listings;"'
+```
 
 ### Первичное заполнение одной марки
 
@@ -70,6 +112,8 @@ uv run python -m app.cli sync \
 ```
 
 Сначала безопаснее проверить на 2 страницах и 200 карточках, затем увеличить лимиты.
+
+Повторный запуск этой же команды не пропускает уже просмотренные страницы. Ручной `sync` каждый раз начинает с `page=1`; дубли не создаются, потому что объявление ищется по `source_id + external_id`. Если карточка не изменилась, она останется текущей; если цена или данные изменились, обновится `listings` и добавится история.
 
 Полная сверка выбранной марки. Деактивация сработает только если обход действительно дошел до конца, а не остановился по лимиту страниц/карточек:
 
@@ -137,10 +181,71 @@ uv run python -m app.cli targets
 Параметры означают:
 
 - `period` - окно новых объявлений, например `1d` или `2d`.
+- `page-size` - сколько карточек просить у API на одной странице.
 - `max-pages` - жесткий лимит страниц за запуск.
 - `max-items` - жесткий лимит обработанных карточек.
 - `interval` - минимальный промежуток между автоматическими запусками конкретного правила.
 - `priority` - меньше число, выше приоритет.
+
+Docker-вариант той же команды:
+
+```bash
+docker compose run --rm api uv run python -m app.cli add-target \
+  --brand BMW \
+  --period 1d \
+  --page-size 100 \
+  --max-pages 5 \
+  --max-items 500 \
+  --interval 60 \
+  --priority 10
+```
+
+После этого `worker` будет запускать rule автоматически, когда пройдет `interval`:
+
+```bash
+docker compose up -d worker
+```
+
+## Нормализация каталога
+
+Парсер сохраняет исходные значения `source_model_text` и `source_generation_text` отдельно от канонических справочников. Поколение не обязательно: объявление с известной моделью без поколения остается пригодным для аналитики.
+
+Поддерживаются форматы Mashina: римские обозначения (`V`, `VIII (XV70)`), коды в скобках (`(G05)`), периоды выпуска (`2016-2026`, `2016-н.в.`), а также `Рестайлинг` и вариант написания `Рейстайлинг`. Они приводятся к единому виду: `Рейстайлинг (V)` становится `V Рестайлинг`. Период выпуска не ошибочно принимается за год конкретного автомобиля.
+
+Неизвестная модель не создается автоматически в `car_models`. Она сохраняется с `normalization_status=unknown_model` и появляется в очереди:
+
+```bash
+uv run python -m app.cli catalog-issues --brand Toyota
+```
+
+Добавить ручное соответствие, затем применить его к уже собранным объявлениям без повторного скачивания:
+
+```bash
+uv run python -m app.cli add-model-alias \
+  --brand Toyota \
+  --model "Mark II" \
+  --alias "Mark 2"
+
+uv run python -m app.cli add-generation-alias \
+  --brand Toyota \
+  --model "Mark II" \
+  --generation "IV" \
+  --alias "4 поколения"
+
+uv run python -m app.cli reprocess-catalog
+uv run python -m app.cli rebuild-stats
+```
+
+Docker-вариант:
+
+```bash
+docker compose run --rm api uv run python -m app.cli catalog-issues --brand Toyota
+docker compose run --rm api uv run python -m app.cli add-model-alias --brand Toyota --model "Mark II" --alias "Mark 2"
+docker compose run --rm api uv run python -m app.cli reprocess-catalog
+docker compose run --rm api uv run python -m app.cli rebuild-stats
+```
+
+После обновления старого развертывания достаточно выполнить `docker compose up --build -d`. `init-db` идемпотентно добавит новые поля `listings`; новые таблицы справочника создаст SQLAlchemy. Позже этот механизм стоит заменить миграциями Alembic.
 
 ## API аналитики
 
@@ -177,6 +282,12 @@ created_period=1d + sort_by=created_at desc
 
 Назначение: ловить новые объявления с перекрытием в 1-2 дня, чтобы не потерять карточки после сетевой ошибки.
 
+В fresh-режиме параметр `period` передается во внешний API как `created_period`. Для ручного запуска:
+
+```bash
+uv run python -m app.cli sync --brand BMW --mode fresh --period 1d --page-size 100 --max-pages 5 --max-items 500
+```
+
 ### Full scan
 
 Раз в 2-7 дней:
@@ -188,6 +299,21 @@ created_period=1d + sort_by=created_at desc
 Назначение: заметить изменения цены, пробега, статуса и исчезнувшие объявления.
 
 Карточка становится `inactive`, только когда отсутствует в нескольких **полных** проверках. Один неудачный запрос ее не деактивирует.
+
+Важно: деактивация выполняется только если full scan считается завершенным, то есть API вернул пустую или неполную страницу. Если запуск остановился по `max-pages` или `max-items`, это лимитированный обход; он обновит найденные объявления, но не будет деактивировать отсутствующие.
+
+## Как работает один запуск sync
+
+1. Создается запись в `parser_runs` со статусом `running`.
+2. Парсер запрашивает страницы с `page=1` до `max-pages`.
+3. На каждой странице запрашивается `page-size` карточек.
+4. После HTTP-запроса Mashina parser делает паузу `REQUEST_DELAY_SECONDS`.
+5. Каждая карточка нормализуется и сохраняется по ключу `source_id + external_id`.
+6. Новая карточка получает событие `new`; измененная карточка получает `updated`, `price_changed` или `reactivated`.
+7. В `raw_payloads` сохраняется очищенный JSON только для новых или измененных карточек.
+8. В конце run получает `completed` или `failed`.
+
+`max-items` ограничивает именно обработанные карточки. Например, `--page-size 100 --max-pages 5 --max-items 500` означает максимум 5 HTTP-страниц и максимум 500 сохраненных/обновленных карточек.
 
 ## Как заменить парсер
 
@@ -228,7 +354,7 @@ class NewSourceParser(ParserAdapter):
 
 ## Что улучшить после MVP
 
-1. Перейти с `create_all()` на Alembic, когда схема начнет меняться.
+1. Перейти с временного идемпотентного upgrade-кода на Alembic до следующего заметного изменения схемы.
 2. Подтвердить реальные API-параметры фильтра модели в DevTools -> Network.
 3. Заменить разбор `title` на официальный атрибут модели/поколения, если API его отдает.
 4. Добавить Redis-кэш для публичных аналитических endpoint-ов.

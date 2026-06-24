@@ -20,7 +20,7 @@ from app.models import (
     SyncTarget,
 )
 from app.parsers.base import ParserAdapter
-from app.services.lookup import get_or_create_brand, get_or_create_generation, get_or_create_model
+from app.services.catalog_service import resolve_normalized_listing
 from app.services.normalizer import NormalizedListing, normalize_mashina_listing
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,13 @@ def utcnow() -> datetime:
 def _set_current_fields(listing: Listing, item: NormalizedListing) -> None:
     listing.title = item.title
     listing.source_slug = item.slug
+    listing.source_make_text = item.source_make_text
+    listing.source_model_text = item.source_model_text
+    listing.source_generation_text = item.source_generation_text
+    listing.normalization_status = item.normalization_status
+    listing.normalization_confidence = item.normalization_confidence
+    listing.quality_flags = item.quality_flags
+    listing.analytics_eligible = item.analytics_eligible
     listing.year = item.year
     listing.mileage_km = item.mileage_km
     listing.body_type = item.body_type
@@ -133,9 +140,10 @@ def _apply_listing(
         select(Listing).where(Listing.source_id == source.id, Listing.external_id == item.external_id)
     )
 
-    brand = get_or_create_brand(session, item.make)
-    car_model = get_or_create_model(session, brand, item.model)
-    generation = get_or_create_generation(session, car_model, item.generation)
+    resolution = resolve_normalized_listing(session, item)
+    brand = resolution.brand
+    car_model = resolution.car_model
+    generation = resolution.generation
 
     if listing is None:
         listing = Listing(
@@ -165,9 +173,9 @@ def _apply_listing(
     was_active = listing.is_active
     changed = listing.payload_hash != item.payload_hash
 
-    listing.brand_id = brand.id if brand else listing.brand_id
-    listing.car_model_id = car_model.id if car_model else listing.car_model_id
-    listing.generation_id = generation.id if generation else listing.generation_id
+    listing.brand_id = brand.id if brand else None
+    listing.car_model_id = car_model.id if car_model else None
+    listing.generation_id = generation.id if generation else None
     old_status = listing.status
     _set_current_fields(listing, item)
     listing.is_active = item.status == "active"
@@ -244,6 +252,7 @@ def run_sync(
     page_size_override: int | None = None,
     max_pages_override: int | None = None,
     max_items_override: int | None = None,
+    start_page_override: int | None = None,
 ) -> RunSummary:
     if mode not in {"fresh", "full"}:
         raise ValueError("mode must be fresh or full")
@@ -257,11 +266,14 @@ def run_sync(
     page_size = page_size_override or target.page_size
     max_pages = max_pages_override or target.max_pages
     max_items = max_items_override or target.max_items
+    start_page = start_page_override or 1
+    if start_page < 1:
+        raise ValueError("start_page must be greater than or equal to 1")
     seen_external_ids: set[str] = set()
     complete_scan = False
 
     try:
-        for page in range(1, max_pages + 1):
+        for page in range(start_page, start_page + max_pages):
             fetched = parser.fetch_listings(
                 brand=target.brand_filter,
                 model=target.model_filter,

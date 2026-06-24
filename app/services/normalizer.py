@@ -8,7 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from app.services.catalog import find_model
+from app.services.catalog import parse_vehicle_part, split_listing_year_suffix
 
 
 @dataclass(slots=True)
@@ -19,6 +19,13 @@ class NormalizedListing:
     make: str | None
     model: str | None
     generation: str | None
+    source_make_text: str | None
+    source_model_text: str | None
+    source_generation_text: str | None
+    normalization_status: str
+    normalization_confidence: str
+    quality_flags: list[str]
+    analytics_eligible: bool
     year: int | None
     mileage_km: int | None
     body_type: str | None
@@ -52,6 +59,17 @@ class NormalizedListing:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class ParsedTitle:
+    make: str | None
+    source_make_text: str | None
+    source_model_text: str | None
+    source_generation_text: str | None
+    suggested_model: str | None
+    suggested_generation: str | None
+    year: int | None
+
+
 def _parse_datetime(value: Any) -> datetime | None:
     if not value or not isinstance(value, str):
         return None
@@ -66,7 +84,7 @@ def _as_decimal(value: Any) -> Decimal | None:
         return None
     try:
         return Decimal(str(value))
-    except Exception:
+    except (ArithmeticError, TypeError, ValueError):
         return None
 
 
@@ -94,42 +112,46 @@ def _attributes_by_slug(raw: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _parse_title(
-    title: str | None,
-    fallback_make: str | None = None,
-) -> tuple[str | None, str | None, str | None, int | None]:
-    """Extract vehicle data from flexible listing-title formats.
-
-    The API filter already tells us the requested brand. When a title is non-standard,
-    use that brand as a safe fallback rather than discarding the whole listing.
-    """
+def _parse_title(title: str | None, fallback_make: str | None = None) -> ParsedTitle:
+    """Extract source fields only. Canonical DB resolution happens later in catalog_service."""
     if not title:
-        return fallback_make, None, None, None
+        return ParsedTitle(fallback_make, fallback_make, None, None, None, None, None)
 
     clean = " ".join(title.split())
     clean = re.sub(r"^(?:Продажа|Продам|Продаю)\s+", "", clean, flags=re.IGNORECASE)
 
     make = fallback_make
+    source_make_text = fallback_make
     vehicle = clean
 
     if fallback_make:
-        brand_match = re.search(rf"(?<!\w){re.escape(fallback_make)}(?!\w)", clean, flags=re.IGNORECASE)
+        brand_match = re.search(
+            rf"(?<!\w){re.escape(fallback_make)}(?!\w)",
+            clean,
+            flags=re.IGNORECASE,
+        )
         if brand_match:
+            source_make_text = clean[brand_match.start() : brand_match.end()]
             vehicle = clean[brand_match.end() :].strip(" -:|")
     else:
         parts = clean.split(maxsplit=1)
         if parts:
             make = parts[0]
+            source_make_text = parts[0]
             vehicle = parts[1] if len(parts) > 1 else ""
 
-    # Prefer the last 4-digit year in the title. Attribute `year` still has priority.
-    year_matches = list(re.finditer(r"(?<!\d)((?:19|20)\d{2})(?!\d)", vehicle))
-    year = int(year_matches[-1].group(1)) if year_matches else None
-    if year_matches:
-        vehicle = vehicle[: year_matches[-1].start()].strip(" -:|,")
+    vehicle, parsed_year = split_listing_year_suffix(vehicle)
 
-    model, generation = find_model(make, vehicle) if make and vehicle else (None, None)
-    return make, model, generation, year
+    parts = parse_vehicle_part(make, vehicle) if make and vehicle else None
+    return ParsedTitle(
+        make=make,
+        source_make_text=source_make_text,
+        source_model_text=parts.source_model_text if parts else None,
+        source_generation_text=parts.source_generation_text if parts else None,
+        suggested_model=parts.suggested_model if parts else None,
+        suggested_generation=parts.suggested_generation if parts else None,
+        year=parsed_year,
+    )
 
 
 def _customs_status(attributes: dict[str, Any]) -> str:
@@ -143,6 +165,19 @@ def _customs_status(attributes: dict[str, Any]) -> str:
         if any(word in text for word in ("растамож", "cleared")):
             return "cleared"
     return "unknown"
+
+
+def _quality_flags(*, year: int | None, parsed_year: int | None, mileage_km: int | None) -> list[str]:
+    flags: list[str] = []
+    if year and parsed_year and year != parsed_year:
+        flags.append("year_title_conflict")
+    if mileage_km is not None:
+        if mileage_km > 2_500_000:
+            flags.append("mileage_implausibly_high")
+        current_year = datetime.now().year
+        if year and current_year - year >= 6 and 0 <= mileage_km <= 1_000:
+            flags.append("mileage_unusually_low")
+    return flags
 
 
 def _safe_payload(raw: dict[str, Any]) -> dict[str, Any]:
@@ -177,10 +212,7 @@ def normalize_mashina_listing(
     fallback_make: str | None = None,
 ) -> NormalizedListing:
     attrs = _attributes_by_slug(raw)
-    parsed_make, parsed_model, parsed_generation, parsed_year = _parse_title(
-        raw.get("title"),
-        fallback_make=fallback_make,
-    )
+    parsed = _parse_title(raw.get("title"), fallback_make=fallback_make)
 
     original_price = next((price for price in raw.get("prices", []) if price.get("is_original")), None)
     kgs_price = next((price for price in raw.get("prices", []) if price.get("currency") == "KGS"), None)
@@ -189,16 +221,26 @@ def normalize_mashina_listing(
     dealer = raw.get("dealer") or {}
     user = raw.get("user") or {}
     seller_type = "dealer" if dealer else "private"
+    year = _as_int(attrs.get("year")) or parsed.year
+    mileage_km = _as_int(attrs.get("mileage"))
+    flags = _quality_flags(year=year, parsed_year=parsed.year, mileage_km=mileage_km)
 
     return NormalizedListing(
         external_id=str(raw["id"]),
         title=raw.get("title"),
         slug=raw.get("slug"),
-        make=parsed_make,
-        model=parsed_model,
-        generation=parsed_generation,
-        year=_as_int(attrs.get("year")) or parsed_year,
-        mileage_km=_as_int(attrs.get("mileage")),
+        make=parsed.make,
+        model=parsed.suggested_model,
+        generation=parsed.suggested_generation,
+        source_make_text=parsed.source_make_text,
+        source_model_text=parsed.source_model_text,
+        source_generation_text=parsed.source_generation_text,
+        normalization_status="pending_catalog_resolution",
+        normalization_confidence="pending",
+        quality_flags=flags,
+        analytics_eligible=False,
+        year=year,
+        mileage_km=mileage_km,
         body_type=attrs.get("body_type"),
         engine_volume=_as_decimal(attrs.get("engine_volume")),
         fuel_type=attrs.get("fuel_type"),

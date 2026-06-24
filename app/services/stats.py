@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 from statistics import median
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models import DailyMarketStat, Listing
@@ -27,9 +27,13 @@ def mileage_bucket(mileage_km: int | None) -> str:
 
 def rebuild_daily_market_stats(session: Session, stat_date: date | None = None) -> int:
     stat_date = stat_date or date.today()
+    # Derived rows are rebuilt from scratch so old model aliases cannot leave stale statistics.
+    session.execute(delete(DailyMarketStat).where(DailyMarketStat.stat_date == stat_date))
+    session.flush()
     listings = session.scalars(
         select(Listing).where(
             Listing.is_active.is_(True),
+            Listing.analytics_eligible.is_(True),
             Listing.current_price_usd.is_not(None),
             Listing.brand_id.is_not(None),
             Listing.car_model_id.is_not(None),

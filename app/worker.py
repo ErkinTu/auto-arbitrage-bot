@@ -5,6 +5,7 @@ import time
 
 from app.db.session import SessionLocal, init_db
 from app.parsers.mashina import MashinaParser
+from app.services.catalog_service import seed_default_catalog
 from app.services.lookup import get_or_create_source
 from app.services.sync import iter_due_targets, run_sync
 from app.core.config import get_settings
@@ -18,6 +19,7 @@ def run_once() -> int:
     init_db()
     with SessionLocal() as session:
         source = get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
+        seed_default_catalog(session)
         session.commit()
         parser = MashinaParser()
         completed = 0

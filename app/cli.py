@@ -8,8 +8,14 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
-from app.models import Source, SyncTarget
+from app.models import Brand, NormalizationIssue, Source, SyncTarget
 from app.parsers.mashina import MashinaParser
+from app.services.catalog_service import (
+    add_generation_alias,
+    add_model_alias,
+    reprocess_catalog,
+    seed_default_catalog,
+)
 from app.services.lookup import get_or_create_source
 from app.services.stats import rebuild_daily_market_stats
 from app.services.sync import run_sync
@@ -23,6 +29,7 @@ def ensure_seed_data() -> None:
     settings = get_settings()
     with SessionLocal() as session:
         source = get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
+        seed_default_catalog(session)
         for priority, brand in enumerate(settings.allowed_brand_list, start=1):
             target = session.scalar(
                 select(SyncTarget).where(
@@ -123,6 +130,8 @@ def command_sync(args: argparse.Namespace) -> None:
         source = session.scalar(select(Source).where(Source.name == "mashina.kg"))
         if source is None:
             raise SystemExit("Run init-db and seed first.")
+        seed_default_catalog(session)
+        session.commit()
         target = find_or_create_target(session, source, args)
         parser = MashinaParser()
         try:
@@ -136,6 +145,7 @@ def command_sync(args: argparse.Namespace) -> None:
                 page_size_override=args.page_size,
                 max_pages_override=args.max_pages,
                 max_items_override=args.max_items,
+                start_page_override=args.start_page,
             )
         finally:
             parser.close()
@@ -147,6 +157,8 @@ def command_sync_all(args: argparse.Namespace) -> None:
         source = session.scalar(select(Source).where(Source.name == "mashina.kg"))
         if source is None:
             raise SystemExit("Run init-db and seed first.")
+        seed_default_catalog(session)
+        session.commit()
         targets = session.scalars(
             select(SyncTarget).where(SyncTarget.enabled.is_(True)).order_by(SyncTarget.priority)
         ).all()
@@ -163,6 +175,62 @@ def command_rebuild_stats(_: argparse.Namespace) -> None:
     with SessionLocal() as session:
         count = rebuild_daily_market_stats(session)
         print(f"Daily market statistic rows written: {count}")
+
+
+def command_catalog_issues(args: argparse.Namespace) -> None:
+    with SessionLocal() as session:
+        query = (
+            select(NormalizationIssue, Brand.name)
+            .join(Brand, Brand.id == NormalizationIssue.brand_id)
+            .where(NormalizationIssue.status == args.status)
+            .order_by(NormalizationIssue.occurrence_count.desc(), NormalizationIssue.id)
+        )
+        if args.brand:
+            query = query.where(Brand.name == args.brand)
+        rows = session.execute(query.limit(args.limit)).all()
+        if not rows:
+            print("No normalization issues found.")
+            return
+        for issue, brand_name in rows:
+            print(
+                f"#{issue.id} {brand_name} | {issue.source_model_text!r} | "
+                f"count={issue.occurrence_count} status={issue.status}"
+            )
+
+
+def command_add_model_alias(args: argparse.Namespace) -> None:
+    with SessionLocal() as session:
+        alias = add_model_alias(
+            session,
+            brand_name=args.brand,
+            canonical_model_name=args.model,
+            alias=args.alias,
+        )
+        session.commit()
+        print(f"Model alias #{alias.id} saved: {args.brand} {args.alias!r} -> {args.model!r}")
+
+
+def command_add_generation_alias(args: argparse.Namespace) -> None:
+    with SessionLocal() as session:
+        alias = add_generation_alias(
+            session,
+            brand_name=args.brand,
+            canonical_model_name=args.model,
+            canonical_generation_name=args.generation,
+            alias=args.alias,
+        )
+        session.commit()
+        print(
+            f"Generation alias #{alias.id} saved: "
+            f"{args.brand} {args.model} {args.alias!r} -> {args.generation!r}"
+        )
+
+
+def command_reprocess_catalog(_: argparse.Namespace) -> None:
+    with SessionLocal() as session:
+        result = reprocess_catalog(session)
+        session.commit()
+        print(result)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -194,11 +262,38 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--page-size", type=int)
     sync.add_argument("--max-pages", type=int)
     sync.add_argument("--max-items", type=int)
+    sync.add_argument("--start-page", type=int, default=1)
     sync.set_defaults(func=command_sync)
 
     sync_all = sub.add_parser("sync-all", help="Run all enabled persistent targets")
     sync_all.add_argument("--mode", choices=["fresh", "full"], default="fresh")
     sync_all.set_defaults(func=command_sync_all)
+
+    issues = sub.add_parser("catalog-issues", help="List unknown source models waiting for an alias")
+    issues.add_argument("--brand")
+    issues.add_argument("--status", default="open", choices=["open", "resolved", "ignored"])
+    issues.add_argument("--limit", type=int, default=100)
+    issues.set_defaults(func=command_catalog_issues)
+
+    model_alias = sub.add_parser("add-model-alias", help="Map a source model spelling to a canonical model")
+    model_alias.add_argument("--brand", required=True)
+    model_alias.add_argument("--model", required=True, help="Canonical model name")
+    model_alias.add_argument("--alias", required=True, help="Source spelling from a title")
+    model_alias.set_defaults(func=command_add_model_alias)
+
+    generation_alias = sub.add_parser(
+        "add-generation-alias", help="Map a source generation spelling to a canonical generation"
+    )
+    generation_alias.add_argument("--brand", required=True)
+    generation_alias.add_argument("--model", required=True, help="Canonical model name")
+    generation_alias.add_argument("--generation", required=True, help="Canonical generation name")
+    generation_alias.add_argument("--alias", required=True, help="Source spelling from a title")
+    generation_alias.set_defaults(func=command_add_generation_alias)
+
+    reprocess = sub.add_parser(
+        "reprocess-catalog", help="Apply current aliases to already saved listings without downloading again"
+    )
+    reprocess.set_defaults(func=command_reprocess_catalog)
     return main
 
 

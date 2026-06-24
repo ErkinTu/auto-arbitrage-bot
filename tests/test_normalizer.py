@@ -1,4 +1,22 @@
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.db.base import Base
+from app.models import CarModel, NormalizationIssue
+from app.services.catalog_service import resolve_normalized_listing, seed_default_catalog
 from app.services.normalizer import normalize_mashina_listing
+
+
+def _session() -> Session:
+    # Import every ORM class before metadata creation.
+    import app.models  # noqa: F401
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    seed_default_catalog(session)
+    session.commit()
+    return session
 
 
 def test_normalize_audi_q5() -> None:
@@ -27,6 +45,8 @@ def test_normalize_audi_q5() -> None:
     assert result.make == "Audi"
     assert result.model == "Q5"
     assert result.generation == "II (FY)"
+    assert result.source_model_text == "Q5"
+    assert result.source_generation_text == "II (FY)"
     assert result.year == 2019
     assert result.mileage_km == 119000
     assert result.price_usd == 21000
@@ -35,8 +55,6 @@ def test_normalize_audi_q5() -> None:
 
 
 def test_normalizer_uses_filtered_brand_when_title_is_nonstandard() -> None:
-    from app.services.normalizer import normalize_mashina_listing
-
     item = normalize_mashina_listing(
         {
             "id": 42,
@@ -51,3 +69,198 @@ def test_normalizer_uses_filtered_brand_when_title_is_nonstandard() -> None:
     assert item.make == "BMW"
     assert item.year == 2020
     assert item.model == "X5"
+    assert item.source_model_text == "X5"
+    assert item.source_generation_text == "G05"
+
+
+def test_bmw_plural_series_alias_resolves_to_canonical_model() -> None:
+    session = _session()
+    item = normalize_mashina_listing(
+        {
+            "id": 43,
+            "title": "BMW 5 серии VII (G30/G31) Рестайлинг 2022",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 30000}],
+            "attributes": [{"slug": "year", "value_number": 2022}],
+        },
+        fallback_make="BMW",
+    )
+
+    resolution = resolve_normalized_listing(session, item)
+
+    assert item.source_model_text == "5 серии"
+    assert item.model == "5 Series"
+    assert item.generation == "VII (G30/G31) Рестайлинг"
+    assert resolution.status == "resolved"
+    assert item.analytics_eligible is True
+
+
+def test_toyota_mark_2_with_numeric_generation_is_canonicalized() -> None:
+    session = _session()
+    item = normalize_mashina_listing(
+        {
+            "id": 44,
+            "title": "Toyota Mark 2 4 поколения 1996",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 5000}],
+            "attributes": [{"slug": "year", "value_number": 1996}],
+        },
+        fallback_make="Toyota",
+    )
+
+    resolution = resolve_normalized_listing(session, item)
+
+    assert item.source_model_text == "Mark 2"
+    assert item.source_generation_text == "4 поколения"
+    assert item.model == "Mark II"
+    assert item.generation == "IV"
+    assert resolution.status == "resolved"
+
+
+def test_model_without_generation_is_valid_for_analytics() -> None:
+    session = _session()
+    item = normalize_mashina_listing(
+        {
+            "id": 45,
+            "title": "Toyota Aygo X 2024",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 16000}],
+            "attributes": [{"slug": "year", "value_number": 2024}],
+        },
+        fallback_make="Toyota",
+    )
+
+    resolution = resolve_normalized_listing(session, item)
+
+    assert item.model == "Aygo X"
+    assert item.generation is None
+    assert resolution.status == "resolved_model_only"
+    assert item.analytics_eligible is True
+
+
+def test_unknown_model_is_saved_as_issue_without_polluting_catalog() -> None:
+    session = _session()
+    item = normalize_mashina_listing(
+        {
+            "id": 46,
+            "title": "Toyota Fictional Wagon II 2020",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 12000}],
+            "attributes": [{"slug": "year", "value_number": 2020}],
+        },
+        fallback_make="Toyota",
+    )
+
+    resolution = resolve_normalized_listing(session, item)
+    session.flush()
+
+    assert item.source_model_text == "Fictional Wagon"
+    assert item.model is None
+    assert resolution.status == "unknown_model"
+    assert item.analytics_eligible is False
+    assert session.scalar(select(CarModel).where(CarModel.name == "Fictional Wagon")) is None
+    issue = session.scalar(select(NormalizationIssue).where(NormalizationIssue.source_model_text == "Fictional Wagon"))
+    assert issue is not None
+    assert issue.status == "open"
+
+
+def test_implausible_mileage_is_kept_but_not_analytics_eligible() -> None:
+    session = _session()
+    item = normalize_mashina_listing(
+        {
+            "id": 47,
+            "title": "Toyota Yaris I 2001",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 3500}],
+            "attributes": [
+                {"slug": "year", "value_number": 2001},
+                {"slug": "mileage", "value_number": 4_320_000},
+            ],
+        },
+        fallback_make="Toyota",
+    )
+
+    resolve_normalized_listing(session, item)
+
+    assert "mileage_implausibly_high" in item.quality_flags
+    assert item.model == "Yaris"
+    assert item.analytics_eligible is False
+
+
+def test_generation_period_is_preserved_and_not_treated_as_listing_year() -> None:
+    item = normalize_mashina_listing(
+        {
+            "id": 48,
+            "title": "Toyota Aygo X 2016 - 2026",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 16000}],
+            "attributes": [{"slug": "year", "value_number": 2024}],
+        },
+        fallback_make="Toyota",
+    )
+
+    assert item.source_model_text == "Aygo X"
+    assert item.source_generation_text == "2016 - 2026"
+    assert item.generation == "2016-2026"
+    assert item.year == 2024
+    assert "year_title_conflict" not in item.quality_flags
+
+
+def test_generation_current_period_and_final_listing_year_are_parsed_separately() -> None:
+    item = normalize_mashina_listing(
+        {
+            "id": 49,
+            "title": "Toyota Aygo X (2016-н.в.) 2020",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 12000}],
+            "attributes": [{"slug": "mileage", "value_number": 40000}],
+        },
+        fallback_make="Toyota",
+    )
+
+    assert item.source_generation_text == "(2016-н.в.)"
+    assert item.generation == "2016-н.в."
+    assert item.year == 2020
+
+
+def test_generation_parenthesized_roman_and_restyling_typo_are_canonicalized() -> None:
+    session = _session()
+    item = normalize_mashina_listing(
+        {
+            "id": 50,
+            "title": "Toyota Camry Рейстайлинг (V) 2004",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 6500}],
+            "attributes": [{"slug": "year", "value_number": 2004}],
+        },
+        fallback_make="Toyota",
+    )
+
+    resolution = resolve_normalized_listing(session, item)
+
+    assert item.source_generation_text == "Рейстайлинг (V)"
+    assert item.generation == "V Рестайлинг"
+    assert resolution.status == "resolved"
+
+
+def test_generation_restyling_prefix_without_other_descriptor_is_kept() -> None:
+    item = normalize_mashina_listing(
+        {
+            "id": 51,
+            "title": "Toyota Camry Рестайлинг 2011",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 10000}],
+            "attributes": [{"slug": "year", "value_number": 2011}],
+        },
+        fallback_make="Toyota",
+    )
+
+    assert item.source_generation_text == "Рестайлинг"
+    assert item.generation == "Рестайлинг"
+
+
+def test_unknown_model_splits_parenthesized_generation() -> None:
+    item = normalize_mashina_listing(
+        {
+            "id": 52,
+            "title": "Toyota Fictional Wagon (V) Рестайлинг 2020",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 12000}],
+            "attributes": [{"slug": "year", "value_number": 2020}],
+        },
+        fallback_make="Toyota",
+    )
+
+    assert item.source_model_text == "Fictional Wagon"
+    assert item.source_generation_text == "(V) Рестайлинг"
+    assert item.generation == "V Рестайлинг"
