@@ -3,7 +3,37 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Brand, CarModel, Generation, Source
+from app.core.config import get_settings
+from app.models import Brand, CarModel, Generation, Source, SyncTarget
+
+
+def ensure_brand_targets(session: Session, source: Source, brands: list[str]) -> list[SyncTarget]:
+    """Brand-level sync_targets для перечисленных марок (создает отсутствующие)."""
+    settings = get_settings()
+    targets: list[SyncTarget] = []
+    for brand in brands:
+        target = session.scalar(
+            select(SyncTarget).where(
+                SyncTarget.source_id == source.id,
+                SyncTarget.brand_filter == brand,
+                SyncTarget.model_filter.is_(None),
+                SyncTarget.generation_filter.is_(None),
+            )
+        )
+        if target is None:
+            target = SyncTarget(
+                source_id=source.id,
+                brand_filter=brand,
+                fresh_period=settings.bot_fresh_period,
+                page_size=settings.default_page_size,
+                max_pages=settings.default_max_pages,
+                max_items=settings.default_max_items,
+                sync_interval_minutes=settings.default_sync_interval_minutes,
+            )
+            session.add(target)
+            session.commit()
+        targets.append(target)
+    return targets
 
 
 def get_or_create_source(session: Session, name: str, base_url: str) -> Source:

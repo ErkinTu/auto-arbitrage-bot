@@ -28,12 +28,23 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_access_chat_id: str = ""  # id закрытой группы/канала вида -100...; бот должен быть админом
-    bot_fresh_interval_minutes: int = 25
+    bot_fresh_interval_minutes: int = 20
     bot_fresh_period: str = "1d"
     bot_new_lookback_minutes: int = 60
     bot_below_avg_factor: float = 0.95
     bot_below_avg_min_samples: int = 5
     bot_access_cache_ttl_seconds: int = 600
+
+    scheduler_timezone: str = "Asia/Bishkek"
+    bot_active_start_hour: int = 8  # fresh-циклы бота только в окне [start, end)
+    bot_active_end_hour: int = 24  # 24 = до полуночи
+    full_scan_hour: int = 2  # полная сверка по выходным не раньше этого часа
+    full_scan_brand_pause_seconds: int = 60
+    full_scan_page_size: int = 100
+    full_scan_max_pages: int = 100
+    full_scan_max_items: int = 10000
+    stats_rebuild_start_hour: int = 9  # пересчет статистики: 9:00, 17:00, 01:00
+    stats_rebuild_interval_hours: int = 8
 
     @property
     def allowed_brand_list(self) -> list[str]:

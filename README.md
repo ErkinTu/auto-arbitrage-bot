@@ -68,7 +68,7 @@ curl http://localhost:8000/health
 docker compose run --rm api uv run python -m app.cli targets
 ```
 
-`api` при старте сам выполняет `init-db` и `seed`, затем запускает FastAPI. `worker` при старте тоже выполняет `init-db` и `seed`, затем регулярно запускает включенные `sync_targets`.
+`api` при старте сам выполняет `init-db` и `seed`, затем запускает FastAPI. `worker` при старте тоже выполняет `init-db` и `seed`, затем работает по расписанию: полная сверка каталога по выходным и пересчет статистики каждые 8 часов (детали в `SYNC_STRATEGY.md`). Ежедневные fresh-обновления делает сервис `bot`.
 
 ### Docker-сценарии запуска
 
