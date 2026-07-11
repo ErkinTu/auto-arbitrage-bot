@@ -57,7 +57,24 @@ class MashinaParser(ParserAdapter):
         response: httpx.Response | None = None
         attempts = max(1, self.settings.request_retry_attempts)
         for attempt in range(1, attempts + 1):
-            response = self.client.get(self.settings.mashina_api_url, params=params)
+            try:
+                response = self.client.get(self.settings.mashina_api_url, params=params)
+            except httpx.TransportError as exc:
+                # Connection drops / timeouts (flaky network) are transient.
+                if attempt == attempts:
+                    raise
+                wait_seconds = self.settings.request_retry_backoff_seconds * attempt
+                logger.warning(
+                    "mashina request error page=%s attempt=%s/%s: %r; retrying in %.1fs",
+                    page,
+                    attempt,
+                    attempts,
+                    exc,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+                continue
+
             if response.status_code < 400:
                 break
 
