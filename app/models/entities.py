@@ -314,7 +314,7 @@ class UserFilter(Base, TimestampMixin):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    brand_id: Mapped[int] = mapped_column(ForeignKey("brands.id"), nullable=False)
+    brand_id: Mapped[int | None] = mapped_column(ForeignKey("brands.id"))  # NULL = любая марка
     car_model_id: Mapped[int | None] = mapped_column(ForeignKey("car_models.id"))  # NULL = любая модель
     year_from: Mapped[int | None] = mapped_column(Integer)
     year_to: Mapped[int | None] = mapped_column(Integer)

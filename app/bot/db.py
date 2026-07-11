@@ -33,7 +33,7 @@ class ModelDTO:
 @dataclass(slots=True)
 class FilterDTO:
     id: int
-    brand_name: str
+    brand_name: str | None  # None = любая марка
     model_name: str | None
     year_from: int | None
     year_to: int | None
@@ -82,11 +82,11 @@ def list_models(brand_id: int) -> list[ModelDTO]:
 
 
 def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
-    brand = session.get(Brand, user_filter.brand_id)
+    brand = session.get(Brand, user_filter.brand_id) if user_filter.brand_id else None
     model = session.get(CarModel, user_filter.car_model_id) if user_filter.car_model_id else None
     return FilterDTO(
         id=user_filter.id,
-        brand_name=brand.name if brand else "?",
+        brand_name=brand.name if brand else None,
         model_name=model.name if model else None,
         year_from=user_filter.year_from,
         year_to=user_filter.year_to,
@@ -114,7 +114,7 @@ def list_filters(telegram_id: int) -> list[FilterDTO]:
 def create_filter(
     telegram_id: int,
     *,
-    brand_id: int,
+    brand_id: int | None,
     car_model_id: int | None,
     year_from: int | None,
     year_to: int | None,

@@ -33,6 +33,8 @@ def _upgrade_postgres_schema() -> None:
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS analytics_eligible BOOLEAN NOT NULL DEFAULT FALSE",
         "CREATE INDEX IF NOT EXISTS ix_listing_normalization_status ON listings (normalization_status)",
         "CREATE INDEX IF NOT EXISTS ix_listing_analytics_eligible ON listings (analytics_eligible)",
+        # NULL brand_id в фильтре бота = "все марки".
+        "ALTER TABLE user_filters ALTER COLUMN brand_id DROP NOT NULL",
     )
     with engine.begin() as connection:
         for statement in statements:

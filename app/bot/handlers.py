@@ -58,6 +58,48 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Действие отменено. /add_filter — начать заново.")
 
 
+# --- /filters ---------------------------------------------------------------
+# Зарегистрирован раньше шагов визарда, чтобы команда работала и внутри него.
+
+
+def _filters_text(filters: list[db.FilterDTO]) -> str:
+    lines = ["📋 Ваши фильтры:\n"]
+    for index, item in enumerate(filters, start=1):
+        line = format_filter_line(
+            brand_name=item.brand_name,
+            model_name=item.model_name,
+            year_from=item.year_from,
+            year_to=item.year_to,
+            mileage_max_km=item.mileage_max_km,
+            price_max_usd=item.price_max_usd,
+            below_market_only=item.below_market_only,
+        )
+        lines.append(f"{index}. {line}")
+    return "\n".join(lines)
+
+
+@router.message(Command("filters"))
+async def cmd_filters(message: Message) -> None:
+    filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
+    if not filters:
+        await message.answer("У вас пока нет фильтров. Создайте первый: /add_filter")
+        return
+    await message.answer(_filters_text(filters), reply_markup=filters_kb(filters))
+
+
+@router.callback_query(FilterDeleteCB.filter())
+async def delete_filter_cb(query: CallbackQuery, callback_data: FilterDeleteCB) -> None:
+    deleted = await asyncio.to_thread(
+        db.delete_filter, query.from_user.id, callback_data.filter_id
+    )
+    await query.answer("Фильтр удален" if deleted else "Фильтр уже удален")
+    filters = await asyncio.to_thread(db.list_filters, query.from_user.id)
+    if not filters:
+        await query.message.edit_text("Фильтров не осталось. /add_filter — создать новый.")
+        return
+    await query.message.edit_text(_filters_text(filters), reply_markup=filters_kb(filters))
+
+
 # --- Визард /add_filter -----------------------------------------------------
 
 
@@ -76,6 +118,20 @@ async def cmd_add_filter(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(AddFilter.brand, BrandCB.filter())
 async def wizard_brand(query: CallbackQuery, callback_data: BrandCB, state: FSMContext) -> None:
+    # brand_id=0 - пункт "Все марки": фильтр без ограничения по марке и модели.
+    if callback_data.brand_id == 0:
+        await state.update_data(
+            brand_id=None, brand_name=None, car_model_id=None, model_name=None
+        )
+        await state.set_state(AddFilter.years)
+        await query.answer()
+        await query.message.edit_text(
+            "Выбрано: все марки.\n\n"
+            "Шаг 3/6. Укажите годы выпуска, например `2015-2020` или `2018`:",
+            reply_markup=skip_kb("years"),
+        )
+        return
+
     brands = await asyncio.to_thread(db.list_brands)
     brand = next((item for item in brands if item.id == callback_data.brand_id), None)
     if brand is None:
@@ -137,7 +193,7 @@ async def wizard_years_skip(query: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(AddFilter.years, F.text)
+@router.message(AddFilter.years, F.text, ~F.text.startswith("/"))
 async def wizard_years(message: Message, state: FSMContext) -> None:
     match = YEAR_RANGE_RE.match(message.text or "")
     if match is None:
@@ -176,7 +232,7 @@ async def wizard_mileage_skip(query: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(AddFilter.mileage, F.text)
+@router.message(AddFilter.mileage, F.text, ~F.text.startswith("/"))
 async def wizard_mileage(message: Message, state: FSMContext) -> None:
     value = _parse_positive_int(message.text or "")
     if value is None or value > MAX_MILEAGE_KM:
@@ -204,7 +260,7 @@ async def wizard_price_skip(query: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(AddFilter.price, F.text)
+@router.message(AddFilter.price, F.text, ~F.text.startswith("/"))
 async def wizard_price(message: Message, state: FSMContext) -> None:
     value = _parse_positive_int(message.text or "")
     if value is None or value > MAX_PRICE_USD:
@@ -253,42 +309,37 @@ async def wizard_below_avg(query: CallbackQuery, callback_data: BoolCB, state: F
     )
 
 
-# --- /filters ---------------------------------------------------------------
+# --- Fallback: неожиданный ввод внутри визарда ------------------------------
+# Зарегистрированы последними: срабатывают, только если шаг выше не подошел
+# (не тот тип сообщения, фото/стикер, неизвестная команда и т.п.).
 
 
-def _filters_text(filters: list[db.FilterDTO]) -> str:
-    lines = ["📋 Ваши фильтры:\n"]
-    for index, item in enumerate(filters, start=1):
-        line = format_filter_line(
-            brand_name=item.brand_name,
-            model_name=item.model_name,
-            year_from=item.year_from,
-            year_to=item.year_to,
-            mileage_max_km=item.mileage_max_km,
-            price_max_usd=item.price_max_usd,
-            below_market_only=item.below_market_only,
-        )
-        lines.append(f"{index}. {line}")
-    return "\n".join(lines)
+@router.message(AddFilter.brand)
+@router.message(AddFilter.model)
+@router.message(AddFilter.below_avg)
+async def wizard_expect_buttons(message: Message) -> None:
+    await message.answer("Пожалуйста, выберите вариант кнопкой в сообщении выше. Отмена: /cancel")
 
 
-@router.message(Command("filters"))
-async def cmd_filters(message: Message) -> None:
-    filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
-    if not filters:
-        await message.answer("У вас пока нет фильтров. Создайте первый: /add_filter")
-        return
-    await message.answer(_filters_text(filters), reply_markup=filters_kb(filters))
-
-
-@router.callback_query(FilterDeleteCB.filter())
-async def delete_filter_cb(query: CallbackQuery, callback_data: FilterDeleteCB) -> None:
-    deleted = await asyncio.to_thread(
-        db.delete_filter, query.from_user.id, callback_data.filter_id
+@router.message(AddFilter.years)
+async def wizard_years_fallback(message: Message) -> None:
+    await message.answer(
+        "Отправьте годы текстом, например `2015-2020`, или нажмите «Пропустить».",
+        reply_markup=skip_kb("years"),
     )
-    await query.answer("Фильтр удален" if deleted else "Фильтр уже удален")
-    filters = await asyncio.to_thread(db.list_filters, query.from_user.id)
-    if not filters:
-        await query.message.edit_text("Фильтров не осталось. /add_filter — создать новый.")
-        return
-    await query.message.edit_text(_filters_text(filters), reply_markup=filters_kb(filters))
+
+
+@router.message(AddFilter.mileage)
+async def wizard_mileage_fallback(message: Message) -> None:
+    await message.answer(
+        "Отправьте число в км, например `150000`, или нажмите «Пропустить».",
+        reply_markup=skip_kb("mileage"),
+    )
+
+
+@router.message(AddFilter.price)
+async def wizard_price_fallback(message: Message) -> None:
+    await message.answer(
+        "Отправьте число в долларах, например `20000`, или нажмите «Пропустить».",
+        reply_markup=skip_kb("price"),
+    )

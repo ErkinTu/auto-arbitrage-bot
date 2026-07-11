@@ -60,7 +60,7 @@ def format_notification(p: PendingNotification) -> str:
 
 def format_filter_line(
     *,
-    brand_name: str,
+    brand_name: str | None,
     model_name: str | None,
     year_from: int | None,
     year_to: int | None,
@@ -68,7 +68,10 @@ def format_filter_line(
     price_max_usd: float | None,
     below_market_only: bool,
 ) -> str:
-    parts = [f"{brand_name} {model_name}" if model_name else f"{brand_name} (все модели)"]
+    if brand_name is None:
+        parts = ["Все марки"]
+    else:
+        parts = [f"{brand_name} {model_name}" if model_name else f"{brand_name} (все модели)"]
     if year_from is not None or year_to is not None:
         parts.append(f"{year_from or '…'}–{year_to or '…'} г.")
     if mileage_max_km is not None:

@@ -184,6 +184,11 @@ def test_filter_matches_matrix() -> None:
     assert not filter_matches(unknown, f(year_from=2010))
     assert not filter_matches(unknown, f(mileage_max_km=300_000))
     assert not filter_matches(unknown, f(price_max_usd=Decimal("99999")))
+    # brand_id=None = любая марка; остальные ограничения продолжают работать.
+    any_brand = UserFilter(brand_id=None)
+    assert filter_matches(listing, any_brand)
+    assert filter_matches(Listing(brand_id=brand_id + 999), any_brand)
+    assert not filter_matches(listing, UserFilter(brand_id=None, year_from=2019))
 
 
 def test_is_below_market() -> None:
@@ -285,6 +290,46 @@ def test_match_below_market_only_filter() -> None:
     # Дорогое авто не проходит.
     _add_listing(session, external_id="3", price_usd=Decimal("11900"))
     assert match_new_listings(session, since, factor=0.95, min_samples=5) == []
+
+
+def test_match_all_brands_filter() -> None:
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    source_id, _, _ = _ids(session)
+
+    user = BotUser(telegram_id=77)
+    session.add(user)
+    session.flush()
+    session.add(UserFilter(user_id=user.id, brand_id=None))  # все марки
+    other_brand = Brand(name="Honda")
+    session.add(other_brand)
+    session.flush()
+    session.commit()
+
+    toyota = _add_listing(session, external_id="1")
+    honda = Listing(
+        source_id=source_id,
+        external_id="2",
+        brand_id=other_brand.id,
+        title="Honda Fit",
+        source_slug="honda-fit-2",
+        year=2020,
+        mileage_km=50_000,
+        current_price_usd=Decimal("9000"),
+        is_active=True,
+        payload_hash="y" * 8,
+    )
+    session.add(honda)
+    session.flush()
+    session.add(
+        ListingStatusHistory(
+            listing_id=honda.id, event_type="new", new_status="active", observed_at=_now()
+        )
+    )
+    session.commit()
+
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5)
+    assert {note.listing_id for note in pending} == {toyota.id, honda.id}
 
 
 def test_match_skips_blocked_and_revoked_users() -> None:

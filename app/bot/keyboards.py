@@ -32,6 +32,7 @@ class FilterDeleteCB(CallbackData, prefix="fdel"):
 
 def brands_kb(brands: list[BrandDTO]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    builder.button(text="🌐 Все марки", callback_data=BrandCB(brand_id=0))
     for brand in brands:
         builder.button(text=brand.name, callback_data=BrandCB(brand_id=brand.id))
     builder.adjust(2)

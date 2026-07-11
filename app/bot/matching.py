@@ -67,7 +67,7 @@ def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
     Если фильтр задает границу, а у объявления поле неизвестно, считаем не-матчем:
     push-уведомление по неполным данным хуже, чем тишина.
     """
-    if listing.brand_id != user_filter.brand_id:
+    if user_filter.brand_id is not None and listing.brand_id != user_filter.brand_id:
         return False
     if user_filter.car_model_id is not None and listing.car_model_id != user_filter.car_model_id:
         return False

@@ -77,6 +77,18 @@ def test_format_filter_line() -> None:
         )
         == "BMW (все модели)"
     )
+    assert (
+        format_filter_line(
+            brand_name=None,
+            model_name=None,
+            year_from=2015,
+            year_to=None,
+            mileage_max_km=None,
+            price_max_usd=15_000.0,
+            below_market_only=False,
+        )
+        == "Все марки · 2015–… г. · до $15 000"
+    )
 
 
 def test_send_notifications_delivers_all() -> None:
