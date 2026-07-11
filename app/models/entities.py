@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -290,3 +291,47 @@ class DailyMarketStat(Base):
     min_price_usd: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     max_price_usd: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class BotUser(Base, TimestampMixin):
+    __tablename__ = "bot_users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    username: Mapped[str | None] = mapped_column(String(64))
+    first_name: Mapped[str | None] = mapped_column(String(120))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    access_status: Mapped[str] = mapped_column(String(20), default="member", nullable=False)  # member | revoked | subscriber
+    subscription_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_access_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UserFilter(Base, TimestampMixin):
+    __tablename__ = "user_filters"
+    __table_args__ = (Index("ix_user_filter_enabled_brand", "enabled", "brand_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    brand_id: Mapped[int] = mapped_column(ForeignKey("brands.id"), nullable=False)
+    car_model_id: Mapped[int | None] = mapped_column(ForeignKey("car_models.id"))  # NULL = любая модель
+    year_from: Mapped[int | None] = mapped_column(Integer)
+    year_to: Mapped[int | None] = mapped_column(Integer)
+    mileage_max_km: Mapped[int | None] = mapped_column(Integer)
+    price_max_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    below_market_only: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class SentNotification(Base):
+    __tablename__ = "sent_notifications"
+    __table_args__ = (
+        UniqueConstraint("user_id", "listing_id", name="uq_sent_notification_user_listing"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), nullable=False)
+    filter_id: Mapped[int | None] = mapped_column(ForeignKey("user_filters.id", ondelete="SET NULL"))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

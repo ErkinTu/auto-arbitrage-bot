@@ -1,4 +1,5 @@
 from app.models.entities import (
+    BotUser,
     Brand,
     CarModel,
     DailyMarketStat,
@@ -11,11 +12,14 @@ from app.models.entities import (
     NormalizationIssue,
     ParserRun,
     RawPayload,
+    SentNotification,
     Source,
     SyncTarget,
+    UserFilter,
 )
 
 __all__ = [
+    "BotUser",
     "Brand",
     "CarModel",
     "DailyMarketStat",
@@ -28,6 +32,8 @@ __all__ = [
     "NormalizationIssue",
     "ParserRun",
     "RawPayload",
+    "SentNotification",
     "Source",
     "SyncTarget",
+    "UserFilter",
 ]

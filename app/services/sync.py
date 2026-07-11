@@ -253,6 +253,7 @@ def run_sync(
     max_pages_override: int | None = None,
     max_items_override: int | None = None,
     start_page_override: int | None = None,
+    update_target_bookkeeping: bool = True,
 ) -> RunSummary:
     if mode not in {"fresh", "full"}:
         raise ValueError("mode must be fresh or full")
@@ -347,11 +348,18 @@ def run_sync(
                 complete_scan = True
                 break
 
-        if mode == "full" and complete_scan:
+        # Deactivation is only safe after a full scan that started at page 1:
+        # a resumed partial scan (start_page > 1) never sees the whole catalog,
+        # so its seen-set would wrongly mark earlier pages as missing.
+        if mode == "full" and complete_scan and start_page == 1:
             run.deactivated_count = _deactivate_missing(session, source, target, seen_external_ids)
-            target.last_full_scan_at = utcnow()
+            if update_target_bookkeeping:
+                target.last_full_scan_at = utcnow()
 
-        target.last_success_at = utcnow()
+        # Bot-side light runs pass update_target_bookkeeping=False so they do not
+        # interfere with the worker's iter_due_targets scheduling.
+        if update_target_bookkeeping:
+            target.last_success_at = utcnow()
         run.status = "completed"
         run.finished_at = utcnow()
         session.commit()

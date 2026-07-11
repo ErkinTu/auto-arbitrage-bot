@@ -26,6 +26,15 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 
+    telegram_bot_token: str = ""
+    telegram_access_chat_id: str = ""  # id закрытой группы/канала вида -100...; бот должен быть админом
+    bot_fresh_interval_minutes: int = 25
+    bot_fresh_period: str = "1d"
+    bot_new_lookback_minutes: int = 60
+    bot_below_avg_factor: float = 0.95
+    bot_below_avg_min_samples: int = 5
+    bot_access_cache_ttl_seconds: int = 600
+
     @property
     def allowed_brand_list(self) -> list[str]:
         return [item.strip() for item in self.allowed_brands.split(",") if item.strip()]
