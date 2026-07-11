@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -8,6 +9,9 @@ import httpx
 
 from app.core.config import get_settings
 from app.parsers.base import FetchPage, ParserAdapter
+
+
+logger = logging.getLogger(__name__)
 
 
 class MashinaParser(ParserAdapter):
@@ -50,7 +54,29 @@ class MashinaParser(ParserAdapter):
         if created_period:
             params["created_period"] = created_period
 
-        response = self.client.get(self.settings.mashina_api_url, params=params)
+        response: httpx.Response | None = None
+        attempts = max(1, self.settings.request_retry_attempts)
+        for attempt in range(1, attempts + 1):
+            response = self.client.get(self.settings.mashina_api_url, params=params)
+            if response.status_code < 400:
+                break
+
+            retryable = response.status_code == 429 or response.status_code >= 500
+            if not retryable or attempt == attempts:
+                break
+
+            wait_seconds = self.settings.request_retry_backoff_seconds * attempt
+            logger.warning(
+                "mashina request failed status=%s page=%s attempt=%s/%s; retrying in %.1fs",
+                response.status_code,
+                page,
+                attempt,
+                attempts,
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+
+        assert response is not None
         response.raise_for_status()
         data = response.json()
         time.sleep(self.settings.request_delay_seconds)

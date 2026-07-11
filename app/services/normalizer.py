@@ -10,6 +10,11 @@ from typing import Any
 
 from app.services.catalog import parse_vehicle_part, split_listing_year_suffix
 
+# Mileage above this (km) is treated as implausible. Such values also overflow the
+# INTEGER mileage column (e.g. a bogus 2_394_664_666 km) and would abort the sync,
+# so the raw number is dropped after the quality flag is recorded.
+IMPLAUSIBLE_MILEAGE_KM = 2_500_000
+
 
 @dataclass(slots=True)
 class NormalizedListing:
@@ -172,7 +177,7 @@ def _quality_flags(*, year: int | None, parsed_year: int | None, mileage_km: int
     if year and parsed_year and year != parsed_year:
         flags.append("year_title_conflict")
     if mileage_km is not None:
-        if mileage_km > 2_500_000:
+        if mileage_km > IMPLAUSIBLE_MILEAGE_KM:
             flags.append("mileage_implausibly_high")
         current_year = datetime.now().year
         if year and current_year - year >= 6 and 0 <= mileage_km <= 1_000:
@@ -224,6 +229,10 @@ def normalize_mashina_listing(
     year = _as_int(attrs.get("year")) or parsed.year
     mileage_km = _as_int(attrs.get("mileage"))
     flags = _quality_flags(year=year, parsed_year=parsed.year, mileage_km=mileage_km)
+    if mileage_km is not None and mileage_km > IMPLAUSIBLE_MILEAGE_KM:
+        # Keep the quality flag but drop the bogus value so it neither pollutes
+        # analytics nor overflows the INTEGER column.
+        mileage_km = None
 
     return NormalizedListing(
         external_id=str(raw["id"]),

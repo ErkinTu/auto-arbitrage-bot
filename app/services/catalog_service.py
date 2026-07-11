@@ -159,6 +159,19 @@ def _record_unknown_model(session: Session, brand: Brand, source_model_text: str
         )
     )
     if issue is None:
+        # autoflush is disabled, so the SELECT above cannot see issues added
+        # earlier in this same batch. Reuse a pending one to avoid inserting a
+        # duplicate (brand_id, normalized_source_model) in a single flush.
+        for pending in session.new:
+            if (
+                isinstance(pending, NormalizationIssue)
+                and pending.brand_id == brand.id
+                and pending.normalized_source_model == normalized
+            ):
+                pending.occurrence_count += 1
+                pending.last_seen_at = utcnow()
+                return
+    if issue is None:
         issue = NormalizationIssue(
             brand_id=brand.id,
             source_model_text=source_model_text,

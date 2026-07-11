@@ -37,6 +37,30 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
+### Одноразовый запуск или постоянный контейнер
+
+`docker compose run --rm api ...` создает временный контейнер, выполняет команду и удаляет его. Это удобно для редких ручных команд, но каждый раз есть накладные расходы на старт.
+
+Для частой работы подними `api` один раз:
+
+```bash
+docker compose up -d postgres api
+```
+
+После этого запускай CLI внутри уже работающего контейнера:
+
+```bash
+docker compose exec api uv run python -m app.cli sync --brand BMW --mode full --page-size 100 --max-pages 5 --max-items 500
+docker compose exec api uv run python -m app.cli rebuild-stats
+docker compose exec api uv run python -m app.cli targets
+```
+
+Если нужен временный override, например delay 5 секунд, используй одноразовый запуск:
+
+```bash
+docker compose run --rm -e REQUEST_DELAY_SECONDS=5 api uv run python -m app.cli sync --brand BMW --mode full --page-size 100 --max-pages 5 --max-items 500
+```
+
 Проверка:
 
 ```bash
