@@ -5,7 +5,9 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # bind только на localhost хоста: наружу порт БД не публикуется.
+      # Для доступа в LAN/наружу осознанно задать POSTGRES_HOST=0.0.0.0 в .env.
+      - "${POSTGRES_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -25,7 +27,10 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      # bind только на localhost хоста: локально API доступен полностью
+      # (localhost:8000, /docs, Vite-прокси), а на сервере наружу не публикуется.
+      # Открыть наружу осознанно: API_HOST=0.0.0.0 в .env.
+      - "${API_HOST:-127.0.0.1}:8000:8000"
     command: >
       sh -c "uv run python -m app.cli init-db &&
              uv run python -m app.cli seed &&
