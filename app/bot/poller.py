@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 
 
 def run_cycle() -> list[PendingNotification]:
-    """Один цикл: 1 страница x 100 свежих объявлений на марку, затем матчинг.
+    """Один цикл: 1 страница x BOT_FRESH_PAGE_SIZE свежих объявлений на марку,
+    затем матчинг. Страница маленькая (20), а циклы частые — нагрузка на сайт
+    ниже, чем редкие тяжелые страницы.
 
     Пауза между запросами марок обеспечивается парсером: он спит
     REQUEST_DELAY_SECONDS после каждого HTTP-запроса.
@@ -48,9 +50,9 @@ def run_cycle() -> list[PendingNotification]:
                         target,
                         mode="fresh",
                         period_override=settings.bot_fresh_period,
-                        page_size_override=100,
+                        page_size_override=settings.bot_fresh_page_size,
                         max_pages_override=1,
-                        max_items_override=100,
+                        max_items_override=settings.bot_fresh_page_size,
                         update_target_bookkeeping=False,
                     )
                     logger.info(

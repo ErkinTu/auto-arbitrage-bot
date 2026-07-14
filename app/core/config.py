@@ -28,8 +28,9 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_access_chat_id: str = ""  # id закрытой группы/канала вида -100...; бот должен быть админом
-    bot_fresh_interval_minutes: int = 20
+    bot_fresh_interval_minutes: int = 10
     bot_fresh_period: str = "1d"
+    bot_fresh_page_size: int = 20  # объявлений на марку за цикл (1 страница)
     bot_new_lookback_minutes: int = 60
     bot_below_avg_factor: float = 0.95
     bot_below_avg_min_samples: int = 5
