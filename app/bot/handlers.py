@@ -73,6 +73,7 @@ def _filters_text(filters: list[db.FilterDTO]) -> str:
             mileage_max_km=item.mileage_max_km,
             price_max_usd=item.price_max_usd,
             below_market_only=item.below_market_only,
+            skip_foreign=item.skip_foreign,
         )
         lines.append(f"{index}. {line}")
     return "\n".join(lines)
@@ -113,7 +114,7 @@ async def cmd_add_filter(message: Message, state: FSMContext) -> None:
         )
         return
     await state.set_state(AddFilter.brand)
-    await message.answer("Шаг 1/6. Выберите марку:", reply_markup=brands_kb(brands))
+    await message.answer("Шаг 1/7. Выберите марку:", reply_markup=brands_kb(brands))
 
 
 @router.callback_query(AddFilter.brand, BrandCB.filter())
@@ -127,7 +128,7 @@ async def wizard_brand(query: CallbackQuery, callback_data: BrandCB, state: FSMC
         await query.answer()
         await query.message.edit_text(
             "Выбрано: все марки.\n\n"
-            "Шаг 3/6. Укажите годы выпуска, например `2015-2020` или `2018`:",
+            "Шаг 3/7. Укажите годы выпуска, например `2015-2020` или `2018`:",
             reply_markup=skip_kb("years"),
         )
         return
@@ -147,13 +148,13 @@ async def wizard_brand(query: CallbackQuery, callback_data: BrandCB, state: FSMC
         await state.set_state(AddFilter.years)
         await query.message.edit_text(
             f"Марка: {brand.name} (все модели).\n\n"
-            "Шаг 3/6. Укажите годы выпуска, например `2015-2020` или `2018`:",
+            "Шаг 3/7. Укажите годы выпуска, например `2015-2020` или `2018`:",
             reply_markup=skip_kb("years"),
         )
         return
     await state.set_state(AddFilter.model)
     await query.message.edit_text(
-        f"Марка: {brand.name}.\n\nШаг 2/6. Выберите модель:",
+        f"Марка: {brand.name}.\n\nШаг 2/7. Выберите модель:",
         reply_markup=models_kb(models),
     )
 
@@ -177,7 +178,7 @@ async def wizard_model(query: CallbackQuery, callback_data: ModelCB, state: FSMC
     chosen = f"{data['brand_name']} {model_name}" if model_name else f"{data['brand_name']} (все модели)"
     await query.message.edit_text(
         f"Выбрано: {chosen}.\n\n"
-        "Шаг 3/6. Укажите годы выпуска, например `2015-2020` или `2018`:",
+        "Шаг 3/7. Укажите годы выпуска, например `2015-2020` или `2018`:",
         reply_markup=skip_kb("years"),
     )
 
@@ -188,7 +189,7 @@ async def wizard_years_skip(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddFilter.mileage)
     await query.answer()
     await query.message.edit_text(
-        "Шаг 4/6. Максимальный пробег в км, например `150000`:",
+        "Шаг 4/7. Максимальный пробег в км, например `150000`:",
         reply_markup=skip_kb("mileage"),
     )
 
@@ -216,7 +217,7 @@ async def wizard_years(message: Message, state: FSMContext) -> None:
     await state.update_data(year_from=year_from, year_to=year_to)
     await state.set_state(AddFilter.mileage)
     await message.answer(
-        "Шаг 4/6. Максимальный пробег в км, например `150000`:",
+        "Шаг 4/7. Максимальный пробег в км, например `150000`:",
         reply_markup=skip_kb("mileage"),
     )
 
@@ -227,7 +228,7 @@ async def wizard_mileage_skip(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddFilter.price)
     await query.answer()
     await query.message.edit_text(
-        "Шаг 5/6. Максимальная цена в долларах, например `20000`:",
+        "Шаг 5/7. Максимальная цена в долларах, например `20000`:",
         reply_markup=skip_kb("price"),
     )
 
@@ -244,7 +245,7 @@ async def wizard_mileage(message: Message, state: FSMContext) -> None:
     await state.update_data(mileage_max_km=value)
     await state.set_state(AddFilter.price)
     await message.answer(
-        "Шаг 5/6. Максимальная цена в долларах, например `20000`:",
+        "Шаг 5/7. Максимальная цена в долларах, например `20000`:",
         reply_markup=skip_kb("price"),
     )
 
@@ -255,8 +256,8 @@ async def wizard_price_skip(query: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddFilter.below_avg)
     await query.answer()
     await query.message.edit_text(
-        "Шаг 6/6. Присылать только авто с ценой ниже средней по рынку?",
-        reply_markup=yes_no_kb(),
+        "Шаг 6/7. Присылать только авто с ценой ниже средней по рынку?",
+        reply_markup=yes_no_kb("below_avg"),
     )
 
 
@@ -272,13 +273,26 @@ async def wizard_price(message: Message, state: FSMContext) -> None:
     await state.update_data(price_max_usd=float(value))
     await state.set_state(AddFilter.below_avg)
     await message.answer(
-        "Шаг 6/6. Присылать только авто с ценой ниже средней по рынку?",
-        reply_markup=yes_no_kb(),
+        "Шаг 6/7. Присылать только авто с ценой ниже средней по рынку?",
+        reply_markup=yes_no_kb("below_avg"),
     )
 
 
-@router.callback_query(AddFilter.below_avg, BoolCB.filter())
+@router.callback_query(AddFilter.below_avg, BoolCB.filter(F.step == "below_avg"))
 async def wizard_below_avg(query: CallbackQuery, callback_data: BoolCB, state: FSMContext) -> None:
+    await state.update_data(below_market_only=callback_data.value)
+    await state.set_state(AddFilter.foreign)
+    await query.answer()
+    await query.message.edit_text(
+        "Шаг 7/7. Показывать зарубежные авто (Китай, Южная Корея, США и т.п.)?\n\n"
+        "⚠️ Их цены обычно указаны без растаможки и доставки, поэтому выглядят "
+        "заметно ниже рынка.",
+        reply_markup=yes_no_kb("foreign", yes="✅ Показывать", no="🚫 Пропускать"),
+    )
+
+
+@router.callback_query(AddFilter.foreign, BoolCB.filter(F.step == "foreign"))
+async def wizard_foreign(query: CallbackQuery, callback_data: BoolCB, state: FSMContext) -> None:
     data = await state.get_data()
     await state.clear()
     created = await asyncio.to_thread(
@@ -290,7 +304,8 @@ async def wizard_below_avg(query: CallbackQuery, callback_data: BoolCB, state: F
         year_to=data.get("year_to"),
         mileage_max_km=data.get("mileage_max_km"),
         price_max_usd=data.get("price_max_usd"),
-        below_market_only=callback_data.value,
+        below_market_only=data["below_market_only"],
+        skip_foreign=not callback_data.value,
     )
     await query.answer("Фильтр сохранен")
     summary = format_filter_line(
@@ -301,6 +316,7 @@ async def wizard_below_avg(query: CallbackQuery, callback_data: BoolCB, state: F
         mileage_max_km=created.mileage_max_km,
         price_max_usd=created.price_max_usd,
         below_market_only=created.below_market_only,
+        skip_foreign=created.skip_foreign,
     )
     await query.message.edit_text(
         f"✅ Фильтр создан:\n{summary}\n\n"
@@ -317,6 +333,7 @@ async def wizard_below_avg(query: CallbackQuery, callback_data: BoolCB, state: F
 @router.message(AddFilter.brand)
 @router.message(AddFilter.model)
 @router.message(AddFilter.below_avg)
+@router.message(AddFilter.foreign)
 async def wizard_expect_buttons(message: Message) -> None:
     await message.answer("Пожалуйста, выберите вариант кнопкой в сообщении выше. Отмена: /cancel")
 

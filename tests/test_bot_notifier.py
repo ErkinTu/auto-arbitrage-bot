@@ -41,7 +41,14 @@ def test_format_notification_full() -> None:
     assert "Год: 2019 · Пробег: 90 000 км" in text
     assert "Цена: <b>$10 200</b> · на 15% ниже средней" in text
     assert "Город: Бишкек" in text
+    assert "за рубежом" not in text
     assert '<a href="https://www.mashina.kg/details/toyota-camry-1/">' in text
+
+
+def test_format_notification_foreign_listing_warns_about_customs() -> None:
+    text = format_notification(_note(city="Китай"))
+    assert "Город: Китай" in text
+    assert "🌍 Авто за рубежом: цена без растаможки и доставки" in text
 
 
 def test_format_notification_missing_fields_and_escaping() -> None:
@@ -63,8 +70,11 @@ def test_format_filter_line() -> None:
         mileage_max_km=150_000,
         price_max_usd=25_000.0,
         below_market_only=True,
+        skip_foreign=True,
     )
-    assert line == "BMW X5 · 2015–2020 г. · до 150 000 км · до $25 000 · только ниже рынка"
+    assert line == (
+        "BMW X5 · 2015–2020 г. · до 150 000 км · до $25 000 · только ниже рынка · без зарубежных"
+    )
     assert (
         format_filter_line(
             brand_name="BMW",

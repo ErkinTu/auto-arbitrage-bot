@@ -8,3 +8,4 @@ class AddFilter(StatesGroup):
     mileage = State()
     price = State()
     below_avg = State()
+    foreign = State()

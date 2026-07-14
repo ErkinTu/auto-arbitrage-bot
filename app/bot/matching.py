@@ -23,6 +23,36 @@ from app.models import (
 from app.services.stats import mileage_bucket
 from app.services.vehicle_summary import _build_source_url as build_source_url
 
+# mashina.kg пишет для авто "на заказ" страну в поле города. Список — явный:
+# эвристики опасны (в КР есть село Люксембург). Пополнять по catalog-issues/логам.
+FOREIGN_LOCATIONS = frozenset(
+    {
+        "Китай",
+        "Южная Корея",
+        "США",
+        "Европа",
+        "Канада",
+        "ОАЭ",
+        "Германия",
+        "Казахстан",
+        "Япония",
+        "Россия",
+        "Грузия",
+        "Турция",
+        "Таджикистан",
+        "Узбекистан",
+        "Азербайджан",
+        "Армения",
+        "Беларусь",
+        "Украина",
+    }
+)
+
+
+def is_foreign(city: str | None) -> bool:
+    """Объявление из-за рубежа: в поле города источник записал страну."""
+    return city is not None and city.strip() in FOREIGN_LOCATIONS
+
 
 @dataclass(slots=True)
 class PendingNotification:
@@ -82,6 +112,10 @@ def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
     if user_filter.price_max_usd is not None and (
         listing.current_price_usd is None or listing.current_price_usd > user_filter.price_max_usd
     ):
+        return False
+    # skip_foreign отсекает только заведомо зарубежные: у местных цена уже "на руках",
+    # у зарубежных — без растаможки и доставки. Неизвестный город считаем местным.
+    if user_filter.skip_foreign and is_foreign(listing.city):
         return False
     return True
 

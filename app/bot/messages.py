@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import html
 
-from app.bot.matching import PendingNotification
+from app.bot.matching import PendingNotification, is_foreign
 
 START_TEXT = (
     "👋 Привет! Я слежу за новыми объявлениями на mashina.kg и присылаю те, "
     "что подходят под ваши фильтры.\n\n"
     "Команды:\n"
-    "/add_filter — создать фильтр (марка, модель, год, пробег, цена)\n"
+    "/add_filter — создать фильтр (марка, модель, год, пробег, цена, зарубежные авто)\n"
     "/filters — мои фильтры и их удаление\n"
     "/help — справка"
 )
@@ -18,12 +18,14 @@ START_TEXT = (
 HELP_TEXT = (
     "ℹ️ Как это работает:\n\n"
     "1. Создайте фильтр через /add_filter: марка → модель → годы → пробег → цена → "
-    "«только ниже рынка».\n"
-    "2. Каждые ~25 минут я проверяю свежие объявления.\n"
+    "«только ниже рынка» → «зарубежные авто».\n"
+    "2. Каждые ~10 минут я проверяю свежие объявления.\n"
     "3. Как только появляется машина под ваш фильтр — присылаю её сюда со ссылкой.\n\n"
     "Любой шаг фильтра можно пропустить — тогда ограничения по нему не будет.\n"
     "«Только ниже рынка» — присылать лишь авто с ценой заметно ниже средней "
-    "по таким же марке/модели/году/пробегу.\n\n"
+    "по таким же марке/модели/году/пробегу.\n"
+    "«Зарубежные авто» — объявления из Китая, Южной Кореи, США и т.п.; их цены "
+    "обычно без растаможки и доставки, поэтому их можно пропускать.\n\n"
     "/filters — посмотреть и удалить фильтры."
 )
 
@@ -48,12 +50,17 @@ def format_notification(p: PendingNotification) -> str:
     if p.below_market_percent is not None and p.below_market_percent > 0:
         below = f" · на {p.below_market_percent:g}% ниже средней"
 
+    foreign_note = ""
+    if is_foreign(p.city):
+        foreign_note = "🌍 Авто за рубежом: цена без растаможки и доставки\n"
+
     return (
         "🚗 Новое объявление по вашему фильтру\n\n"
         f"<b>{title}</b>\n"
         f"Год: {year} · Пробег: {mileage}\n"
         f"Цена: <b>{price}</b>{below}\n"
-        f"Город: {city}\n\n"
+        f"Город: {city}\n"
+        f"{foreign_note}\n"
         f'<a href="{p.url}">Открыть на mashina.kg</a>'
     )
 
@@ -67,6 +74,7 @@ def format_filter_line(
     mileage_max_km: int | None,
     price_max_usd: float | None,
     below_market_only: bool,
+    skip_foreign: bool = False,
 ) -> str:
     if brand_name is None:
         parts = ["Все марки"]
@@ -80,4 +88,6 @@ def format_filter_line(
         parts.append(f"до ${_fmt_int(round(price_max_usd))}")
     if below_market_only:
         parts.append("только ниже рынка")
+    if skip_foreign:
+        parts.append("без зарубежных")
     return " · ".join(parts)

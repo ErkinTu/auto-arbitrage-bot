@@ -189,6 +189,14 @@ def test_filter_matches_matrix() -> None:
     assert filter_matches(listing, any_brand)
     assert filter_matches(Listing(brand_id=brand_id + 999), any_brand)
     assert not filter_matches(listing, UserFilter(brand_id=None, year_from=2019))
+    # skip_foreign: отсекает только страны из списка; локальные и неизвестный
+    # город проходят (в т.ч. село Люксембург — не путать со страной).
+    foreign = Listing(brand_id=brand_id, city="Китай")
+    assert filter_matches(foreign, f())
+    assert not filter_matches(foreign, f(skip_foreign=True))
+    assert filter_matches(Listing(brand_id=brand_id, city="Бишкек"), f(skip_foreign=True))
+    assert filter_matches(Listing(brand_id=brand_id, city="с. Люксембург"), f(skip_foreign=True))
+    assert filter_matches(Listing(brand_id=brand_id, city=None), f(skip_foreign=True))
 
 
 def test_is_below_market() -> None:

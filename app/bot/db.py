@@ -40,6 +40,7 @@ class FilterDTO:
     mileage_max_km: int | None
     price_max_usd: float | None
     below_market_only: bool
+    skip_foreign: bool
 
 
 def _utcnow() -> datetime:
@@ -95,6 +96,7 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
         if user_filter.price_max_usd is not None
         else None,
         below_market_only=user_filter.below_market_only,
+        skip_foreign=user_filter.skip_foreign,
     )
 
 
@@ -121,6 +123,7 @@ def create_filter(
     mileage_max_km: int | None,
     price_max_usd: float | None,
     below_market_only: bool,
+    skip_foreign: bool = False,
 ) -> FilterDTO:
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
@@ -135,6 +138,7 @@ def create_filter(
             mileage_max_km=mileage_max_km,
             price_max_usd=Decimal(str(price_max_usd)) if price_max_usd is not None else None,
             below_market_only=below_market_only,
+            skip_foreign=skip_foreign,
         )
         session.add(user_filter)
         session.commit()

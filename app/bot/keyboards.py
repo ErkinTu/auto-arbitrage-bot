@@ -23,6 +23,7 @@ class SkipCB(CallbackData, prefix="skip"):
 
 
 class BoolCB(CallbackData, prefix="bool"):
+    step: str
     value: bool
 
 
@@ -54,10 +55,10 @@ def skip_kb(step: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def yes_no_kb() -> InlineKeyboardMarkup:
+def yes_no_kb(step: str, yes: str = "✅ Да", no: str = "❌ Нет") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да", callback_data=BoolCB(value=True))
-    builder.button(text="❌ Нет", callback_data=BoolCB(value=False))
+    builder.button(text=yes, callback_data=BoolCB(step=step, value=True))
+    builder.button(text=no, callback_data=BoolCB(step=step, value=False))
     builder.adjust(2)
     return builder.as_markup()
 
