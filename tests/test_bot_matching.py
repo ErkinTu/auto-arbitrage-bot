@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.bot.matching import (
     filter_matches,
     find_new_listings,
-    is_below_market,
+    market_average,
     match_new_listings,
 )
 from app.db.base import Base
@@ -221,37 +221,29 @@ def test_filter_matches_matrix() -> None:
     assert filter_matches(Listing(brand_id=brand_id, city=None), f(skip_foreign=True))
 
 
-def test_is_below_market() -> None:
+def test_market_average() -> None:
     session = _session()
     _add_stat(session, avg="12000", samples=10)
 
-    cheap = _add_listing(session, external_id="1", price_usd=Decimal("10000"))
-    result = is_below_market(session, cheap, factor=0.95, min_samples=5)
-    assert result is not None
-    matched, avg = result
-    assert matched and avg == 12000.0
-
-    # 11 800 > 12 000 * 0.95 = 11 400 -> не "ниже рынка".
-    near_avg = _add_listing(session, external_id="2", price_usd=Decimal("11800"))
-    result = is_below_market(session, near_avg, factor=0.95, min_samples=5)
-    assert result is not None and result[0] is False
+    listing = _add_listing(session, external_id="1", price_usd=Decimal("10000"))
+    assert market_average(session, listing, min_samples=5) == 12000.0
 
 
-def test_is_below_market_insufficient_data() -> None:
+def test_market_average_insufficient_data() -> None:
     session = _session()
     listing = _add_listing(session, external_id="1", price_usd=Decimal("10000"))
 
     # Нет статистики вообще.
-    assert is_below_market(session, listing, factor=0.95, min_samples=5) is None
+    assert market_average(session, listing, min_samples=5) is None
     # Мало образцов.
     _add_stat(session, avg="12000", samples=3)
-    assert is_below_market(session, listing, factor=0.95, min_samples=5) is None
+    assert market_average(session, listing, min_samples=5) is None
     # Нет года у объявления.
     no_year = _add_listing(session, external_id="2", year=None)
-    assert is_below_market(session, no_year, factor=0.95, min_samples=5) is None
+    assert market_average(session, no_year, min_samples=5) is None
 
 
-def test_is_below_market_weighted_and_latest_date() -> None:
+def test_market_average_weighted_and_latest_date() -> None:
     session = _session()
     # Старая дата должна игнорироваться.
     _add_stat(session, avg="20000", samples=50, stat_date=date.today() - timedelta(days=7))
@@ -261,22 +253,16 @@ def test_is_below_market_weighted_and_latest_date() -> None:
     _add_stat(session, avg="16000", samples=2, customs_status="not_cleared")
 
     listing = _add_listing(session, external_id="1", price_usd=Decimal("10000"))
-    result = is_below_market(session, listing, factor=0.95, min_samples=5)
-    assert result is not None
-    matched, avg = result
-    assert avg == 11200.0 and matched  # 10000 <= 11200 * 0.95 = 10640
+    assert market_average(session, listing, min_samples=5) == 11200.0
 
 
-def test_is_below_market_respects_customs_status() -> None:
+def test_market_average_respects_customs_status() -> None:
     session = _session()
     _add_stat(session, avg="10000", samples=8, customs_status="cleared")
     _add_stat(session, avg="16000", samples=8, customs_status="not_cleared")
 
     listing = _add_listing(session, external_id="1", price_usd=Decimal("15000"), customs_status="not_cleared")
-    result = is_below_market(session, listing, factor=0.95, min_samples=5)
-    assert result is not None
-    matched, avg = result
-    assert avg == 16000.0 and matched
+    assert market_average(session, listing, min_samples=5) == 16000.0
 
 
 def test_match_new_listings_dedup() -> None:
@@ -316,10 +302,31 @@ def test_match_below_market_only_filter() -> None:
     assert {note.listing_id for note in pending} == {first.id, cheap.id}
     by_listing = {note.listing_id: note for note in pending}
     assert by_listing[cheap.id].below_market_percent == 15.0
+    assert by_listing[cheap.id].market_avg_usd == 12000.0
 
     # Дорогое авто не проходит.
     _add_listing(session, external_id="3", price_usd=Decimal("11900"))
     assert match_new_listings(session, since, factor=0.95, min_samples=5) == []
+
+
+def test_match_below_market_custom_percent() -> None:
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _add_user_with_filter(
+        session, telegram_id=42, below_market_only=True, below_market_percent=15
+    )
+    _add_stat(session, avg="12000", samples=10)
+
+    # 10% ниже средней — порог фильтра 15% не пройден, хотя глобальный factor 0.95 прошел бы.
+    _add_listing(session, external_id="1", price_usd=Decimal("10800"))
+    assert match_new_listings(session, since, factor=0.95, min_samples=5) == []
+
+    # Ровно 15% ниже — граница включительно.
+    cheap = _add_listing(session, external_id="2", price_usd=Decimal("10200"))
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5)
+    assert [note.listing_id for note in pending] == [cheap.id]
+    assert pending[0].below_market_percent == 15.0
+    assert pending[0].market_avg_usd == 12000.0
 
 
 def test_match_all_brands_filter() -> None:

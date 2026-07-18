@@ -333,6 +333,8 @@ class UserFilter(Base, TimestampMixin):
     mileage_max_km: Mapped[int | None] = mapped_column(Integer)
     price_max_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     below_market_only: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Порог «ниже рынка» в процентах (5/10/15/20); NULL = глобальный BOT_BELOW_AVG_FACTOR.
+    below_market_percent: Mapped[int | None] = mapped_column(Integer)
     # Пропускать зарубежные объявления (city = страна: Китай, США...) — там цены без растаможки.
     skip_foreign: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

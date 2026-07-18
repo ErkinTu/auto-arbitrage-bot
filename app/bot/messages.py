@@ -50,15 +50,20 @@ def format_notification(p: PendingNotification) -> str:
     if p.below_market_percent is not None and p.below_market_percent > 0:
         below = f" · на {p.below_market_percent:g}% ниже средней"
 
+    avg_line = ""
+    if p.market_avg_usd is not None:
+        avg_line = f"Средняя цена по рынку: ${_fmt_int(round(p.market_avg_usd))}\n"
+
     foreign_note = ""
     if is_foreign(p.city):
-        foreign_note = "🌍 Авто за рубежом: цена без растаможки и доставки\n"
+        foreign_note = "🌍 <b>Внимание: авто находится за рубежом</b>\n"
 
     return (
         "🚗 Новое объявление по вашему фильтру\n\n"
         f"<b>{title}</b>\n"
         f"Год: {year} · Пробег: {mileage}\n"
         f"Цена: <b>{price}</b>{below}\n"
+        f"{avg_line}"
         f"Город: {city}\n"
         f"{foreign_note}\n"
         f'<a href="{p.url}">Открыть на {p.source_name}</a>'
@@ -74,6 +79,7 @@ def format_filter_line(
     mileage_max_km: int | None,
     price_max_usd: float | None,
     below_market_only: bool,
+    below_market_percent: int | None = None,
     skip_foreign: bool = False,
 ) -> str:
     if brand_name is None:
@@ -87,7 +93,10 @@ def format_filter_line(
     if price_max_usd is not None:
         parts.append(f"до ${_fmt_int(round(price_max_usd))}")
     if below_market_only:
-        parts.append("только ниже рынка")
+        if below_market_percent is not None:
+            parts.append(f"ниже рынка на {below_market_percent}%+")
+        else:
+            parts.append("только ниже рынка")
     if skip_foreign:
         parts.append("без зарубежных")
     return " · ".join(parts)

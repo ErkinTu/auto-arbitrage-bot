@@ -36,19 +36,21 @@ class FakeBot:
 
 
 def test_format_notification_full() -> None:
-    text = format_notification(_note(below_market_percent=15.0))
+    text = format_notification(_note(below_market_percent=15.0, market_avg_usd=12000.0))
     assert "<b>Toyota Camry 2019</b>" in text
     assert "Год: 2019 · Пробег: 90 000 км" in text
     assert "Цена: <b>$10 200</b> · на 15% ниже средней" in text
+    assert "Средняя цена по рынку: $12 000" in text
     assert "Город: Бишкек" in text
     assert "за рубежом" not in text
     assert '<a href="https://www.mashina.kg/details/toyota-camry-1/">' in text
 
 
-def test_format_notification_foreign_listing_warns_about_customs() -> None:
+def test_format_notification_foreign_listing_highlights_location() -> None:
     text = format_notification(_note(city="Китай"))
     assert "Город: Китай" in text
-    assert "🌍 Авто за рубежом: цена без растаможки и доставки" in text
+    assert "🌍 <b>Внимание: авто находится за рубежом</b>" in text
+    assert "растаможк" not in text
 
 
 def test_format_notification_missing_fields_and_escaping() -> None:
@@ -59,6 +61,7 @@ def test_format_notification_missing_fields_and_escaping() -> None:
     assert "Год: — · Пробег: —" in text
     assert "Цена: <b>—</b>" in text
     assert "ниже средней" not in text
+    assert "Средняя цена" not in text
 
 
 def test_format_filter_line() -> None:
@@ -74,6 +77,19 @@ def test_format_filter_line() -> None:
     )
     assert line == (
         "BMW X5 · 2015–2020 г. · до 150 000 км · до $25 000 · только ниже рынка · без зарубежных"
+    )
+    assert (
+        format_filter_line(
+            brand_name="BMW",
+            model_name="X5",
+            year_from=None,
+            year_to=None,
+            mileage_max_km=None,
+            price_max_usd=None,
+            below_market_only=True,
+            below_market_percent=10,
+        )
+        == "BMW X5 · ниже рынка на 10%+"
     )
     assert (
         format_filter_line(

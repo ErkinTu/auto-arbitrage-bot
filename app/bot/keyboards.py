@@ -31,6 +31,11 @@ class FilterDeleteCB(CallbackData, prefix="fdel"):
     filter_id: int
 
 
+class PercentCB(CallbackData, prefix="pct"):
+    step: str
+    value: int
+
+
 def brands_kb(brands: list[BrandDTO]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🌐 Все марки", callback_data=BrandCB(brand_id=0))
@@ -60,6 +65,14 @@ def yes_no_kb(step: str, yes: str = "✅ Да", no: str = "❌ Нет") -> Inlin
     builder.button(text=yes, callback_data=BoolCB(step=step, value=True))
     builder.button(text=no, callback_data=BoolCB(step=step, value=False))
     builder.adjust(2)
+    return builder.as_markup()
+
+
+def percent_kb(step: str, values: tuple[int, ...] = (5, 10, 15, 20)) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for value in values:
+        builder.button(text=f"{value}%", callback_data=PercentCB(step=step, value=value))
+    builder.adjust(4)
     return builder.as_markup()
 
 

@@ -16,10 +16,12 @@ from app.bot.keyboards import (
     BrandCB,
     FilterDeleteCB,
     ModelCB,
+    PercentCB,
     SkipCB,
     brands_kb,
     filters_kb,
     models_kb,
+    percent_kb,
     skip_kb,
     yes_no_kb,
 )
@@ -73,6 +75,7 @@ def _filters_text(filters: list[db.FilterDTO]) -> str:
             mileage_max_km=item.mileage_max_km,
             price_max_usd=item.price_max_usd,
             below_market_only=item.below_market_only,
+            below_market_percent=item.below_market_percent,
             skip_foreign=item.skip_foreign,
         )
         lines.append(f"{index}. {line}")
@@ -278,15 +281,41 @@ async def wizard_price(message: Message, state: FSMContext) -> None:
     )
 
 
+FOREIGN_STEP_TEXT = (
+    "Шаг 7/7. Показывать зарубежные авто (Китай, Южная Корея, США и т.п.)?\n\n"
+    "⚠️ Их цены обычно указаны без растаможки и доставки, поэтому выглядят "
+    "заметно ниже рынка."
+)
+
+
 @router.callback_query(AddFilter.below_avg, BoolCB.filter(F.step == "below_avg"))
 async def wizard_below_avg(query: CallbackQuery, callback_data: BoolCB, state: FSMContext) -> None:
     await state.update_data(below_market_only=callback_data.value)
+    await query.answer()
+    if callback_data.value:
+        await state.set_state(AddFilter.below_percent)
+        await query.message.edit_text(
+            "Насколько ниже средней по рынку должна быть цена?",
+            reply_markup=percent_kb("below_percent"),
+        )
+        return
+    await state.update_data(below_market_percent=None)
+    await state.set_state(AddFilter.foreign)
+    await query.message.edit_text(
+        FOREIGN_STEP_TEXT,
+        reply_markup=yes_no_kb("foreign", yes="✅ Показывать", no="🚫 Пропускать"),
+    )
+
+
+@router.callback_query(AddFilter.below_percent, PercentCB.filter(F.step == "below_percent"))
+async def wizard_below_percent(
+    query: CallbackQuery, callback_data: PercentCB, state: FSMContext
+) -> None:
+    await state.update_data(below_market_percent=callback_data.value)
     await state.set_state(AddFilter.foreign)
     await query.answer()
     await query.message.edit_text(
-        "Шаг 7/7. Показывать зарубежные авто (Китай, Южная Корея, США и т.п.)?\n\n"
-        "⚠️ Их цены обычно указаны без растаможки и доставки, поэтому выглядят "
-        "заметно ниже рынка.",
+        FOREIGN_STEP_TEXT,
         reply_markup=yes_no_kb("foreign", yes="✅ Показывать", no="🚫 Пропускать"),
     )
 
@@ -305,6 +334,7 @@ async def wizard_foreign(query: CallbackQuery, callback_data: BoolCB, state: FSM
         mileage_max_km=data.get("mileage_max_km"),
         price_max_usd=data.get("price_max_usd"),
         below_market_only=data["below_market_only"],
+        below_market_percent=data.get("below_market_percent"),
         skip_foreign=not callback_data.value,
     )
     await query.answer("Фильтр сохранен")
@@ -316,6 +346,7 @@ async def wizard_foreign(query: CallbackQuery, callback_data: BoolCB, state: FSM
         mileage_max_km=created.mileage_max_km,
         price_max_usd=created.price_max_usd,
         below_market_only=created.below_market_only,
+        below_market_percent=created.below_market_percent,
         skip_foreign=created.skip_foreign,
     )
     await query.message.edit_text(
@@ -333,6 +364,7 @@ async def wizard_foreign(query: CallbackQuery, callback_data: BoolCB, state: FSM
 @router.message(AddFilter.brand)
 @router.message(AddFilter.model)
 @router.message(AddFilter.below_avg)
+@router.message(AddFilter.below_percent)
 @router.message(AddFilter.foreign)
 async def wizard_expect_buttons(message: Message) -> None:
     await message.answer("Пожалуйста, выберите вариант кнопкой в сообщении выше. Отмена: /cancel")

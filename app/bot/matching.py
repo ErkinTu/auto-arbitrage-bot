@@ -69,6 +69,7 @@ class PendingNotification:
     city: str | None
     url: str
     below_market_percent: float | None
+    market_avg_usd: float | None = None
     source_name: str = "mashina.kg"
 
 
@@ -133,17 +134,16 @@ def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
     return True
 
 
-def is_below_market(
+def market_average(
     session: Session,
     listing: Listing,
     *,
-    factor: float,
     min_samples: int,
-) -> tuple[bool, float] | None:
-    """Сравнение цены объявления со средней по рынку из daily_market_stats.
+) -> float | None:
+    """Средняя цена по рынку из daily_market_stats для группы объявления.
 
-    Возвращает (matched, средняя_цена) или None, когда статистики недостаточно
-    для уверенного вывода (мало образцов, нет рядов, неполные данные объявления).
+    Возвращает None, когда статистики недостаточно для уверенного вывода
+    (мало образцов, нет рядов, неполные данные объявления).
     """
     if (
         listing.brand_id is None
@@ -175,9 +175,7 @@ def is_below_market(
         return None
 
     # Взвешенное по числу образцов среднее по поколениям (и группам растаможки при unknown).
-    weighted_avg = sum(float(row.avg_price_usd) * row.sample_count for row in rows) / total_samples
-    price = float(listing.current_price_usd)
-    return price <= weighted_avg * factor, weighted_avg
+    return sum(float(row.avg_price_usd) * row.sample_count for row in rows) / total_samples
 
 
 def match_new_listings(
@@ -220,7 +218,7 @@ def match_new_listings(
         )
     }
 
-    below_market_cache: dict[int, tuple[bool, float] | None] = {}
+    avg_cache: dict[int, float | None] = {}
     source_names: dict[int, str] = {
         row.id: row.name for row in session.execute(select(Source.id, Source.name))
     }
@@ -234,18 +232,30 @@ def match_new_listings(
             if not filter_matches(listing, user_filter):
                 continue
 
-            if listing.id not in below_market_cache:
-                below_market_cache[listing.id] = is_below_market(
-                    session, listing, factor=factor, min_samples=min_samples
+            if listing.id not in avg_cache:
+                avg_cache[listing.id] = market_average(
+                    session, listing, min_samples=min_samples
                 )
-            below = below_market_cache[listing.id]
-            # Тумблер "только ниже рынка": отсутствие статистики = не матч.
-            if user_filter.below_market_only and (below is None or not below[0]):
-                continue
+            avg = avg_cache[listing.id]
 
             below_percent: float | None = None
-            if below is not None and below[0] and below[1] > 0:
-                below_percent = round((1 - float(listing.current_price_usd) / below[1]) * 100, 1)
+            if avg is not None and avg > 0:
+                diff = round((1 - float(listing.current_price_usd) / avg) * 100, 1)
+                if diff > 0:
+                    below_percent = diff
+
+            # Тумблер "только ниже рынка": отсутствие статистики = не матч.
+            # Порог — из фильтра пользователя (5/10/15/20%), иначе глобальный factor.
+            if user_filter.below_market_only:
+                if avg is None or avg <= 0:
+                    continue
+                threshold = (
+                    1 - user_filter.below_market_percent / 100
+                    if user_filter.below_market_percent is not None
+                    else factor
+                )
+                if float(listing.current_price_usd) > avg * threshold:
+                    continue
 
             already_sent.add(key)
             session.add(
@@ -265,6 +275,7 @@ def match_new_listings(
                     city=listing.city,
                     url=build_source_url(listing),
                     below_market_percent=below_percent,
+                    market_avg_usd=avg,
                     source_name=source_names.get(listing.source_id, "mashina.kg"),
                 )
             )
