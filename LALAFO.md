@@ -127,7 +127,7 @@ fetch_listings, fetch_details). Смоук без БД:
 - Прерванный рестартом full-scan (mashina) не блокирует повтор в тот же день:
   worker при старте помечает осиротевшие `running` full-запуски failed.
 
-## Прод и Cloudflare (проверено 2026-07-18)
+## Прод и Cloudflare (проверено 2026-07-18; полный разбор — `LALAFO_PROXY.md`)
 
 - **lalafo.kg блокирует датацентровые IP**: с AWS Lightsail и HTML, и JSON API
   отвечают 403 «Just a moment…» (челлендж Cloudflare). Браузерный User-Agent

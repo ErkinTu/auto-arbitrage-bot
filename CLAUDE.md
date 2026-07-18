@@ -129,6 +129,7 @@ docker без sudo. Полный runbook переноса/обновления/�
 | `DB_QUERIES.md` | Готовые SQL-запросы |
 | `FRONTEND_TZ.md` | Тех.задание фронта (`../analytics-front`) |
 | `LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
+| `LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `TODO_LALAFO.md` | Согласованные задачи следующей итерации lalafo |
 
 Долгоживущие факты вне репозитория — в авто-памяти (`MEMORY.md`).
