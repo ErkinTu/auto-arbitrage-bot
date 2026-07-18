@@ -10,6 +10,10 @@ class Settings(BaseSettings):
 
     mashina_api_url: str = "https://mashina.kg/api/mbank-proxy/v1/ads/listings"
     lalafo_base_url: str = "https://lalafo.kg"
+    # Прокси ТОЛЬКО для lalafo-запросов: Cloudflare lalafo блокирует
+    # датацентровые IP (AWS -> 403), нужен резидентный выход. Пусто = напрямую.
+    # Форматы: http://user:pass@host:port или socks5://127.0.0.1:1080.
+    lalafo_proxy_url: str = ""
     nbkr_rates_url: str = "https://www.nbkr.kg/XML/daily.xml"
     request_timeout_seconds: float = 20.0
     request_delay_seconds: float = 2.0
