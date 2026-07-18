@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -18,9 +18,12 @@ from app.models import (
     Listing,
     ListingStatusHistory,
     SentNotification,
+    Source,
     UserFilter,
 )
+from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.stats import mileage_bucket
+from app.services.sync import utcnow
 from app.services.vehicle_summary import _build_source_url as build_source_url
 
 # mashina.kg пишет для авто "на заказ" страну в поле города. Список — явный:
@@ -66,10 +69,12 @@ class PendingNotification:
     city: str | None
     url: str
     below_market_percent: float | None
+    source_name: str = "mashina.kg"
 
 
-def find_new_listings(session: Session, since: datetime) -> list[Listing]:
-    """Активные объявления с событием new не старше since и известной ценой."""
+def find_new_listings(session: Session, since: datetime, *, max_age_hours: int = 12) -> list[Listing]:
+    """Активные объявления с событием new не старше since, известной ценой
+    и свежей датой публикации на источнике."""
     # DISTINCT по id в подзапросе: DISTINCT по всем колонкам Listing невозможен
     # в Postgres из-за JSON-колонки quality_flags (нет оператора равенства).
     new_listing_ids = (
@@ -80,12 +85,20 @@ def find_new_listings(session: Session, since: datetime) -> list[Listing]:
         )
         .distinct()
     )
+    # VIP-поднятые старые объявления всплывают в «свежей» ленте и дают событие
+    # new: пуш о «новинке» — только если публикация на сайте свежее max_age_hours.
+    # NULL source_created_at отсекается сравнением — пуш по неполным данным
+    # хуже тишины (тот же принцип, что в filter_matches).
+    published_after = utcnow() - timedelta(hours=max_age_hours)
     return list(
         session.scalars(
             select(Listing).where(
                 Listing.id.in_(new_listing_ids),
                 Listing.is_active.is_(True),
+                Listing.source_created_at >= published_after,
                 Listing.current_price_usd.is_not(None),
+                # Мусорный ввод цены («180 сом» за авто) — не повод для пуша.
+                Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
             )
         ).all()
     )
@@ -173,6 +186,7 @@ def match_new_listings(
     *,
     factor: float,
     min_samples: int,
+    max_age_hours: int = 12,
 ) -> list[PendingNotification]:
     """Подбирает пары (пользователь, новое объявление), фиксирует отправку, возвращает DTO.
 
@@ -180,7 +194,7 @@ def match_new_listings(
     при падении между коммитом и отправкой теряется максимум одно уведомление,
     но дубль не возникает никогда.
     """
-    listings = find_new_listings(session, since)
+    listings = find_new_listings(session, since, max_age_hours=max_age_hours)
     if not listings:
         return []
 
@@ -207,6 +221,9 @@ def match_new_listings(
     }
 
     below_market_cache: dict[int, tuple[bool, float] | None] = {}
+    source_names: dict[int, str] = {
+        row.id: row.name for row in session.execute(select(Source.id, Source.name))
+    }
     pending: list[PendingNotification] = []
 
     for listing in listings:
@@ -248,6 +265,7 @@ def match_new_listings(
                     city=listing.city,
                     url=build_source_url(listing),
                     below_market_percent=below_percent,
+                    source_name=source_names.get(listing.source_id, "mashina.kg"),
                 )
             )
 

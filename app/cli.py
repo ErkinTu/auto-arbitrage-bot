@@ -9,7 +9,6 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.models import Brand, NormalizationIssue, Source, SyncTarget
-from app.parsers.mashina import MashinaParser
 from app.services.catalog_service import (
     add_generation_alias,
     add_model_alias,
@@ -17,6 +16,7 @@ from app.services.catalog_service import (
     seed_default_catalog,
 )
 from app.services.lookup import get_or_create_source
+from app.services.sources import SOURCE_NAMES, build_parser, source_base_url
 from app.services.stats import rebuild_daily_market_stats
 from app.services.sync import run_sync
 
@@ -28,31 +28,32 @@ def utcnow() -> datetime:
 def ensure_seed_data() -> None:
     settings = get_settings()
     with SessionLocal() as session:
-        source = get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
         seed_default_catalog(session)
-        for priority, brand in enumerate(settings.allowed_brand_list, start=1):
-            target = session.scalar(
-                select(SyncTarget).where(
-                    SyncTarget.source_id == source.id,
-                    SyncTarget.brand_filter == brand,
-                    SyncTarget.model_filter.is_(None),
-                    SyncTarget.generation_filter.is_(None),
-                )
-            )
-            if target is None:
-                session.add(
-                    SyncTarget(
-                        source_id=source.id,
-                        brand_filter=brand,
-                        enabled=True,
-                        priority=priority,
-                        fresh_period="1d",
-                        page_size=settings.default_page_size,
-                        max_pages=settings.default_max_pages,
-                        max_items=settings.default_max_items,
-                        sync_interval_minutes=settings.default_sync_interval_minutes,
+        for source_name in SOURCE_NAMES:
+            source = get_or_create_source(session, source_name, source_base_url(source_name))
+            for priority, brand in enumerate(settings.allowed_brand_list, start=1):
+                target = session.scalar(
+                    select(SyncTarget).where(
+                        SyncTarget.source_id == source.id,
+                        SyncTarget.brand_filter == brand,
+                        SyncTarget.model_filter.is_(None),
+                        SyncTarget.generation_filter.is_(None),
                     )
                 )
+                if target is None:
+                    session.add(
+                        SyncTarget(
+                            source_id=source.id,
+                            brand_filter=brand,
+                            enabled=True,
+                            priority=priority,
+                            fresh_period="1d",
+                            page_size=settings.default_page_size,
+                            max_pages=settings.default_max_pages,
+                            max_items=settings.default_max_items,
+                            sync_interval_minutes=settings.default_sync_interval_minutes,
+                        )
+                    )
         session.commit()
 
 
@@ -94,7 +95,7 @@ def command_init_db(_: argparse.Namespace) -> None:
 def command_seed(_: argparse.Namespace) -> None:
     init_db()
     ensure_seed_data()
-    print("Seeded mashina.kg targets for configured brands.")
+    print(f"Seeded targets for configured brands: {', '.join(SOURCE_NAMES)}.")
 
 
 def command_targets(_: argparse.Namespace) -> None:
@@ -127,13 +128,13 @@ def command_add_target(args: argparse.Namespace) -> None:
 
 def command_sync(args: argparse.Namespace) -> None:
     with SessionLocal() as session:
-        source = session.scalar(select(Source).where(Source.name == "mashina.kg"))
+        source = session.scalar(select(Source).where(Source.name == args.source))
         if source is None:
             raise SystemExit("Run init-db and seed first.")
         seed_default_catalog(session)
         session.commit()
         target = find_or_create_target(session, source, args)
-        parser = MashinaParser()
+        parser = build_parser(args.source, session)
         try:
             summary = run_sync(
                 session,
@@ -154,15 +155,17 @@ def command_sync(args: argparse.Namespace) -> None:
 
 def command_sync_all(args: argparse.Namespace) -> None:
     with SessionLocal() as session:
-        source = session.scalar(select(Source).where(Source.name == "mashina.kg"))
+        source = session.scalar(select(Source).where(Source.name == args.source))
         if source is None:
             raise SystemExit("Run init-db and seed first.")
         seed_default_catalog(session)
         session.commit()
         targets = session.scalars(
-            select(SyncTarget).where(SyncTarget.enabled.is_(True)).order_by(SyncTarget.priority)
+            select(SyncTarget)
+            .where(SyncTarget.enabled.is_(True), SyncTarget.source_id == source.id)
+            .order_by(SyncTarget.priority)
         ).all()
-        parser = MashinaParser()
+        parser = build_parser(args.source, session)
         try:
             for target in targets:
                 summary = run_sync(session, parser, source, target, mode=args.mode)
@@ -226,6 +229,55 @@ def command_add_generation_alias(args: argparse.Namespace) -> None:
         )
 
 
+def command_ensure_self_aliases(_: argparse.Namespace) -> None:
+    """Каждой канонической модели — алиас на её собственное имя.
+
+    mashina присылает модели «грязными», поэтому исторически алиасы есть только
+    на грязные варианты. Источники с чистыми именами (lalafo) без самоалиасов
+    не резолвятся. Команда идемпотентна."""
+    from app.models import Brand, CarModel, ModelAlias
+    from app.services.catalog import normalize_alias_text
+    from app.services.catalog_service import _upsert_model_alias
+
+    with SessionLocal() as session:
+        created = 0
+        conflicts = 0
+        pairs = session.execute(
+            select(CarModel, Brand).join(Brand, Brand.id == CarModel.brand_id)
+        ).all()
+        for car_model, brand in pairs:
+            existing = session.scalar(
+                select(ModelAlias).where(
+                    ModelAlias.brand_id == brand.id,
+                    ModelAlias.normalized_alias == normalize_alias_text(car_model.name),
+                )
+            )
+            if existing is not None:
+                if existing.car_model_id != car_model.id:
+                    other = session.get(CarModel, existing.car_model_id)
+                    print(
+                        f"CONFLICT: {brand.name} {car_model.name!r} — алиас уже указывает на "
+                        f"{other.name if other else existing.car_model_id!r}, пропущено"
+                    )
+                    conflicts += 1
+                continue
+            _upsert_model_alias(
+                session, brand=brand, car_model=car_model, alias=car_model.name, source="canonical"
+            )
+            created += 1
+        session.commit()
+        print(f"Models: {len(pairs)}, self-aliases created: {created}, conflicts: {conflicts}.")
+
+
+def command_refresh_rate(_: argparse.Namespace) -> None:
+    from app.services.exchange import refresh_usd_rate
+
+    with SessionLocal() as session:
+        row = refresh_usd_rate(session)
+        session.commit()
+        print(f"USD rate for {row.rate_date}: {row.rate_kgs} KGS (nbkr.kg)")
+
+
 def command_reprocess_catalog(_: argparse.Namespace) -> None:
     with SessionLocal() as session:
         result = reprocess_catalog(session)
@@ -254,6 +306,7 @@ def parser() -> argparse.ArgumentParser:
     add.set_defaults(func=command_add_target)
 
     sync = sub.add_parser("sync", help="Run one selected brand/model sync")
+    sync.add_argument("--source", choices=list(SOURCE_NAMES), default="mashina.kg")
     sync.add_argument("--brand", required=True)
     sync.add_argument("--model")
     sync.add_argument("--generation")
@@ -265,7 +318,8 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--start-page", type=int, default=1)
     sync.set_defaults(func=command_sync)
 
-    sync_all = sub.add_parser("sync-all", help="Run all enabled persistent targets")
+    sync_all = sub.add_parser("sync-all", help="Run all enabled persistent targets of one source")
+    sync_all.add_argument("--source", choices=list(SOURCE_NAMES), default="mashina.kg")
     sync_all.add_argument("--mode", choices=["fresh", "full"], default="fresh")
     sync_all.set_defaults(func=command_sync_all)
 
@@ -294,6 +348,15 @@ def parser() -> argparse.ArgumentParser:
         "reprocess-catalog", help="Apply current aliases to already saved listings without downloading again"
     )
     reprocess.set_defaults(func=command_reprocess_catalog)
+
+    self_aliases = sub.add_parser(
+        "ensure-self-aliases",
+        help="Create an alias equal to each canonical model name (clean-name sources need them)",
+    )
+    self_aliases.set_defaults(func=command_ensure_self_aliases)
+
+    refresh_rate = sub.add_parser("refresh-rate", help="Fetch today's official USD/KGS rate from nbkr.kg")
+    refresh_rate.set_defaults(func=command_refresh_rate)
     return main
 
 

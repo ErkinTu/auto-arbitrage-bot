@@ -8,6 +8,10 @@
    пауза между марками — FULL_SCAN_BRAND_PAUSE_SECONDS.
 2. Пересчет daily_market_stats каждые STATS_REBUILD_INTERVAL_HOURS часов,
    сетка начинается с STATS_REBUILD_START_HOUR (10:00, 18:00, 02:00).
+3. Раз в локальные сутки — обслуживание lalafo (у него нет full-scan):
+   сначала точечный валидатор давно не виденных объявлений через карточку
+   (HTTP 410 -> деактивация, 200 -> продление last_seen_at), затем фолбэк —
+   деактивация так и не подтверждённых дольше STALE_LISTING_DAYS.
 
 Повторный запуск full scan в тот же день исключается по parser_runs,
 поэтому рестарт worker-а безопасен.
@@ -17,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import select
 
@@ -28,8 +32,14 @@ from app.parsers.mashina import MashinaParser
 from app.services.catalog_service import seed_default_catalog
 from app.services.lookup import ensure_brand_targets, get_or_create_source
 from app.services.schedule import local_now, last_slot_start, split_brands_for_weekend
+from app.services.sources import LALAFO, build_parser, source_base_url
 from app.services.stats import rebuild_daily_market_stats
-from app.services.sync import run_sync
+from app.services.sync import (
+    deactivate_stale_listings,
+    run_sync,
+    utcnow,
+    validate_stale_lalafo_listings,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -49,6 +59,26 @@ def _full_scan_ran_today(session, target_id: int, local_midnight_utc: datetime) 
         .limit(1)
     )
     return run_id is not None
+
+
+def fail_orphaned_full_runs(session) -> int:
+    """Помечает осиротевшие full-сканы failed, чтобы прерванный рестартом скан
+    мог перезапуститься в тот же день (_full_scan_ran_today считает running).
+
+    Только mode='full': fresh-запуски принадлежат боту и могут идти прямо
+    сейчас. Полные сканы делает только этот worker, а его прошлый процесс
+    мёртв — раз мы стартуем, его 'running' заведомо осиротели. Редкий ручной
+    `cli sync` full, идущий параллельно, попадёт под раздачу — приемлемо:
+    его ParserRun станет failed, но сам процесс продолжит работать.
+    """
+    orphaned = session.scalars(
+        select(ParserRun).where(ParserRun.mode == "full", ParserRun.status == "running")
+    ).all()
+    for run in orphaned:
+        run.status = "failed"
+        run.error_message = "orphaned: worker restarted mid-run"
+        run.finished_at = utcnow()
+    return len(orphaned)
 
 
 def run_weekend_full_scans() -> int:
@@ -116,13 +146,52 @@ def rebuild_stats_if_due(last_rebuild_at: datetime | None) -> datetime | None:
     return now
 
 
+def lalafo_maintenance_if_due(last_run_date: date | None) -> date | None:
+    """Раз в локальные сутки: валидатор карточек давно не виденных
+    lalafo-объявлений, затем фолбэк-деактивация «зависших». Возвращает дату
+    запуска. Идемпотентна — рестарт worker-а в тот же день просто не найдет
+    новых кандидатов."""
+    settings = get_settings()
+    today = local_now(settings.scheduler_timezone).date()
+    if last_run_date == today:
+        return None
+    with SessionLocal() as session:
+        source = get_or_create_source(session, LALAFO, source_base_url(LALAFO))
+        session.commit()
+        parser = build_parser(LALAFO, session)
+        try:
+            checked, gone = validate_stale_lalafo_listings(
+                session,
+                parser,
+                source,
+                validate_after_days=settings.lalafo_validate_after_days,
+                max_per_run=settings.lalafo_validate_max_per_run,
+            )
+            session.commit()
+        finally:
+            parser.close()
+        stale = deactivate_stale_listings(session, stale_days=settings.stale_listing_days)
+        session.commit()
+    logger.info(
+        "lalafo maintenance: validated %s cards (deactivated %s gone), stale fallback deactivated %s (>%sd)",
+        checked,
+        gone,
+        stale,
+        settings.stale_listing_days,
+    )
+    return today
+
+
 def main() -> None:
     settings = get_settings()
     init_db()
     with SessionLocal() as session:
         get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
         seed_default_catalog(session)
+        orphaned = fail_orphaned_full_runs(session)
         session.commit()
+    if orphaned:
+        logger.warning("marked %s orphaned full-scan runs as failed", orphaned)
 
     logger.info(
         "worker started: weekend full scans at %02d:00, stats rebuild every %sh from %02d:00 (%s)",
@@ -132,6 +201,7 @@ def main() -> None:
         settings.scheduler_timezone,
     )
     last_rebuild_at: datetime | None = None
+    last_maintenance_date: date | None = None
     while True:
         try:
             scans = run_weekend_full_scans()
@@ -139,6 +209,13 @@ def main() -> None:
                 logger.info("weekend full scans completed: %s", scans)
         except Exception:
             logger.exception("weekend full scan cycle failed")
+        try:
+            # До пересчета статистики, чтобы дневные агрегаты не включали зависшие.
+            ran_date = lalafo_maintenance_if_due(last_maintenance_date)
+            if ran_date is not None:
+                last_maintenance_date = ran_date
+        except Exception:
+            logger.exception("lalafo maintenance failed")
         try:
             rebuilt_at = rebuild_stats_if_due(last_rebuild_at)
             if rebuilt_at is not None:

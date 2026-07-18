@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from statistics import median
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models import DailyMarketStat, Listing
 
 
@@ -25,15 +26,26 @@ def mileage_bucket(mileage_km: int | None) -> str:
     return "200k+"
 
 
-def rebuild_daily_market_stats(session: Session, stat_date: date | None = None) -> int:
+def rebuild_daily_market_stats(
+    session: Session,
+    stat_date: date | None = None,
+    *,
+    max_last_seen_days: int | None = None,
+) -> int:
     stat_date = stat_date or date.today()
+    if max_last_seen_days is None:
+        max_last_seen_days = get_settings().stats_max_last_seen_days
     # Derived rows are rebuilt from scratch so old model aliases cannot leave stale statistics.
     session.execute(delete(DailyMarketStat).where(DailyMarketStat.stat_date == stat_date))
     session.flush()
+    # У fresh-only источников (lalafo) проданное авто может висеть is_active=true:
+    # в агрегаты идут только объявления, виденные в ленте недавно.
+    seen_after = datetime.now(timezone.utc) - timedelta(days=max_last_seen_days)
     listings = session.scalars(
         select(Listing).where(
             Listing.is_active.is_(True),
             Listing.analytics_eligible.is_(True),
+            Listing.last_seen_at >= seen_after,
             Listing.current_price_usd.is_not(None),
             Listing.brand_id.is_not(None),
             Listing.car_model_id.is_not(None),

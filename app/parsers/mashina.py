@@ -9,6 +9,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.parsers.base import FetchPage, ParserAdapter
+from app.services.normalizer import NormalizedListing, normalize_mashina_listing
 
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 class MashinaParser(ParserAdapter):
     source_name = "mashina.kg"
+
+    def normalize(self, raw: dict[str, Any], *, fallback_make: str | None = None) -> NormalizedListing:
+        return normalize_mashina_listing(raw, fallback_make=fallback_make)
 
     def __init__(self) -> None:
         self.settings = get_settings()

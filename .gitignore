@@ -4,9 +4,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.pyc
-backups/*.sql.gz
+backups/
 
 # Local IDE/editor state
+.claude/
 .idea/
 .vscode/
 *.swp
@@ -26,6 +27,8 @@ build/
 *.log
 
 # Local archives and dumps
+lalafo.html
+lalafodetail.html
 *.zip
 *.tar
 *.tar.gz

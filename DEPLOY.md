@@ -213,7 +213,10 @@ rsync -avn -e "ssh -i $KEY" --exclude '.venv' --exclude '.git' \
 `scripts/backup.sh` делает дамп из контейнера postgres в `backups/*.sql.gz`
 и удаляет копии старше `KEEP_DAYS` (по умолчанию 14).
 
-Настроить ежедневный бэкап в 3:00 (**на сервере**):
+Ежедневный бэкап настроен на **23:00 UTC = 05:00 по Бишкеку** — самое
+тихое окно: бот спит (работает 8:00–24:00), пересчёт статистики (01:00)
+и выходной full scan (с 02:00, ~1.5 ч) уже завершены. Хост-cron работает
+в UTC. Настройка (**на сервере**):
 
 ```bash
 ssh -i "$KEY" "$SRV"          # зайти на сервер
@@ -222,7 +225,7 @@ cd /home/ubuntu/car-analytics
 mkdir -p logs
 crontab -e
 # добавить строку:
-0 3 * * * cd /home/ubuntu/car-analytics && ./scripts/backup.sh >> logs/backup.log 2>&1
+0 23 * * * cd /home/ubuntu/car-analytics && ./scripts/backup.sh >> logs/backup.log 2>&1
 ```
 
 Проверить, что cron записан, и посмотреть лог после первого срабатывания:

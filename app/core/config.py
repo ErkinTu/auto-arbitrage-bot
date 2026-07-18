@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://car_user:car_password@localhost:5432/car_analytics"
 
     mashina_api_url: str = "https://mashina.kg/api/mbank-proxy/v1/ads/listings"
+    lalafo_base_url: str = "https://lalafo.kg"
+    nbkr_rates_url: str = "https://www.nbkr.kg/XML/daily.xml"
     request_timeout_seconds: float = 20.0
     request_delay_seconds: float = 2.0
     request_retry_attempts: int = 5
@@ -31,7 +33,20 @@ class Settings(BaseSettings):
     bot_fresh_interval_minutes: int = 10
     bot_fresh_period: str = "1d"
     bot_fresh_page_size: int = 20  # объявлений на марку за цикл (1 страница)
+    # lalafo: авто больше, чем на mashina; API отдаёт максимум 50 на страницу
+    # (при большем per-page молча ужимает до 50) + VIP-поднятые сверху.
+    lalafo_fresh_page_size: int = 50
+    # Раздельные паузы lalafo: лента марки — тяжелый запрос (5с), карточка —
+    # лёгкий GET. При 429 парсер сам удваивает detail-паузу до конца цикла.
+    lalafo_feed_delay_seconds: float = 5.0
+    lalafo_detail_delay_seconds: float = 0.5
+    # Catch-up: если ВСЯ fresh-страница оказалась новой, значит между циклами
+    # был пропуск (простой) — дочитываем до N дополнительных страниц.
+    bot_catchup_max_pages: int = 3
     bot_new_lookback_minutes: int = 60
+    # Уведомлять только о свежих по дате ПУБЛИКАЦИИ на источнике: VIP-поднятые
+    # старые объявления всплывают в «свежей» ленте, но «новинками» не являются.
+    bot_max_listing_age_hours: int = 12
     bot_below_avg_factor: float = 0.95
     bot_below_avg_min_samples: int = 5
     bot_access_cache_ttl_seconds: int = 600
@@ -46,6 +61,17 @@ class Settings(BaseSettings):
     full_scan_max_items: int = 10000
     stats_rebuild_start_hour: int = 9  # пересчет статистики: 9:00, 17:00, 01:00
     stats_rebuild_interval_hours: int = 8
+    # У lalafo нет full-scan → проданное авто висело бы is_active навсегда:
+    # агрегаты строятся только по недавно виденным объявлениям, а «зависшие»
+    # (last_seen_at старше stale_listing_days) деактивируются worker-ом раз в сутки.
+    stats_max_last_seen_days: int = 30
+    stale_listing_days: int = 30
+    # Точечный валидатор lalafo: мы видим только новейшие 50 на марку, поэтому
+    # живое объявление со временем уходит из ленты навсегда. Карточка отвечает
+    # 200 живым (продлеваем last_seen_at) и 410 Gone удалённым (деактивация
+    # раньше 30-дневного фолбэка). Раз в сутки, не больше max_per_run карточек.
+    lalafo_validate_after_days: int = 3
+    lalafo_validate_max_per_run: int = 500
 
     @property
     def allowed_brand_list(self) -> list[str]:

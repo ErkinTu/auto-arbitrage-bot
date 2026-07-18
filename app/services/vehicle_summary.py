@@ -9,9 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Brand, CarModel, DailyMarketStat, Generation, Listing, RawPayload
-
-
-MASHINA_DETAILS_URL = "https://www.mashina.kg/details"
+from app.services.sources import listing_public_url
 
 
 def _percentile(values: list[float], p: float) -> float:
@@ -26,9 +24,7 @@ def _percentile(values: list[float], p: float) -> float:
 
 
 def _build_source_url(listing: Listing) -> str:
-    if listing.source_slug:
-        return f"{MASHINA_DETAILS_URL}/{listing.source_slug}/"
-    return f"{MASHINA_DETAILS_URL}/{listing.external_id}/"
+    return listing_public_url(listing.source_slug, listing.external_id)
 
 
 def _extract_image_url(payload: dict[str, Any] | None) -> str | None:

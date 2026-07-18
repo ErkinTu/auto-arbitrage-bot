@@ -17,16 +17,17 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.catalog_service import seed_default_catalog
 from app.services.lookup import get_or_create_source
+from app.services.sources import SOURCE_NAMES, source_base_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def bootstrap() -> None:
-    settings = get_settings()
     init_db()
     with SessionLocal() as session:
-        get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
+        for source_name in SOURCE_NAMES:
+            get_or_create_source(session, source_name, source_base_url(source_name))
         seed_default_catalog(session)
         session.commit()
 

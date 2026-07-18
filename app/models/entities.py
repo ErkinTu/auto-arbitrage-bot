@@ -293,6 +293,18 @@ class DailyMarketStat(Base):
     sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class ExchangeRate(Base, TimestampMixin):
+    """Официальный дневной курс НБКР: сколько KGS стоит 1 единица валюты."""
+
+    __tablename__ = "exchange_rates"
+    __table_args__ = (UniqueConstraint("currency", "rate_date", name="uq_exchange_rate_currency_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    rate_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    rate_kgs: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+
+
 class BotUser(Base, TimestampMixin):
     __tablename__ = "bot_users"
 

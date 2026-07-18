@@ -17,9 +17,9 @@ from app.bot.matching import PendingNotification, match_new_listings
 from app.bot.notifier import BotLike, send_notifications
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.parsers.mashina import MashinaParser
 from app.services.lookup import ensure_brand_targets, get_or_create_source
 from app.services.schedule import local_now, seconds_until_window
+from app.services.sources import LALAFO, SOURCE_NAMES, build_parser, source_base_url
 from app.services.sync import run_sync, utcnow
 
 logger = logging.getLogger(__name__)
@@ -35,37 +35,50 @@ def run_cycle() -> list[PendingNotification]:
     """
     settings = get_settings()
     with SessionLocal() as session:
-        source = get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
-        session.commit()
-        targets = ensure_brand_targets(session, source, settings.allowed_brand_list)
-
-        parser = MashinaParser()
-        try:
-            for target in targets:
-                try:
-                    summary = run_sync(
-                        session,
-                        parser,
-                        source,
-                        target,
-                        mode="fresh",
-                        period_override=settings.bot_fresh_period,
-                        page_size_override=settings.bot_fresh_page_size,
-                        max_pages_override=1,
-                        max_items_override=settings.bot_fresh_page_size,
-                        update_target_bookkeeping=False,
-                    )
-                    logger.info(
-                        "bot fresh sync %s: new=%s processed=%s",
-                        target.brand_filter,
-                        summary.new,
-                        summary.processed,
-                    )
-                except Exception:
-                    session.rollback()
-                    logger.exception("bot fresh sync failed for %s", target.brand_filter)
-        finally:
-            parser.close()
+        for source_name in SOURCE_NAMES:
+            try:
+                source = get_or_create_source(session, source_name, source_base_url(source_name))
+                session.commit()
+                targets = ensure_brand_targets(session, source, settings.allowed_brand_list)
+                # Для lalafo здесь же подтягивается курс НБКР (лениво, раз в день).
+                parser = build_parser(source_name, session)
+            except Exception:
+                session.rollback()
+                logger.exception("bot fresh cycle: source %s is unavailable, skipping", source_name)
+                continue
+            page_size = (
+                settings.lalafo_fresh_page_size if source_name == LALAFO else settings.bot_fresh_page_size
+            )
+            try:
+                for target in targets:
+                    try:
+                        summary = run_sync(
+                            session,
+                            parser,
+                            source,
+                            target,
+                            mode="fresh",
+                            period_override=settings.bot_fresh_period,
+                            page_size_override=page_size,
+                            max_pages_override=1,
+                            max_items_override=page_size,
+                            update_target_bookkeeping=False,
+                            catchup_max_pages=settings.bot_catchup_max_pages,
+                        )
+                        logger.info(
+                            "bot fresh sync %s %s: new=%s processed=%s",
+                            source_name,
+                            target.brand_filter,
+                            summary.new,
+                            summary.processed,
+                        )
+                    except Exception:
+                        session.rollback()
+                        logger.exception(
+                            "bot fresh sync failed for %s %s", source_name, target.brand_filter
+                        )
+            finally:
+                parser.close()
 
         since = utcnow() - timedelta(minutes=settings.bot_new_lookback_minutes)
         return match_new_listings(
@@ -73,6 +86,7 @@ def run_cycle() -> list[PendingNotification]:
             since,
             factor=settings.bot_below_avg_factor,
             min_samples=settings.bot_below_avg_min_samples,
+            max_age_hours=settings.bot_max_listing_age_hours,
         )
 
 

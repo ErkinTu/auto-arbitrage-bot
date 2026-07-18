@@ -28,6 +28,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Сентинель "публикация прямо сейчас" для _add_listing: None — это валидное
+# значение (дата публикации на источнике неизвестна).
+_PUBLISHED_NOW = object()
+
+
 def _session() -> Session:
     import app.models  # noqa: F401
 
@@ -63,6 +68,7 @@ def _add_listing(
     mileage_km: int | None = 90_000,
     customs_status: str = "unknown",
     with_model: bool = True,
+    source_created_at: datetime | None | object = _PUBLISHED_NOW,
 ) -> Listing:
     source_id, brand_id, model_id = _ids(session)
     listing = Listing(
@@ -78,6 +84,7 @@ def _add_listing(
         customs_status=customs_status,
         current_price_usd=price_usd,
         is_active=is_active,
+        source_created_at=_now() if source_created_at is _PUBLISHED_NOW else source_created_at,
         payload_hash="x" * 8,
     )
     session.add(listing)
@@ -148,6 +155,21 @@ def test_find_new_listings_window() -> None:
     _add_listing(session, external_id="5", price_usd=None)
 
     found = find_new_listings(session, since)
+    assert [listing.id for listing in found] == [fresh.id]
+
+
+def test_find_new_listings_publication_freshness() -> None:
+    """VIP-поднятое старое объявление впервые видно боту (событие new),
+    но публикация на источнике старая -> пуша нет."""
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+
+    fresh = _add_listing(session, external_id="1", source_created_at=_now() - timedelta(hours=11))
+    _add_listing(session, external_id="2", source_created_at=_now() - timedelta(hours=13))
+    # Дата публикации неизвестна -> не уведомлять (принцип filter_matches).
+    _add_listing(session, external_id="3", source_created_at=None)
+
+    found = find_new_listings(session, since, max_age_hours=12)
     assert [listing.id for listing in found] == [fresh.id]
 
 
@@ -325,6 +347,7 @@ def test_match_all_brands_filter() -> None:
         mileage_km=50_000,
         current_price_usd=Decimal("9000"),
         is_active=True,
+        source_created_at=_now(),
         payload_hash="y" * 8,
     )
     session.add(honda)

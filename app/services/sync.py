@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -21,7 +22,7 @@ from app.models import (
 )
 from app.parsers.base import ParserAdapter
 from app.services.catalog_service import resolve_normalized_listing
-from app.services.normalizer import NormalizedListing, normalize_mashina_listing
+from app.services.normalizer import NormalizedListing
 
 logger = logging.getLogger(__name__)
 
@@ -165,10 +166,13 @@ def _apply_listing(
         _save_raw_payload(session, source.id, listing, run.id, item)
         return "new", listing
 
+    # У конвертированного по курсу USD (usd_converted) колебание — это смена
+    # курса НБКР, а не цены продавцом: сравниваем только оригинальную цену.
+    usd_is_derived = "usd_converted" in item.quality_flags
     price_changed = (
         listing.current_price_amount != item.price_amount
         or listing.current_price_currency != item.price_currency
-        or listing.current_price_usd != item.price_usd
+        or (not usd_is_derived and listing.current_price_usd != item.price_usd)
     )
     was_active = listing.is_active
     changed = listing.payload_hash != item.payload_hash
@@ -241,6 +245,148 @@ def _deactivate_missing(
     return deactivated
 
 
+def deactivate_stale_listings(
+    session: Session,
+    *,
+    stale_days: int,
+    source_names: Iterable[str] = ("lalafo.kg",),
+) -> int:
+    """Деактивация «зависших»: у fresh-only источников (lalafo) нет full-scan,
+    проданное авто просто исчезает из ленты и осталось бы is_active навсегда.
+
+    Семантика — last_seen_at (НЕ first_seen_at): активно висящее в ленте
+    объявление каждый цикл обновляет last_seen_at и продолжает жить. История
+    цен не трогается — аналитика прошлых дней сохраняется. Scope по умолчанию —
+    только lalafo: у mashina своя деактивация через weekend full-scan.
+    Коммит — на вызывающей стороне.
+    """
+    cutoff = utcnow() - timedelta(days=stale_days)
+    stale = session.scalars(
+        select(Listing).where(
+            Listing.source_id.in_(select(Source.id).where(Source.name.in_(tuple(source_names)))),
+            Listing.is_active.is_(True),
+            Listing.last_seen_at < cutoff,
+        )
+    ).all()
+    for listing in stale:
+        old_status = listing.status
+        listing.is_active = False
+        listing.status = "inactive"
+        listing.deactivated_at = utcnow()
+        _append_status_history(
+            session, listing, "deactivated", old_status, "inactive", details={"reason": "stale"}
+        )
+    return len(stale)
+
+
+# status_id живой карточки lalafo; другие значения пока не встречались —
+# логируем и НЕ деактивируем (консервативно).
+LALAFO_STATUS_ACTIVE = 2
+
+
+def validate_stale_lalafo_listings(
+    session: Session,
+    parser: ParserAdapter,
+    source: Source,
+    *,
+    validate_after_days: int,
+    max_per_run: int,
+) -> tuple[int, int]:
+    """Точечный «валидатор» давно не виденных lalafo-объявлений через карточку.
+
+    Лента даёт только новейшие 50 на марку, поэтому живое объявление со
+    временем навсегда уходит из нашего поля зрения. Карточка отвечает
+    HTTP 200 живым (продлеваем last_seen_at — объявление остаётся в статистике
+    и не попадёт под 30-дневный фолбэк) и HTTP 410 Gone удалённым/проданным
+    (честная деактивация раньше фолбэка). Возвращает (checked, deactivated);
+    коммит — на вызывающей стороне."""
+    cutoff = utcnow() - timedelta(days=validate_after_days)
+    candidates = session.scalars(
+        select(Listing)
+        .where(
+            Listing.source_id == source.id,
+            Listing.is_active.is_(True),
+            Listing.last_seen_at < cutoff,
+        )
+        .order_by(Listing.last_seen_at.asc())
+        .limit(max_per_run)
+    ).all()
+
+    checked = deactivated = 0
+    for listing in candidates:
+        try:
+            detail = parser.fetch_details(listing.external_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 410:
+                logger.warning(
+                    "lalafo validator: id=%s unexpected status=%s; keeping active",
+                    listing.external_id,
+                    exc.response.status_code,
+                )
+                continue
+            checked += 1
+            old_status = listing.status
+            listing.is_active = False
+            listing.status = "inactive"
+            listing.deactivated_at = utcnow()
+            _append_status_history(
+                session, listing, "deactivated", old_status, "inactive", details={"reason": "card_gone"}
+            )
+            deactivated += 1
+            continue
+        except Exception:
+            logger.exception("lalafo validator: detail fetch failed for id=%s", listing.external_id)
+            continue
+
+        checked += 1
+        status_id = detail.get("status_id")
+        if status_id is not None and status_id != LALAFO_STATUS_ACTIVE:
+            logger.warning(
+                "lalafo validator: id=%s alive card with unexpected status_id=%s; keeping active",
+                listing.external_id,
+                status_id,
+            )
+        listing.last_seen_at = utcnow()
+    return checked, deactivated
+
+
+def _enrich_or_skip(
+    session: Session,
+    parser: ParserAdapter,
+    source: Source,
+    raw: dict,
+) -> dict | None:
+    """Для источников с неполной лентой (lalafo): карточку дотягиваем только
+    для новых объявлений и при смене цены. Уже известное объявление с той же
+    ценой не перезаписываем неполными данными ленты — только отмечаем как
+    увиденное. None => пропустить элемент."""
+    external_id = str(raw.get("id"))
+    listing = session.scalar(
+        select(Listing).where(Listing.source_id == source.id, Listing.external_id == external_id)
+    )
+    if listing is not None:
+        feed_price = raw.get("price")
+        same_price = (
+            (feed_price is None and listing.current_price_amount is None)
+            or (
+                feed_price is not None
+                and listing.current_price_amount is not None
+                and listing.current_price_amount == feed_price
+                and listing.current_price_currency == raw.get("currency")
+            )
+        )
+        if same_price:
+            listing.last_seen_at = utcnow()
+            return None
+    try:
+        return parser.fetch_details(raw["id"])
+    except Exception:
+        logger.exception(
+            "detail fetch failed for %s id=%s; falling back to feed data", parser.source_name, raw.get("id")
+        )
+        return raw
+
+
 def run_sync(
     session: Session,
     parser: ParserAdapter,
@@ -254,6 +400,7 @@ def run_sync(
     max_items_override: int | None = None,
     start_page_override: int | None = None,
     update_target_bookkeeping: bool = True,
+    catchup_max_pages: int = 0,
 ) -> RunSummary:
     if mode not in {"fresh", "full"}:
         raise ValueError("mode must be fresh or full")
@@ -273,8 +420,14 @@ def run_sync(
     seen_external_ids: set[str] = set()
     complete_scan = False
 
+    # Catch-up (только fresh): полностью новая страница означает пропуск между
+    # циклами (простой) — разрешаем дочитать до catchup_max_pages сверх лимита.
+    last_allowed_page = start_page + max_pages - 1
+    hard_last_page = last_allowed_page + (catchup_max_pages if mode == "fresh" else 0)
+
     try:
-        for page in range(start_page, start_page + max_pages):
+        page = start_page
+        while page <= last_allowed_page:
             fetched = parser.fetch_listings(
                 brand=target.brand_filter,
                 model=target.model_filter,
@@ -296,11 +449,21 @@ def run_sync(
                 complete_scan = True
                 break
 
+            # Событие самого старого обработанного объявления страницы: если даже
+            # оно new — за краем страницы могли остаться невиданные (пропуск).
+            # Сравнивать "всю страницу" с page_size нельзя: lalafo добавляет
+            # сверху VIP-блок (54 при per-page=50), и VIP почти всегда известны.
+            tail_event: str | None = None
             for raw in fetched.items:
                 if run.processed_count >= max_items:
                     break
                 try:
-                    item = normalize_mashina_listing(raw, fallback_make=target.brand_filter)
+                    if parser.needs_detail_enrichment:
+                        raw = _enrich_or_skip(session, parser, source, raw)
+                        if raw is None:
+                            tail_event = "known_skip"
+                            continue
+                    item = parser.normalize(raw, fallback_make=target.brand_filter)
                     if not item.make:
                         run.skipped_count += 1
                         logger.warning(
@@ -312,6 +475,7 @@ def run_sync(
                         continue
                     event, _ = _apply_listing(session, source, run, item)
                     seen_external_ids.add(item.external_id)
+                    tail_event = event
                     run.processed_count += 1
                     if event == "new":
                         run.new_count += 1
@@ -342,11 +506,27 @@ def run_sync(
                 run.skipped_count,
                 run.error_count,
             )
+            page_gap_suspected = len(fetched.items) >= page_size and tail_event == "new"
+            if page_gap_suspected and mode == "fresh":
+                logger.warning(
+                    "run=%s target=%s page=%s: oldest item on a full page is new; "
+                    "possible gap between cycles",
+                    run.id,
+                    target.brand_filter,
+                    page,
+                )
+                if page == last_allowed_page and last_allowed_page < hard_last_page:
+                    last_allowed_page += 1
+                    max_items += page_size
+                    logger.warning(
+                        "run=%s target=%s catch-up: extending to page %s", run.id, target.brand_filter, page + 1
+                    )
             if run.processed_count >= max_items:
                 break
             if len(fetched.items) < page_size:
                 complete_scan = True
                 break
+            page += 1
 
         # Deactivation is only safe after a full scan that started at page 1:
         # a resumed partial scan (start_page > 1) never sees the whole catalog,

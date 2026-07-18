@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -14,6 +14,11 @@ from app.services.catalog import parse_vehicle_part, split_listing_year_suffix
 # INTEGER mileage column (e.g. a bogus 2_394_664_666 km) and would abort the sync,
 # so the raw number is dropped after the quality flag is recorded.
 IMPLAUSIBLE_MILEAGE_KM = 2_500_000
+
+# Цена целого авто ниже этого порога (USD) — мусор ввода (взнос рассрочки,
+# «180 сом» и т.п.). Такие объявления сохраняем, но помечаем price_implausibly_low:
+# критический флаг исключает их из аналитики и уведомлений «ниже рынка».
+MIN_PLAUSIBLE_PRICE_USD = 500
 
 
 @dataclass(slots=True)
@@ -209,6 +214,181 @@ def _safe_payload(raw: dict[str, Any]) -> dict[str, Any]:
         "dealer": {"is_official": bool((raw.get("dealer") or {}).get("is_official"))},
         "is_verified_seller": bool((raw.get("user") or {}).get("is_verified_seller")),
     }
+
+
+# --- lalafo.kg -------------------------------------------------------------
+
+# Имена параметров карточки lalafo (русские, как отдаёт API). Матчим по префиксу:
+# «Пробег (км.)» и подобные могут менять хвост.
+_LALAFO_PARAM_PREFIXES = {
+    "model": ("Модель",),
+    "year": ("Год",),
+    "mileage": ("Пробег",),
+    "fuel": ("Топливо",),
+    "body": ("Кузов",),
+    "gearbox": ("Коробка",),
+    "steering": ("Руль",),
+    "drive": ("Привод",),
+    "engine_volume": ("Объем двигателя", "Объём двигателя"),
+    "customs": ("Растаможка",),
+    "registration_country": ("Страна учета", "Страна учёта"),
+}
+
+_LALAFO_TITLE_YEAR_RE = re.compile(r"(19|20)\d{2}\s*г")
+
+
+def _lalafo_params(raw: dict[str, Any]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for param in raw.get("params") or []:
+        name = str(param.get("name") or "")
+        value = param.get("value")
+        if value is None or value == "":
+            continue
+        for field, prefixes in _LALAFO_PARAM_PREFIXES.items():
+            if field not in values and any(name.startswith(prefix) for prefix in prefixes):
+                values[field] = str(value)
+    return values
+
+
+def _parse_lalafo_title(title: str | None, fallback_make: str | None) -> tuple[str | None, int | None]:
+    """Заголовок lalafo структурирован: «Toyota Camry: 2016 г., 2.5 л, Вариатор, …».
+    Возвращает (текст модели, год из заголовка)."""
+    if not title:
+        return None, None
+    clean = " ".join(title.split())
+
+    year_match = _LALAFO_TITLE_YEAR_RE.search(clean)
+    year = int(year_match.group(0)[:4]) if year_match else None
+
+    head = clean.split(":", 1)[0].strip()
+    if fallback_make:
+        brand_match = re.search(rf"(?<!\w){re.escape(fallback_make)}(?!\w)", head, flags=re.IGNORECASE)
+        if brand_match:
+            head = head[brand_match.end() :]
+    model = head.strip(" -:|,")
+    return (model or None), year
+
+
+def _lalafo_customs_status(customs_value: str | None) -> str:
+    if not customs_value:
+        return "unknown"
+    text = customs_value.lower()
+    if "не растамож" in text or "без растамож" in text:
+        return "not_cleared"
+    if "растамож" in text:
+        return "cleared"
+    return "unknown"
+
+
+def _lalafo_safe_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    """Только технические данные объявления; контакты/личность продавца не храним."""
+    national_price = raw.get("national_price") or {}
+    return {
+        "id": raw.get("id"),
+        "title": raw.get("title"),
+        "url": raw.get("url"),
+        "price": raw.get("price"),
+        "currency": raw.get("currency"),
+        "national_price_amount": national_price.get("price"),
+        "city": raw.get("city"),
+        "status_id": raw.get("status_id"),
+        "created_time": raw.get("created_time"),
+        "updated_time": raw.get("updated_time"),
+        "is_vip": bool(raw.get("is_vip")),
+        "params": [
+            {"name": param.get("name"), "value": param.get("value")}
+            for param in raw.get("params") or []
+        ],
+    }
+
+
+def _from_unix(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def normalize_lalafo_listing(
+    raw: dict[str, Any],
+    *,
+    fallback_make: str | None = None,
+    usd_rate_kgs: Decimal | None = None,
+) -> NormalizedListing:
+    """`raw` — карточка (`fetch_details`) или элемент ленты (тогда params пустые
+    и модель/год берутся из структурированного заголовка).
+
+    `usd_rate_kgs` — курс НБКР (KGS за 1 USD): цена в USD вычисляется ТОЛЬКО
+    для объявлений без собственного USD (продавец указал сомы). Такая цена
+    помечается флагом usd_converted — sync не считает её смену курса
+    изменением цены продавцом."""
+    params = _lalafo_params(raw)
+    title_model, title_year = _parse_lalafo_title(raw.get("title"), fallback_make)
+
+    model_text = params.get("model") or title_model
+    # «Другая модель» — заглушка lalafo, а не модель: оставляем пустым,
+    # чтобы объявление ушло в missing_model, а не плодило ложные alias-issues.
+    if model_text and model_text.strip().lower() in {"другая модель", "другая"}:
+        model_text = title_model if params.get("model") else None
+        if model_text and model_text.strip().lower() in {"другая модель", "другая"}:
+            model_text = None
+    year = _as_int(params.get("year")) or title_year
+    mileage_km = _as_int(params.get("mileage"))
+    flags = _quality_flags(year=year, parsed_year=title_year, mileage_km=mileage_km)
+    if mileage_km is not None and mileage_km > IMPLAUSIBLE_MILEAGE_KM:
+        mileage_km = None
+
+    currency = raw.get("currency")
+    price = _as_decimal(raw.get("price"))
+    national_kgs = _as_decimal((raw.get("national_price") or {}).get("price"))
+    price_usd = price if currency == "USD" else None
+    price_kgs = price if currency == "KGS" else national_kgs
+    if price_usd is None and price_kgs is not None and usd_rate_kgs and usd_rate_kgs > 0:
+        price_usd = (price_kgs / usd_rate_kgs).quantize(Decimal("1"))
+        flags.append("usd_converted")
+    if price_usd is not None and price_usd < MIN_PLAUSIBLE_PRICE_USD:
+        flags.append("price_implausibly_low")
+
+    user = raw.get("user") or {}
+
+    return NormalizedListing(
+        external_id=str(raw["id"]),
+        title=raw.get("title"),
+        slug=raw.get("url"),
+        make=fallback_make,
+        model=model_text,
+        generation=None,
+        source_make_text=fallback_make,
+        source_model_text=model_text,
+        source_generation_text=None,
+        normalization_status="pending_catalog_resolution",
+        normalization_confidence="pending",
+        quality_flags=flags,
+        analytics_eligible=False,
+        year=year,
+        mileage_km=mileage_km,
+        body_type=params.get("body"),
+        engine_volume=_as_decimal(params.get("engine_volume")),
+        fuel_type=params.get("fuel"),
+        gearbox=params.get("gearbox"),
+        drive_type=params.get("drive"),
+        steering_wheel=params.get("steering"),
+        city=raw.get("city"),
+        customs_status=_lalafo_customs_status(params.get("customs")),
+        seller_type="dealer" if user.get("pro") else "private",
+        is_verified_seller=False,
+        is_official_dealer=False,
+        price_amount=price,
+        price_currency=currency,
+        price_kgs=price_kgs,
+        price_usd=price_usd,
+        status="active",
+        source_created_at=_from_unix(raw.get("created_time")),
+        source_upped_at=_from_unix(raw.get("updated_time")),
+        safe_payload=_lalafo_safe_payload(raw),
+    )
 
 
 def normalize_mashina_listing(

@@ -61,7 +61,7 @@ def format_notification(p: PendingNotification) -> str:
         f"Цена: <b>{price}</b>{below}\n"
         f"Город: {city}\n"
         f"{foreign_note}\n"
-        f'<a href="{p.url}">Открыть на mashina.kg</a>'
+        f'<a href="{p.url}">Открыть на {p.source_name}</a>'
     )
 
 

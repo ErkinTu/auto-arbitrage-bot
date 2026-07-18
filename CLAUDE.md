@@ -19,7 +19,7 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 |---|---|---|
 | `postgres` | БД (volume `postgres_data`) | postgres:16-alpine |
 | `api` | FastAPI: оценка/графики/каталог на :8000 | `uvicorn app.main:app` |
-| `worker` | full scan по выходным + пересчёт статистики | `app.worker` |
+| `worker` | full scan по выходным + пересчёт статистики + деактивация «зависших» | `app.worker` |
 | `bot` | Telegram: fresh-парс каждые 10 мин + уведомления | `app.bot` |
 
 Ключевые факты (частые источники непонимания):
@@ -32,7 +32,29 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 - **Время.** Контейнеры в UTC; всё расписание код считает сам по
   `SCHEDULER_TIMEZONE` (`Asia/Bishkek`). Контейнерный TZ не трогать.
 - **Расписание встроено в сервисы**, cron не нужен (кроме бэкапов).
-- **Источник данных** — один: mashina.kg (`app/parsers/mashina.py`).
+- **Источника данных два**: mashina.kg (`app/parsers/mashina.py`, full+fresh) и
+  lalafo.kg (`app/parsers/lalafo.py`, ТОЛЬКО fresh — без full-scan).
+  Реестр источников/фабрика парсеров — `app/services/sources.py`; нормализатор
+  диспетчеризуется через `parser.normalize()`. Детали lalafo-объявления
+  дотягиваются только для новых/подешевевших (`_enrich_or_skip` в sync).
+  Паузы lalafo раздельные: лента 5с, карточки 0.5с с удвоением при 429
+  (`lalafo_feed_delay_seconds`/`lalafo_detail_delay_seconds`).
+  Подробности lalafo API и прод-чеклист — `LALAFO.md`.
+- **Свежесть данных.** Бот пушит только объявления, ОПУБЛИКОВАННЫЕ на
+  источнике ≤ 12 ч назад (`bot_max_listing_age_hours`; NULL-дата = молчим) —
+  VIP-поднятые старые в БД сохраняются, но «новинками» не считаются.
+  Вместо full-scan у lalafo — ежесуточное обслуживание в worker: точечный
+  валидатор карточек не виденных 3+ дня объявлений (HTTP 410 Gone →
+  деактивация reason='card_gone', 200 → продление `last_seen_at`; лента даёт
+  только новейшие 50, живое объявление иначе «пропадает» навсегда), затем
+  фолбэк — деактивация не подтверждённых дольше 30 дней (`stale_listing_days`,
+  reason='stale'). Агрегаты статистики учитывают только виденных за последние
+  30 дней (`stats_max_last_seen_days`). Если даже самое старое объявление
+  полной fresh-страницы новое (пропуск/простой) — warning + catch-up до
+  `bot_catchup_max_pages` страниц.
+- **Курс USD/KGS** — НБКР (`app/services/exchange.py`, раз в день, лениво из
+  бот-цикла). Цены lalafo в сомах конвертируются в USD только при отсутствии
+  собственного USD (флаг `usd_converted`; смена курса ≠ смена цены).
 
 ## Раскладка кода (`app/`)
 
@@ -63,9 +85,10 @@ pytest                       # тесты (pythonpath=. в pyproject)
 docker compose exec -T worker uv run python -m app.cli <cmd>
 ```
 
-`cmd`: `init-db`, `seed`, `targets`, `add-target`, `sync`, `sync-all`,
-`rebuild-stats`, `catalog-issues`, `add-model-alias`, `add-generation-alias`,
-`reprocess-catalog`.
+`cmd`: `init-db`, `seed`, `targets`, `add-target`, `sync [--source]`,
+`sync-all [--source]`, `rebuild-stats`, `catalog-issues`, `add-model-alias`,
+`add-generation-alias`, `reprocess-catalog`, `ensure-self-aliases`,
+`refresh-rate`.
 
 ## Продакшн
 
@@ -104,5 +127,7 @@ docker без sudo. Полный runbook переноса/обновления/�
 | `DB_SCHEMA_FOR_GPT.md` | Схема БД (таблицы/связи) для генерации запросов |
 | `DB_QUERIES.md` | Готовые SQL-запросы |
 | `FRONTEND_TZ.md` | Тех.задание фронта (`../analytics-front`) |
+| `LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
+| `TODO_LALAFO.md` | Согласованные задачи следующей итерации lalafo |
 
 Долгоживущие факты вне репозитория — в авто-памяти (`MEMORY.md`).

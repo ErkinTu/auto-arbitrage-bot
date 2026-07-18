@@ -6,13 +6,22 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Brand, CarModel, Generation, GenerationAlias, Listing, ModelAlias, NormalizationIssue
+from app.models import (
+    Brand,
+    CarModel,
+    Generation,
+    GenerationAlias,
+    Listing,
+    ModelAlias,
+    NormalizationIssue,
+    Source,
+)
 from app.services.catalog import DEFAULT_CATALOG, is_bootstrap_model, normalize_alias_text
 from app.services.lookup import get_or_create_brand, get_or_create_generation, get_or_create_model
 from app.services.normalizer import NormalizedListing, normalize_mashina_listing
 
 
-CRITICAL_QUALITY_FLAGS = {"year_title_conflict", "mileage_implausibly_high"}
+CRITICAL_QUALITY_FLAGS = {"year_title_conflict", "mileage_implausibly_high", "price_implausibly_low"}
 
 
 @dataclass(slots=True)
@@ -296,6 +305,11 @@ def resolve_normalized_listing(session: Session, item: NormalizedListing) -> Cat
 def reprocess_catalog(session: Session) -> dict[str, int]:
     """Reparse every stored title and apply the current catalog rules without re-downloading data."""
     counters = {"checked": 0, "reparsed": 0, "resolved": 0, "unknown": 0, "changed": 0}
+    # Перепарс заголовка — mashina-специфичный (title-парсер mashina). Объявления
+    # других источников (lalafo) хранят чистые source-поля из параметров карточки:
+    # их только пере-резолвим по текущим алиасам, не трогая поля и quality_flags.
+    mashina_source = session.scalar(select(Source).where(Source.name == "mashina.kg"))
+    mashina_source_id = mashina_source.id if mashina_source else None
     listings = session.scalars(select(Listing).order_by(Listing.id)).all()
     for listing in listings:
         counters["checked"] += 1
@@ -306,7 +320,7 @@ def reprocess_catalog(session: Session) -> dict[str, int]:
 
         suggested_model = None
         suggested_generation = None
-        if listing.title:
+        if listing.title and listing.source_id == mashina_source_id:
             parsed = normalize_mashina_listing(
                 {
                     "id": listing.external_id,
