@@ -46,6 +46,16 @@ def test_format_notification_full() -> None:
     assert '<a href="https://www.mashina.kg/details/toyota-camry-1/">' in text
 
 
+def test_format_notification_null_mileage_marks_avg_as_all_mileages() -> None:
+    # Пустой пробег: среднее берётся по всей когорте модель+год -> помечаем.
+    text = format_notification(_note(mileage_km=None, below_market_percent=15.0, market_avg_usd=12000.0))
+    assert "Средняя цена по рынку (по всем пробегам): $12 000" in text
+    # Известный пробег: пометки нет.
+    text_known = format_notification(_note(mileage_km=90_000, market_avg_usd=12000.0))
+    assert "Средняя цена по рынку: $12 000" in text_known
+    assert "по всем пробегам" not in text_known
+
+
 def test_format_notification_foreign_listing_highlights_location() -> None:
     text = format_notification(_note(city="Китай"))
     assert "Город: Китай" in text

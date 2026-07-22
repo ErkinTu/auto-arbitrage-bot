@@ -1,9 +1,15 @@
+from decimal import Decimal
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.models import CarModel, NormalizationIssue
-from app.services.catalog_service import resolve_normalized_listing, seed_default_catalog
+from app.models import CarModel, Listing, NormalizationIssue, Source
+from app.services.catalog_service import (
+    reprocess_catalog,
+    resolve_normalized_listing,
+    seed_default_catalog,
+)
 from app.services.normalizer import normalize_mashina_listing
 
 
@@ -216,6 +222,72 @@ def test_legit_expensive_price_is_not_flagged() -> None:
     # Реальный верх рынка (~$500k) не должен ловиться предохранителем.
     assert item.price_usd == 500_000
     assert "price_implausibly_high" not in item.quality_flags
+
+
+def test_mashina_low_price_is_flagged_and_not_analytics_eligible() -> None:
+    session = _session()
+    item = normalize_mashina_listing(
+        {
+            "id": 50,
+            "title": "Toyota Camry 2015",
+            # Взнос рассрочки / «обмен» с символической ценой — не рыночная цена авто.
+            "prices": [{"is_original": True, "currency": "USD", "amount": 300}],
+            "attributes": [{"slug": "year", "value_number": 2015}],
+        },
+        fallback_make="Toyota",
+    )
+
+    resolve_normalized_listing(session, item)
+
+    assert item.model == "Camry"
+    assert "price_implausibly_low" in item.quality_flags
+    assert item.analytics_eligible is False
+
+
+def _mk_listing(session: Session, source: Source, *, ext: str, price, flags: list[str]) -> Listing:
+    listing = Listing(
+        source_id=source.id,
+        external_id=ext,
+        title="Toyota Camry 2015",
+        source_make_text="Toyota",
+        source_model_text="Camry",
+        year=2015,
+        current_price_usd=price,
+        quality_flags=flags,
+        is_active=True,
+        payload_hash="x" * 8,
+    )
+    session.add(listing)
+    session.flush()
+    return listing
+
+
+def test_reprocess_backfills_price_flags_from_current_price() -> None:
+    session = _session()
+    mashina = Source(name="mashina.kg")
+    lalafo = Source(name="lalafo.kg")
+    session.add_all([mashina, lalafo])
+    session.flush()
+
+    # mashina >$2M и <$500 — reprocess перепарсит title без цен, флаг берём из current_price_usd.
+    high = _mk_listing(session, mashina, ext="h", price=Decimal("3000000"), flags=[])
+    low = _mk_listing(session, mashina, ext="l", price=Decimal("300"), flags=[])
+    # lalafo: устаревший флаг при нормальной цене снимается; настоящий >$2M проставляется.
+    stale = _mk_listing(session, lalafo, ext="s", price=Decimal("15000"), flags=["price_implausibly_high"])
+    lalafo_high = _mk_listing(session, lalafo, ext="lh", price=Decimal("11000000"), flags=[])
+    session.commit()
+
+    reprocess_catalog(session)
+    session.commit()
+
+    for obj in (high, low, stale, lalafo_high):
+        session.refresh(obj)
+    assert "price_implausibly_high" in high.quality_flags and high.analytics_eligible is False
+    assert "price_implausibly_low" in low.quality_flags and low.analytics_eligible is False
+    assert "price_implausibly_high" not in (stale.quality_flags or [])
+    assert stale.analytics_eligible is True
+    assert "price_implausibly_high" in lalafo_high.quality_flags
+    assert lalafo_high.analytics_eligible is False
 
 
 def test_generation_period_is_preserved_and_not_treated_as_listing_year() -> None:

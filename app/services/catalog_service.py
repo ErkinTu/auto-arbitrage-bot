@@ -18,7 +18,12 @@ from app.models import (
 )
 from app.services.catalog import DEFAULT_CATALOG, is_bootstrap_model, normalize_alias_text
 from app.services.lookup import get_or_create_brand, get_or_create_generation, get_or_create_model
-from app.services.normalizer import NormalizedListing, normalize_mashina_listing
+from app.services.normalizer import (
+    MAX_PLAUSIBLE_PRICE_USD,
+    MIN_PLAUSIBLE_PRICE_USD,
+    NormalizedListing,
+    normalize_mashina_listing,
+)
 
 
 CRITICAL_QUALITY_FLAGS = {
@@ -359,6 +364,22 @@ def reprocess_catalog(session: Session) -> dict[str, int]:
                 tuple(listing.quality_flags or []),
             ):
                 counters["reparsed"] += 1
+
+        # Ценовые флаги в reprocess выводим из хранимого current_price_usd, а не из
+        # перепарса: у mashina title-перепарс идёт без цен (флаг бы потерялся), у
+        # lalafo quality_flags вообще не трогаются. Так reprocess единообразно
+        # бэкфиллит price_implausibly_high/low старым объявлениям и остаётся идемпотентным.
+        flags = [
+            f for f in (listing.quality_flags or [])
+            if f not in {"price_implausibly_low", "price_implausibly_high"}
+        ]
+        price = listing.current_price_usd
+        if price is not None:
+            if price < MIN_PLAUSIBLE_PRICE_USD:
+                flags.append("price_implausibly_low")
+            elif price > MAX_PLAUSIBLE_PRICE_USD:
+                flags.append("price_implausibly_high")
+        listing.quality_flags = flags
 
         resolution = resolve_catalog_values(
             session,

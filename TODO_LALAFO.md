@@ -104,10 +104,30 @@ deactivate_stale_if_due` (scope: только lalafo, как решено). Оп
 `test_stale_listings.py::test_stats_excludes_cohort_price_outlier` /
 `test_stats_keeps_outlier_in_small_cohort`,
 `test_bot_matching.py::test_market_average_null_mileage_aggregates_all_buckets`.
-`pytest` (63) + `ruff` зелёные локально.
 
-**Осталось:** живой прогон `run_cycle`/`rebuild-stats` + деплой (шаги 1–5 ниже,
-`reprocess-catalog` → `rebuild-stats` на проде). Задача D (пробег из lalafo) — бэклог.
+### Доработки по итогам репетиции на прод-копии (2026-07-22)
+
+Скачали прод-дамп, восстановили локально (без бота — конфликт токена), прогнали
+`reprocess-catalog`+`rebuild-stats`. B: срезано 82 выброса из 48 104 (0.17%),
+средние сошлись к медианам (Daewoo 1998 avg $6606→$1444, BMW 2023 $40679→$33778).
+C: NULL-пробег `market_average` разблокировал 790 из 2161 lalafo-объявлений
+(750→1540). Нашли и починили три вещи:
+- **Бэкфилл A через reprocess НЕ работал** (для mashina перепарс с пустыми
+  ценами стирал флаг, для lalafo флаги не трогались). Фикс: `reprocess_catalog`
+  выводит оба ценовых флага из хранимого `current_price_usd` (идемпотентно, оба
+  источника). Проверено: `price_implausibly_high` 1→5 (все объявления >$2M).
+- **Утечка mashina<$500** в стату (6 eligible, 5 стат-строк с min<500): у
+  mashina-нормализатора не было `MIN_PLAUSIBLE_PRICE_USD` (был только у lalafo).
+  Добавлен. Проверено: утечка 6→0, min в агрегатах = $500. «Договорная»/«обмен»
+  = NULL-цена уже отсеивались фильтром `IS NOT NULL`.
+- **Прозрачность NULL-пробега**: при пустом пробеге среднее берётся по всем
+  бакетам модель+года → в уведомлении помечаем «Средняя цена по рынку
+  (по всем пробегам)», чтобы «ниже средней» не читалось как оценка с учётом пробега.
+
+Тесты: +3 (`test_mashina_low_price_*`, `test_reprocess_backfills_price_flags_*`,
+`test_format_notification_null_mileage_*`). `pytest` (66) + `ruff` зелёные.
+
+**Осталось:** деплой (шаги 1–5 ниже). Задача D (пробег из lalafo) — бэклог.
 
 ## Контекст (что нашли на проде)
 
@@ -210,9 +230,10 @@ bucket `unknown` собирает NULL-пробеги машин с реальн
 1. Код: задачи A + B + C одним заходом (C без A/B опасна). D — отдельно, позже.
 2. `pytest` + `ruff` локально; прогнать `run_cycle` бота и `rebuild-stats`.
 3. Деплой (rsync + `docker compose up -d --build`, см. `DEPLOY.md`).
-4. На проде: `reprocess-catalog` (проставит `price_implausibly_high` старым
-   объявлениям — задача A) → `rebuild-stats` (задачи B/C). Оба тяжёлые, запускать
-   синхронно с `</dev/null` (см. грабли в `CLAUDE.md`).
+4. На проде: `reprocess-catalog` (бэкфиллит `price_implausibly_high`/`_low` из
+   `current_price_usd` — задачи A + отсев mashina<$500) → `rebuild-stats`
+   (задачи B/C). Оба тяжёлые, запускать синхронно с `</dev/null` (см. грабли в
+   `CLAUDE.md`). Проверено на прод-копии 2026-07-22.
 5. Обновить `CLAUDE.md` (новые настройки/флаг) и `LALAFO.md`.
 
 ## Не забыть после реализации

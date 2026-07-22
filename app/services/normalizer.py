@@ -424,6 +424,8 @@ def normalize_mashina_listing(
         mileage_km = None
 
     price_usd = _as_decimal((usd_price or {}).get("amount"))
+    if price_usd is not None and price_usd < MIN_PLAUSIBLE_PRICE_USD:
+        flags.append("price_implausibly_low")
     if price_usd is not None and price_usd > MAX_PLAUSIBLE_PRICE_USD:
         flags.append("price_implausibly_high")
 

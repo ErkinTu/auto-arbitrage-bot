@@ -52,7 +52,11 @@ def format_notification(p: PendingNotification) -> str:
 
     avg_line = ""
     if p.market_avg_usd is not None:
-        avg_line = f"Средняя цена по рынку: ${_fmt_int(round(p.market_avg_usd))}\n"
+        # При неизвестном пробеге среднее берётся по всей когорте модель+год
+        # (все бакеты пробега) — помечаем, чтобы «ниже средней» не читалось как
+        # оценка с учётом пробега.
+        scope = " (по всем пробегам)" if p.mileage_km is None else ""
+        avg_line = f"Средняя цена по рынку{scope}: ${_fmt_int(round(p.market_avg_usd))}\n"
 
     foreign_note = ""
     if is_foreign(p.city):
