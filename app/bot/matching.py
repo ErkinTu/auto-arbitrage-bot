@@ -157,8 +157,14 @@ def market_average(
         DailyMarketStat.brand_id == listing.brand_id,
         DailyMarketStat.car_model_id == listing.car_model_id,
         DailyMarketStat.year == listing.year,
-        DailyMarketStat.mileage_bucket == mileage_bucket(listing.mileage_km),
     ]
+    # При известном пробеге сравниваем внутри своего бакета. При NULL-пробеге
+    # (у lalafo ~43%) bucket unknown оторван от парка mashina и почти никогда не
+    # набирает min_samples → честнее агрегировать ВСЕ бакеты модель+года (взвешенно
+    # по sample_count — суммирование ниже уже это делает). Безопасно только вместе
+    # с отсевом выбросов в stats (иначе средняя заражается выбросом из unknown).
+    if listing.mileage_km is not None:
+        conditions.append(DailyMarketStat.mileage_bucket == mileage_bucket(listing.mileage_km))
     # Растаможка существенно сдвигает цены: сравниваем только внутри своей группы.
     if listing.customs_status != "unknown":
         conditions.append(DailyMarketStat.customs_status == listing.customs_status)

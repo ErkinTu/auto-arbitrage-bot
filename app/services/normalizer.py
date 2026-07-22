@@ -20,6 +20,13 @@ IMPLAUSIBLE_MILEAGE_KM = 2_500_000
 # критический флаг исключает их из аналитики и уведомлений «ниже рынка».
 MIN_PLAUSIBLE_PRICE_USD = 500
 
+# Верхний предохранитель: цена выше этого (USD) — заведомо невозможная (плейсхолдеры
+# $999 999 999, битый ввод, переполнения). Порог намеренно высокий — реальный верх
+# рынка ~$500k (заказные G-Class AMG, Maybach), цель — только явный мусор. Помечаем
+# price_implausibly_high (критический флаг): выпадает и из статистики, и из бота, и
+# из /estimate, и с фронта — даже в когорте из одной машины, где отсев по группе бессилен.
+MAX_PLAUSIBLE_PRICE_USD = 2_000_000
+
 
 @dataclass(slots=True)
 class NormalizedListing:
@@ -350,6 +357,8 @@ def normalize_lalafo_listing(
         flags.append("usd_converted")
     if price_usd is not None and price_usd < MIN_PLAUSIBLE_PRICE_USD:
         flags.append("price_implausibly_low")
+    if price_usd is not None and price_usd > MAX_PLAUSIBLE_PRICE_USD:
+        flags.append("price_implausibly_high")
 
     user = raw.get("user") or {}
 
@@ -414,6 +423,10 @@ def normalize_mashina_listing(
         # analytics nor overflows the INTEGER column.
         mileage_km = None
 
+    price_usd = _as_decimal((usd_price or {}).get("amount"))
+    if price_usd is not None and price_usd > MAX_PLAUSIBLE_PRICE_USD:
+        flags.append("price_implausibly_high")
+
     return NormalizedListing(
         external_id=str(raw["id"]),
         title=raw.get("title"),
@@ -444,7 +457,7 @@ def normalize_mashina_listing(
         price_amount=_as_decimal((original_price or {}).get("amount")),
         price_currency=(original_price or {}).get("currency"),
         price_kgs=_as_decimal((kgs_price or {}).get("amount")),
-        price_usd=_as_decimal((usd_price or {}).get("amount")),
+        price_usd=price_usd,
         status=raw.get("status") or "active",
         source_created_at=_parse_datetime(raw.get("created_at")),
         source_upped_at=_parse_datetime(raw.get("upped_at")),

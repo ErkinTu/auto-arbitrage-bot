@@ -103,6 +103,15 @@ def test_normalize_lalafo_junk_price_flagged() -> None:
     assert "price_implausibly_low" in item.quality_flags
 
 
+def test_normalize_lalafo_placeholder_price_flagged_high() -> None:
+    item = normalize_lalafo_listing(
+        _detail_payload(price=999_999_999, currency="USD", national_price={}),
+        fallback_make="Toyota",
+    )
+    assert item.price_usd == Decimal("999999999")
+    assert "price_implausibly_high" in item.quality_flags
+
+
 def test_normalize_lalafo_other_model_placeholder() -> None:
     payload = _detail_payload(
         title="Zeekr : | 2021 г. Кроссовер",

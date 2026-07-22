@@ -217,3 +217,36 @@ def test_stats_exclude_listings_not_seen_recently() -> None:
     # Давно не виденное объявление с ценой 20000 не попало в агрегат.
     assert stat.sample_count == 1
     assert stat.avg_price_usd == Decimal("10000")
+
+
+def test_stats_excludes_cohort_price_outlier() -> None:
+    session = _session()
+    for i in range(6):
+        _add_listing(session, external_id=f"ok{i}", last_seen_days_ago=1, price_usd=Decimal("7000"))
+    _add_listing(session, external_id="junk", last_seen_days_ago=1, price_usd=Decimal("520000"))
+
+    rebuild_daily_market_stats(
+        session, outlier_min_cohort=5, outlier_price_median_multiple=4.0
+    )
+
+    stat = session.scalar(select(DailyMarketStat))
+    # Когорта модель+год из 6 нормальных + 1 выброс: $520k вне [median/4, median*4].
+    assert stat.sample_count == 6
+    assert stat.avg_price_usd == Decimal("7000")
+    assert stat.max_price_usd == Decimal("7000")
+
+
+def test_stats_keeps_outlier_in_small_cohort() -> None:
+    session = _session()
+    for i in range(2):
+        _add_listing(session, external_id=f"ok{i}", last_seen_days_ago=1, price_usd=Decimal("7000"))
+    _add_listing(session, external_id="junk", last_seen_days_ago=1, price_usd=Decimal("520000"))
+
+    rebuild_daily_market_stats(
+        session, outlier_min_cohort=5, outlier_price_median_multiple=4.0
+    )
+
+    stat = session.scalar(select(DailyMarketStat))
+    # Когорта < 5 — граница неосмысленна, не трогаем (полагаемся на предохранитель A).
+    assert stat.sample_count == 3
+    assert stat.max_price_usd == Decimal("520000")

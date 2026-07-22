@@ -89,6 +89,26 @@ deactivate_stale_if_due` (scope: только lalafo, как решено). Оп
 максимально устойчивый вариант (не «дешёвый костыль»). Разбор и обоснование — в
 авто-памяти `below-market-fragility`.
 
+## ✅ СДЕЛАНО 2026-07-22 (код + тесты): задачи A + B + C
+
+Реализованы одним заходом (C без A/B опасна):
+- **A** — `MAX_PLAUSIBLE_PRICE_USD=2_000_000` в `normalizer.py` (обе normalize),
+  флаг `price_implausibly_high` в `CRITICAL_QUALITY_FLAGS`.
+- **B** — отсев выбросов по когорте «модель+год» в `stats.py` перед бакетами
+  (`outlier_min_cohort=5`, `outlier_price_median_multiple=4.0`).
+- **C** — `bot/matching.py::market_average` при NULL-пробеге агрегирует все
+  бакеты модель+года (функция реально в `app/bot/matching.py`, не `services/`).
+
+Тесты: `test_normalizer.py::test_implausibly_high_price_*` / `test_legit_expensive_*`,
+`test_normalizer_lalafo.py::test_normalize_lalafo_placeholder_price_flagged_high`,
+`test_stale_listings.py::test_stats_excludes_cohort_price_outlier` /
+`test_stats_keeps_outlier_in_small_cohort`,
+`test_bot_matching.py::test_market_average_null_mileage_aggregates_all_buckets`.
+`pytest` (63) + `ruff` зелёные локально.
+
+**Осталось:** живой прогон `run_cycle`/`rebuild-stats` + деплой (шаги 1–5 ниже,
+`reprocess-catalog` → `rebuild-stats` на проде). Задача D (пробег из lalafo) — бэклог.
+
 ## Контекст (что нашли на проде)
 
 **Проблема 1 — выбросы цен раздувают среднюю.** Средняя рынка считается как

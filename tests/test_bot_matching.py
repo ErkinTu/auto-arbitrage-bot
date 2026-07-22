@@ -256,6 +256,21 @@ def test_market_average_weighted_and_latest_date() -> None:
     assert market_average(session, listing, min_samples=5) == 11200.0
 
 
+def test_market_average_null_mileage_aggregates_all_buckets() -> None:
+    session = _session()
+    # Разные бакеты пробега одной модель+год; поодиночке ни один не даёт 5 образцов.
+    _add_stat(session, avg="10000", samples=3, mileage_bucket="0-50k", customs_status="cleared")
+    _add_stat(session, avg="8000", samples=3, mileage_bucket="150-200k", customs_status="cleared")
+
+    # NULL-пробег: сравниваем со всей годовой когортой -> (10000*3 + 8000*3)/6 = 9000.
+    null_mileage = _add_listing(session, external_id="1", mileage_km=None, price_usd=Decimal("7000"))
+    assert market_average(session, null_mileage, min_samples=5) == 9000.0
+
+    # Известный пробег: только свой бакет (0-50k, 3 образца) -> порог 5 не выполнен.
+    known = _add_listing(session, external_id="2", mileage_km=30_000, price_usd=Decimal("7000"))
+    assert market_average(session, known, min_samples=5) is None
+
+
 def test_market_average_respects_customs_status() -> None:
     session = _session()
     _add_stat(session, avg="10000", samples=8, customs_status="cleared")

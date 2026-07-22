@@ -56,6 +56,14 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 - **Курс USD/KGS** — НБКР (`app/services/exchange.py`, раз в день, лениво из
   бот-цикла). Цены lalafo в сомах конвертируются в USD только при отсутствии
   собственного USD (флаг `usd_converted`; смена курса ≠ смена цены).
+- **Предохранители качества «ниже рынка»** (защита от выбросов цены):
+  (A) абсолютный потолок `MAX_PLAUSIBLE_PRICE_USD=2_000_000` в нормализаторе →
+  флаг `price_implausibly_high` (в `CRITICAL_QUALITY_FLAGS`, `analytics_eligible=false`);
+  (B) относительный отсев в `stats.py` — цены вне `[median/K, median*K]`
+  (`outlier_price_median_multiple=4.0`) по когорте «модель+год» при
+  `≥ outlier_min_cohort=5`, до раскладки по бакетам; (C) при NULL-пробеге
+  `bot/matching.py::market_average` агрегирует ВСЕ бакеты модель+года (bucket
+  `unknown` у lalafo ~43% и сам по себе не набирает `min_samples`).
 
 ## Раскладка кода (`app/`)
 

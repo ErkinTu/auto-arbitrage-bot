@@ -182,6 +182,42 @@ def test_implausible_mileage_is_kept_but_not_analytics_eligible() -> None:
     assert item.analytics_eligible is False
 
 
+def test_implausibly_high_price_is_flagged_and_not_analytics_eligible() -> None:
+    session = _session()
+    item = normalize_mashina_listing(
+        {
+            "id": 48,
+            "title": "Toyota Camry 2015",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 999_999_999}],
+            "attributes": [{"slug": "year", "value_number": 2015}],
+        },
+        fallback_make="Toyota",
+    )
+
+    resolve_normalized_listing(session, item)
+
+    # Camry распознаётся, значит analytics_eligible=False — именно из-за цены-плейсхолдера.
+    assert item.model == "Camry"
+    assert "price_implausibly_high" in item.quality_flags
+    assert item.analytics_eligible is False
+
+
+def test_legit_expensive_price_is_not_flagged() -> None:
+    item = normalize_mashina_listing(
+        {
+            "id": 49,
+            "title": "Toyota Camry 2024",
+            "prices": [{"is_original": True, "currency": "USD", "amount": 500_000}],
+            "attributes": [{"slug": "year", "value_number": 2024}],
+        },
+        fallback_make="Toyota",
+    )
+
+    # Реальный верх рынка (~$500k) не должен ловиться предохранителем.
+    assert item.price_usd == 500_000
+    assert "price_implausibly_high" not in item.quality_flags
+
+
 def test_generation_period_is_preserved_and_not_treated_as_listing_year() -> None:
     item = normalize_mashina_listing(
         {

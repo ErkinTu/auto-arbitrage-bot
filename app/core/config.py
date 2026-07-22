@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     # (last_seen_at старше stale_listing_days) деактивируются worker-ом раз в сутки.
     stats_max_last_seen_days: int = 30
     stale_listing_days: int = 30
+    # Отсев выбросов цены по когорте «модель+год» при построении агрегатов: в
+    # когортах ≥ outlier_min_cohort исключаем цены вне [median/K, median*K],
+    # K = outlier_price_median_multiple. K=4 сохраняет легитимный разброс по
+    # комплектациям/пробегу, но режет мусор в десятки раз (Accord 2003 за $520k).
+    # Когорты меньше порога не трогаем — там граница неосмысленна (полагаемся на
+    # абсолютный предохранитель price_implausibly_high в нормализаторе).
+    outlier_price_median_multiple: float = 4.0
+    outlier_min_cohort: int = 5
     # Точечный валидатор lalafo: мы видим только новейшие 50 на марку, поэтому
     # живое объявление со временем уходит из ленты навсегда. Карточка отвечает
     # 200 живым (продлеваем last_seen_at) и 410 Gone удалённым (деактивация

@@ -21,7 +21,12 @@ from app.services.lookup import get_or_create_brand, get_or_create_generation, g
 from app.services.normalizer import NormalizedListing, normalize_mashina_listing
 
 
-CRITICAL_QUALITY_FLAGS = {"year_title_conflict", "mileage_implausibly_high", "price_implausibly_low"}
+CRITICAL_QUALITY_FLAGS = {
+    "year_title_conflict",
+    "mileage_implausibly_high",
+    "price_implausibly_low",
+    "price_implausibly_high",
+}
 
 
 @dataclass(slots=True)

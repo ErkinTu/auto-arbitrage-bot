@@ -31,10 +31,17 @@ def rebuild_daily_market_stats(
     stat_date: date | None = None,
     *,
     max_last_seen_days: int | None = None,
+    outlier_min_cohort: int | None = None,
+    outlier_price_median_multiple: float | None = None,
 ) -> int:
     stat_date = stat_date or date.today()
+    settings = get_settings()
     if max_last_seen_days is None:
-        max_last_seen_days = get_settings().stats_max_last_seen_days
+        max_last_seen_days = settings.stats_max_last_seen_days
+    if outlier_min_cohort is None:
+        outlier_min_cohort = settings.outlier_min_cohort
+    if outlier_price_median_multiple is None:
+        outlier_price_median_multiple = settings.outlier_price_median_multiple
     # Derived rows are rebuilt from scratch so old model aliases cannot leave stale statistics.
     session.execute(delete(DailyMarketStat).where(DailyMarketStat.stat_date == stat_date))
     session.flush()
@@ -52,8 +59,27 @@ def rebuild_daily_market_stats(
         )
     ).all()
 
+    # Отсев выбросов ПЕРЕД раскладкой по бакетам: когорта — «модель+год» целиком
+    # (не bucket), т.к. один модельный год — связная ценовая группа (пробег двигает
+    # цену в ~2–3×, а не в 100×). Заодно чистит и bucket unknown, где сидят NULL-пробеги.
+    cohort_prices: dict[tuple, list[Decimal]] = defaultdict(list)
+    for listing in listings:
+        cohort_prices[(listing.brand_id, listing.car_model_id, listing.year)].append(
+            Decimal(listing.current_price_usd)
+        )
+    k = Decimal(str(outlier_price_median_multiple))
+    cohort_bounds: dict[tuple, tuple[Decimal, Decimal]] = {}
+    for cohort_key, prices in cohort_prices.items():
+        if len(prices) >= outlier_min_cohort:
+            med = Decimal(str(median(sorted(prices))))
+            cohort_bounds[cohort_key] = (med / k, med * k)
+
     groups: dict[tuple, list[Decimal]] = defaultdict(list)
     for listing in listings:
+        price = Decimal(listing.current_price_usd)
+        bounds = cohort_bounds.get((listing.brand_id, listing.car_model_id, listing.year))
+        if bounds is not None and not (bounds[0] <= price <= bounds[1]):
+            continue  # выброс относительно своей когорты — вне avg/median/sample_count
         key = (
             listing.brand_id,
             listing.car_model_id,
@@ -62,7 +88,7 @@ def rebuild_daily_market_stats(
             mileage_bucket(listing.mileage_km),
             listing.customs_status,
         )
-        groups[key].append(Decimal(listing.current_price_usd))
+        groups[key].append(price)
 
     written = 0
     for key, prices in groups.items():
