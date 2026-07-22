@@ -171,7 +171,16 @@ docker compose logs -f bot               # Ctrl+C для выхода
 ## Обновление проекта после правок (синхронизация)
 
 Поменял код локально → залей на сервер и пересобери. Тот же rsync, что при
-переносе (он пошлёт только изменившиеся файлы):
+переносе, **но с `--exclude '.env'`** (он пошлёт только изменившиеся файлы):
+
+> ⚠️ **НЕ затирай серверный `.env`.** Серверный `.env` расходится с локальным
+> НАМЕРЕННО: в нём боевой `LALAFO_PROXY_URL` (DataImpulse residential KG),
+> которого в локальном `.env` нет и быть не должно. Обычный rsync **без**
+> `--exclude '.env'` перезапишет серверный `.env` локальным → на проде пропадёт
+> прокси → lalafo сразу упрётся в Cloudflare-блок (403). Поэтому при
+> ОБНОВЛЕНИИ всегда исключай `.env` (в отличие от первого переноса выше, где
+> `.env` едет специально). Правки настроек, которые реально нужны на проде,
+> вноси прямо в серверный `.env` (с бэкапом файла перед правкой).
 
 ```bash
 # локально, из папки проекта
@@ -179,7 +188,7 @@ KEY=~/Desktop/aws/LightsailDefaultKey-eu-central-1.pem
 SRV=ubuntu@63.180.133.249
 
 rsync -av -e "ssh -i $KEY" \
-  --exclude '.venv' --exclude '.git' --exclude 'backups' \
+  --exclude '.env' --exclude '.venv' --exclude '.git' --exclude 'backups' \
   --exclude '.idea' --exclude '.pytest_cache' --exclude '__pycache__' \
   --exclude '*.zip' --exclude '.ruff_cache' \
   ./ "$SRV:/home/ubuntu/car-analytics/"
@@ -192,7 +201,7 @@ ssh -i "$KEY" "$SRV" 'cd /home/ubuntu/car-analytics && docker compose up -d --bu
 именно уйдёт (ничего не копирует):
 
 ```bash
-rsync -avn -e "ssh -i $KEY" --exclude '.venv' --exclude '.git' \
+rsync -avn -e "ssh -i $KEY" --exclude '.env' --exclude '.venv' --exclude '.git' \
   --exclude 'backups' --exclude '.idea' --exclude '.pytest_cache' \
   --exclude '__pycache__' --exclude '*.zip' --exclude '.ruff_cache' \
   ./ "$SRV:/home/ubuntu/car-analytics/"
@@ -201,7 +210,12 @@ rsync -avn -e "ssh -i $KEY" --exclude '.venv' --exclude '.git' \
 Замечания:
 
 - Правки только в `docker-compose.yml`/коде Python подхватываются через
-  `up -d --build`. Правки в `.env` — тоже пересоздают контейнеры при `up -d`.
+  `up -d --build`.
+- Настройки в `.env` меняй **прямо на сервере** (файл исключён из rsync).
+  После правки серверного `.env` перезапусти сервисы (`docker compose up -d`),
+  чтобы контейнеры пересоздались с новыми значениями. Если добавляешь **новую**
+  переменную — синхронизируй её и в локальный `.env.example`, но НЕ заливай
+  локальный `.env` на прод.
 - База при `up -d --build` **не трогается** (данные в volume `postgres_data`).
 - На будущее чище — приватный git-репозиторий и `git pull` на сервере вместо
   rsync (тогда `.env` держат отдельно, а не заливают из локали).
