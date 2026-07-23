@@ -6,8 +6,10 @@
    вторая — в воскресенье, не раньше FULL_SCAN_HOUR (2:00 локального времени).
    Пауза между страницами — REQUEST_DELAY_SECONDS (внутри парсера),
    пауза между марками — FULL_SCAN_BRAND_PAUSE_SECONDS.
-2. Пересчет daily_market_stats каждые STATS_REBUILD_INTERVAL_HOURS часов,
-   сетка начинается с STATS_REBUILD_START_HOUR (10:00, 18:00, 02:00).
+2. Пересчет daily_market_stats (только за сегодня) каждый час, но лишь в окне
+   активности бота [BOT_ACTIVE_START_HOUR, BOT_ACTIVE_END_HOUR): ночью нет
+   свежих данных (fresh-парс не идёт) и не работает matching, а market_average
+   при отсутствии сегодняшних строк падает на последнюю дату.
 3. Раз в локальные сутки — обслуживание lalafo (у него нет full-scan):
    сначала точечный валидатор давно не виденных объявлений через карточку
    (HTTP 410 -> деактивация, 200 -> продление last_seen_at), затем фолбэк —
@@ -134,6 +136,10 @@ def rebuild_stats_if_due(last_rebuild_at: datetime | None) -> datetime | None:
     """Пересчитывает статистику, если начался новый слот; возвращает время пересчета."""
     settings = get_settings()
     now = local_now(settings.scheduler_timezone)
+    # Только в окно активности бота: ночью новых данных нет и matching не идёт,
+    # пересчитывать нечего (market_average берёт последнюю доступную дату).
+    if not (settings.bot_active_start_hour <= now.hour < settings.bot_active_end_hour):
+        return None
     slot_start = last_slot_start(
         now, settings.stats_rebuild_start_hour, settings.stats_rebuild_interval_hours
     )
@@ -194,10 +200,11 @@ def main() -> None:
         logger.warning("marked %s orphaned full-scan runs as failed", orphaned)
 
     logger.info(
-        "worker started: weekend full scans at %02d:00, stats rebuild every %sh from %02d:00 (%s)",
+        "worker started: weekend full scans at %02d:00, stats rebuild every %sh within %02d:00-%02d:00 (%s)",
         settings.full_scan_hour,
         settings.stats_rebuild_interval_hours,
-        settings.stats_rebuild_start_hour,
+        settings.bot_active_start_hour,
+        settings.bot_active_end_hour,
         settings.scheduler_timezone,
     )
     last_rebuild_at: datetime | None = None

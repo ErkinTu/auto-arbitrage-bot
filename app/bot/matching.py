@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -50,8 +50,18 @@ class PendingNotification:
 
 
 def find_new_listings(session: Session, since: datetime, *, max_age_hours: int = 12) -> list[Listing]:
-    """Активные объявления с событием new не старше since, известной ценой
-    и свежей датой публикации на источнике."""
+    """Активные объявления с известной ценой — кандидаты на пуш за окно since.
+
+    Два типа кандидатов с РАЗНОЙ логикой свежести:
+    - new: впервые увиденные. VIP-поднятые старые тоже дают событие new, поэтому
+      пуш «новинка» — только если публикация на источнике свежее max_age_hours
+      (NULL source_created_at отсекается сравнением: пуш по неполным данным хуже
+      тишины, тот же принцип, что в filter_matches).
+    - price_changed: подешевевшие уже после показа. Свежесть определяется ВРЕМЕНЕМ
+      изменения цены (observed_at в окне since), а не датой публикации: старое
+      объявление, только что упавшее ниже рынка, — легитимный кандидат, поэтому
+      source_created_at здесь НЕ проверяем.
+    """
     # DISTINCT по id в подзапросе: DISTINCT по всем колонкам Listing невозможен
     # в Postgres из-за JSON-колонки quality_flags (нет оператора равенства).
     new_listing_ids = (
@@ -62,20 +72,29 @@ def find_new_listings(session: Session, since: datetime, *, max_age_hours: int =
         )
         .distinct()
     )
-    # VIP-поднятые старые объявления всплывают в «свежей» ленте и дают событие
-    # new: пуш о «новинке» — только если публикация на сайте свежее max_age_hours.
-    # NULL source_created_at отсекается сравнением — пуш по неполным данным
-    # хуже тишины (тот же принцип, что в filter_matches).
+    price_changed_ids = (
+        select(ListingStatusHistory.listing_id)
+        .where(
+            ListingStatusHistory.event_type == "price_changed",
+            ListingStatusHistory.observed_at >= since,
+        )
+        .distinct()
+    )
     published_after = utcnow() - timedelta(hours=max_age_hours)
     return list(
         session.scalars(
             select(Listing).where(
-                Listing.id.in_(new_listing_ids),
                 Listing.is_active.is_(True),
-                Listing.source_created_at >= published_after,
                 Listing.current_price_usd.is_not(None),
                 # Мусорный ввод цены («180 сом» за авто) — не повод для пуша.
                 Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
+                or_(
+                    and_(
+                        Listing.id.in_(new_listing_ids),
+                        Listing.source_created_at >= published_after,
+                    ),
+                    Listing.id.in_(price_changed_ids),
+                ),
             )
         ).all()
     )

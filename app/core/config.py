@@ -47,7 +47,10 @@ class Settings(BaseSettings):
     # Catch-up: если ВСЯ fresh-страница оказалась новой, значит между циклами
     # был пропуск (простой) — дочитываем до N дополнительных страниц.
     bot_catchup_max_pages: int = 3
-    bot_new_lookback_minutes: int = 60
+    # Окно, в котором событие new/price_changed ещё считается кандидатом на пуш.
+    # Шире = больше попыток сматчиться, пока daily_market_stats догоняет цену
+    # (sent_notifications дедуплицирует, повторов не будет).
+    bot_new_lookback_minutes: int = 180
     # Уведомлять только о свежих по дате ПУБЛИКАЦИИ на источнике: VIP-поднятые
     # старые объявления всплывают в «свежей» ленте, но «новинками» не являются.
     bot_max_listing_age_hours: int = 12
@@ -71,8 +74,11 @@ class Settings(BaseSettings):
     full_scan_page_size: int = 100
     full_scan_max_pages: int = 100
     full_scan_max_items: int = 10000
-    stats_rebuild_start_hour: int = 9  # пересчет статистики: 9:00, 17:00, 01:00
-    stats_rebuild_interval_hours: int = 8
+    # Пересчёт daily_market_stats (только сегодня) каждый час в окне активности
+    # бота [bot_active_start_hour, bot_active_end_hour): свежие данные приходят
+    # лишь пока идёт fresh-парс, ночью пересчитывать нечего (см. worker.py).
+    stats_rebuild_start_hour: int = 8
+    stats_rebuild_interval_hours: int = 1
     # У lalafo нет full-scan → проданное авто висело бы is_active навсегда:
     # агрегаты строятся только по недавно виденным объявлениям, а «зависшие»
     # (last_seen_at старше stale_listing_days) деактивируются worker-ом раз в сутки.

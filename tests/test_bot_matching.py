@@ -149,13 +149,43 @@ def test_find_new_listings_window() -> None:
     since = _now() - timedelta(minutes=60)
 
     fresh = _add_listing(session, external_id="1")
-    _add_listing(session, external_id="2", event_type="price_changed")
+    # Подешевевшее в окне — тоже кандидат (ловит «цена упала после показа»).
+    dropped = _add_listing(session, external_id="2", event_type="price_changed")
+    # Событие вне окна since — не кандидат (и для new, и для price_changed).
     _add_listing(session, external_id="3", observed_at=_now() - timedelta(hours=3))
+    _add_listing(
+        session,
+        external_id="6",
+        event_type="price_changed",
+        observed_at=_now() - timedelta(hours=3),
+    )
     _add_listing(session, external_id="4", is_active=False)
     _add_listing(session, external_id="5", price_usd=None)
 
     found = find_new_listings(session, since)
-    assert [listing.id for listing in found] == [fresh.id]
+    assert {listing.id for listing in found} == {fresh.id, dropped.id}
+
+
+def test_find_new_listings_price_changed_ignores_publication_age() -> None:
+    """price_changed берётся по времени изменения цены, а не дате публикации:
+    старое объявление, только что подешевевшее, — легитимный кандидат. У new,
+    наоборот, старая публикация (VIP-поднятие) отсекается."""
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    old_publication = _now() - timedelta(days=30)
+
+    # Старая публикация + свежее падение цены -> кандидат.
+    dropped = _add_listing(
+        session,
+        external_id="1",
+        event_type="price_changed",
+        source_created_at=old_publication,
+    )
+    # Старая публикация + событие new (VIP-поднятие) -> НЕ кандидат.
+    _add_listing(session, external_id="2", event_type="new", source_created_at=old_publication)
+
+    found = find_new_listings(session, since, max_age_hours=12)
+    assert [listing.id for listing in found] == [dropped.id]
 
 
 def test_find_new_listings_publication_freshness() -> None:
