@@ -17,16 +17,20 @@ from app.bot.keyboards import (
     FilterDeleteCB,
     ModelCB,
     PercentCB,
+    RegionCB,
     SkipCB,
     brands_kb,
     filters_kb,
     models_kb,
     percent_kb,
+    region_kb,
     skip_kb,
     yes_no_kb,
 )
 from app.bot.messages import HELP_TEXT, START_TEXT, format_filter_line
 from app.bot.states import AddFilter
+from app.core.config import get_settings
+from app.services.regions import ALL_CARS_CODE, is_valid_region
 
 router = Router()
 
@@ -77,6 +81,7 @@ def _filters_text(filters: list[db.FilterDTO]) -> str:
             below_market_only=item.below_market_only,
             below_market_percent=item.below_market_percent,
             skip_foreign=item.skip_foreign,
+            region=item.region,
         )
         lines.append(f"{index}. {line}")
     return "\n".join(lines)
@@ -110,6 +115,14 @@ async def delete_filter_cb(query: CallbackQuery, callback_data: FilterDeleteCB) 
 @router.message(Command("add_filter"))
 async def cmd_add_filter(message: Message, state: FSMContext) -> None:
     await state.clear()
+    limit = get_settings().bot_max_filters_per_user
+    current = await asyncio.to_thread(db.count_filters, message.from_user.id)
+    if current >= limit:
+        await message.answer(
+            f"У вас уже максимум фильтров ({limit}). "
+            "Удалите ненужный в /filters, чтобы добавить новый."
+        )
+        return
     brands = await asyncio.to_thread(db.list_brands)
     if not brands:
         await message.answer(
@@ -281,10 +294,11 @@ async def wizard_price(message: Message, state: FSMContext) -> None:
     )
 
 
-FOREIGN_STEP_TEXT = (
-    "Шаг 7/7. Показывать зарубежные авто (Китай, Южная Корея, США и т.п.)?\n\n"
-    "⚠️ Их цены обычно указаны без растаможки и доставки, поэтому выглядят "
-    "заметно ниже рынка."
+REGION_STEP_TEXT = (
+    "Шаг 7/7. Из какого региона показывать авто?\n\n"
+    "Выберите область, город или «Зарубежные авто». "
+    "«Все авто» — без ограничения по региону.\n"
+    "⚠️ У зарубежных цены обычно без растаможки и доставки — выглядят ниже рынка."
 )
 
 
@@ -300,11 +314,8 @@ async def wizard_below_avg(query: CallbackQuery, callback_data: BoolCB, state: F
         )
         return
     await state.update_data(below_market_percent=None)
-    await state.set_state(AddFilter.foreign)
-    await query.message.edit_text(
-        FOREIGN_STEP_TEXT,
-        reply_markup=yes_no_kb("foreign", yes="✅ Показывать", no="🚫 Пропускать"),
-    )
+    await state.set_state(AddFilter.region)
+    await query.message.edit_text(REGION_STEP_TEXT, reply_markup=region_kb())
 
 
 @router.callback_query(AddFilter.below_percent, PercentCB.filter(F.step == "below_percent"))
@@ -312,31 +323,41 @@ async def wizard_below_percent(
     query: CallbackQuery, callback_data: PercentCB, state: FSMContext
 ) -> None:
     await state.update_data(below_market_percent=callback_data.value)
-    await state.set_state(AddFilter.foreign)
+    await state.set_state(AddFilter.region)
     await query.answer()
-    await query.message.edit_text(
-        FOREIGN_STEP_TEXT,
-        reply_markup=yes_no_kb("foreign", yes="✅ Показывать", no="🚫 Пропускать"),
-    )
+    await query.message.edit_text(REGION_STEP_TEXT, reply_markup=region_kb())
 
 
-@router.callback_query(AddFilter.foreign, BoolCB.filter(F.step == "foreign"))
-async def wizard_foreign(query: CallbackQuery, callback_data: BoolCB, state: FSMContext) -> None:
+@router.callback_query(AddFilter.region, RegionCB.filter())
+async def wizard_region(query: CallbackQuery, callback_data: RegionCB, state: FSMContext) -> None:
+    region = None if callback_data.code == ALL_CARS_CODE else callback_data.code
+    if not is_valid_region(region):
+        await query.answer("Неизвестный регион, начните заново: /add_filter", show_alert=True)
+        await state.clear()
+        return
     data = await state.get_data()
     await state.clear()
-    created = await asyncio.to_thread(
-        db.create_filter,
-        query.from_user.id,
-        brand_id=data["brand_id"],
-        car_model_id=data.get("car_model_id"),
-        year_from=data.get("year_from"),
-        year_to=data.get("year_to"),
-        mileage_max_km=data.get("mileage_max_km"),
-        price_max_usd=data.get("price_max_usd"),
-        below_market_only=data["below_market_only"],
-        below_market_percent=data.get("below_market_percent"),
-        skip_foreign=not callback_data.value,
-    )
+    try:
+        created = await asyncio.to_thread(
+            db.create_filter,
+            query.from_user.id,
+            brand_id=data["brand_id"],
+            car_model_id=data.get("car_model_id"),
+            year_from=data.get("year_from"),
+            year_to=data.get("year_to"),
+            mileage_max_km=data.get("mileage_max_km"),
+            price_max_usd=data.get("price_max_usd"),
+            below_market_only=data["below_market_only"],
+            below_market_percent=data.get("below_market_percent"),
+            region=region,
+        )
+    except db.FilterLimitError as exc:
+        await query.answer()
+        await query.message.edit_text(
+            f"У вас уже максимум фильтров ({exc.limit}). "
+            "Удалите ненужный в /filters, чтобы добавить новый."
+        )
+        return
     await query.answer("Фильтр сохранен")
     summary = format_filter_line(
         brand_name=created.brand_name,
@@ -348,6 +369,7 @@ async def wizard_foreign(query: CallbackQuery, callback_data: BoolCB, state: FSM
         below_market_only=created.below_market_only,
         below_market_percent=created.below_market_percent,
         skip_foreign=created.skip_foreign,
+        region=created.region,
     )
     await query.message.edit_text(
         f"✅ Фильтр создан:\n{summary}\n\n"
@@ -365,7 +387,7 @@ async def wizard_foreign(query: CallbackQuery, callback_data: BoolCB, state: FSM
 @router.message(AddFilter.model)
 @router.message(AddFilter.below_avg)
 @router.message(AddFilter.below_percent)
-@router.message(AddFilter.foreign)
+@router.message(AddFilter.region)
 async def wizard_expect_buttons(message: Message) -> None:
     await message.answer("Пожалуйста, выберите вариант кнопкой в сообщении выше. Отмена: /cancel")
 

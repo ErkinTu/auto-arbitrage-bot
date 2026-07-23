@@ -336,7 +336,11 @@ class UserFilter(Base, TimestampMixin):
     # Порог «ниже рынка» в процентах (5/10/15/20); NULL = глобальный BOT_BELOW_AVG_FACTOR.
     below_market_percent: Mapped[int | None] = mapped_column(Integer)
     # Пропускать зарубежные объявления (city = страна: Китай, США...) — там цены без растаможки.
+    # Legacy: до региональных фильтров. Новые фильтры вместо этого задают region.
     skip_foreign: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Регион объявления (см. app/services/regions.py): код области/города/'foreign'.
+    # NULL = «Все авто» (без ограничения по географии).
+    region: Mapped[str | None] = mapped_column(String(16))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 

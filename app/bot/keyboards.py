@@ -5,6 +5,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.db import BrandDTO, FilterDTO, ModelDTO
+from app.services.regions import ALL_CARS_CODE, ALL_CARS_LABEL, REGION_CHOICES
 
 # Telegram ограничивает inline-клавиатуру ~100 кнопками.
 MAX_MODEL_BUTTONS = 96
@@ -34,6 +35,10 @@ class FilterDeleteCB(CallbackData, prefix="fdel"):
 class PercentCB(CallbackData, prefix="pct"):
     step: str
     value: int
+
+
+class RegionCB(CallbackData, prefix="region"):
+    code: str  # код региона из regions.REGION_CHOICES или ALL_CARS_CODE («Все авто»)
 
 
 def brands_kb(brands: list[BrandDTO]) -> InlineKeyboardMarkup:
@@ -73,6 +78,16 @@ def percent_kb(step: str, values: tuple[int, ...] = (5, 10, 15, 20)) -> InlineKe
     for value in values:
         builder.button(text=f"{value}%", callback_data=PercentCB(step=step, value=value))
     builder.adjust(4)
+    return builder.as_markup()
+
+
+def region_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"🌐 {ALL_CARS_LABEL}", callback_data=RegionCB(code=ALL_CARS_CODE))
+    for code, label in REGION_CHOICES:
+        builder.button(text=label, callback_data=RegionCB(code=code))
+    # «Все авто» и «Местный рынок» — отдельными строками, остальные регионы по два.
+    builder.adjust(1, 1, 2)
     return builder.as_markup()
 
 

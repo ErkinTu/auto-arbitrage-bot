@@ -11,11 +11,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models import BotUser, Brand, CarModel, UserFilter
+
+
+class FilterLimitError(Exception):
+    """У пользователя уже максимум фильтров (bot_max_filters_per_user)."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        super().__init__(f"filter limit reached: {limit}")
 
 
 @dataclass(slots=True)
@@ -42,6 +50,7 @@ class FilterDTO:
     below_market_only: bool
     below_market_percent: int | None
     skip_foreign: bool
+    region: str | None
 
 
 def _utcnow() -> datetime:
@@ -99,7 +108,21 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
         below_market_only=user_filter.below_market_only,
         below_market_percent=user_filter.below_market_percent,
         skip_foreign=user_filter.skip_foreign,
+        region=user_filter.region,
     )
+
+
+def count_filters(telegram_id: int) -> int:
+    """Число активных фильтров пользователя (0, если юзера ещё нет)."""
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            return 0
+        return session.scalar(
+            select(func.count())
+            .select_from(UserFilter)
+            .where(UserFilter.user_id == user.id, UserFilter.enabled.is_(True))
+        ) or 0
 
 
 def list_filters(telegram_id: int) -> list[FilterDTO]:
@@ -127,11 +150,20 @@ def create_filter(
     below_market_only: bool,
     below_market_percent: int | None = None,
     skip_foreign: bool = False,
+    region: str | None = None,
 ) -> FilterDTO:
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
         if user is None:
             raise LookupError(f"bot user {telegram_id} is not registered")
+        limit = get_settings().bot_max_filters_per_user
+        current = session.scalar(
+            select(func.count())
+            .select_from(UserFilter)
+            .where(UserFilter.user_id == user.id, UserFilter.enabled.is_(True))
+        ) or 0
+        if current >= limit:
+            raise FilterLimitError(limit)
         user_filter = UserFilter(
             user_id=user.id,
             brand_id=brand_id,
@@ -143,6 +175,7 @@ def create_filter(
             below_market_only=below_market_only,
             below_market_percent=below_market_percent,
             skip_foreign=skip_foreign,
+            region=region,
         )
         session.add(user_filter)
         session.commit()

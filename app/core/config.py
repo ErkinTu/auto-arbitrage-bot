@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     bot_below_avg_factor: float = 0.95
     bot_below_avg_min_samples: int = 5
     bot_access_cache_ttl_seconds: int = 600
+    # Потолок фильтров на пользователя: ограничивает объём матчинга и флуд.
+    # Проверяется в начале визарда (/add_filter) и защитно при создании фильтра.
+    bot_max_filters_per_user: int = 10
+    # Потолок пушей одному чату за цикл: PER_CHAT_DELAY_SECONDS=1.05 делает
+    # рассылку одному юзеру блокирующей для всего последовательного цикла;
+    # сверх лимита пропускаем без записи в sent_notifications — придёт в
+    # следующем цикле. 0 = без ограничения.
+    bot_max_notifications_per_user_per_cycle: int = 50
 
     scheduler_timezone: str = "Asia/Bishkek"
     bot_active_start_hour: int = 8  # fresh-циклы бота только в окне [start, end)

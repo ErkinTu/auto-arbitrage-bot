@@ -9,4 +9,4 @@ class AddFilter(StatesGroup):
     price = State()
     below_avg = State()
     below_percent = State()
-    foreign = State()
+    region = State()

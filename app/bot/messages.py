@@ -5,12 +5,13 @@ from __future__ import annotations
 import html
 
 from app.bot.matching import PendingNotification, is_foreign
+from app.services.regions import REGION_LABELS
 
 START_TEXT = (
     "👋 Привет! Я слежу за новыми объявлениями на mashina.kg и присылаю те, "
     "что подходят под ваши фильтры.\n\n"
     "Команды:\n"
-    "/add_filter — создать фильтр (марка, модель, год, пробег, цена, зарубежные авто)\n"
+    "/add_filter — создать фильтр (марка, модель, год, пробег, цена, регион)\n"
     "/filters — мои фильтры и их удаление\n"
     "/help — справка"
 )
@@ -18,14 +19,14 @@ START_TEXT = (
 HELP_TEXT = (
     "ℹ️ Как это работает:\n\n"
     "1. Создайте фильтр через /add_filter: марка → модель → годы → пробег → цена → "
-    "«только ниже рынка» → «зарубежные авто».\n"
+    "«только ниже рынка» → регион.\n"
     "2. Каждые ~10 минут я проверяю свежие объявления.\n"
     "3. Как только появляется машина под ваш фильтр — присылаю её сюда со ссылкой.\n\n"
     "Любой шаг фильтра можно пропустить — тогда ограничения по нему не будет.\n"
     "«Только ниже рынка» — присылать лишь авто с ценой заметно ниже средней "
     "по таким же марке/модели/году/пробегу.\n"
-    "«Зарубежные авто» — объявления из Китая, Южной Кореи, США и т.п.; их цены "
-    "обычно без растаможки и доставки, поэтому их можно пропускать.\n\n"
+    "«Регион» — область/город КР, «Зарубежные авто» (Китай, Корея, США и т.п.) "
+    "или «Все авто». У зарубежных цены обычно без растаможки и доставки.\n\n"
     "/filters — посмотреть и удалить фильтры."
 )
 
@@ -85,6 +86,7 @@ def format_filter_line(
     below_market_only: bool,
     below_market_percent: int | None = None,
     skip_foreign: bool = False,
+    region: str | None = None,
 ) -> str:
     if brand_name is None:
         parts = ["Все марки"]
@@ -101,6 +103,9 @@ def format_filter_line(
             parts.append(f"ниже рынка на {below_market_percent}%+")
         else:
             parts.append("только ниже рынка")
-    if skip_foreign:
+    if region is not None and region in REGION_LABELS:
+        parts.append(f"регион: {REGION_LABELS[region]}")
+    elif skip_foreign:
+        # Legacy-фильтры без региона, созданные до региональных фильтров.
         parts.append("без зарубежных")
     return " · ".join(parts)

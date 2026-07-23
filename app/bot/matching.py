@@ -22,34 +22,10 @@ from app.models import (
     UserFilter,
 )
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
+from app.services.regions import FOREIGN_LOCATIONS, region_matches
 from app.services.stats import mileage_bucket
 from app.services.sync import utcnow
 from app.services.vehicle_summary import _build_source_url as build_source_url
-
-# mashina.kg пишет для авто "на заказ" страну в поле города. Список — явный:
-# эвристики опасны (в КР есть село Люксембург). Пополнять по catalog-issues/логам.
-FOREIGN_LOCATIONS = frozenset(
-    {
-        "Китай",
-        "Южная Корея",
-        "США",
-        "Европа",
-        "Канада",
-        "ОАЭ",
-        "Германия",
-        "Казахстан",
-        "Япония",
-        "Россия",
-        "Грузия",
-        "Турция",
-        "Таджикистан",
-        "Узбекистан",
-        "Азербайджан",
-        "Армения",
-        "Беларусь",
-        "Украина",
-    }
-)
 
 
 def is_foreign(city: str | None) -> bool:
@@ -129,7 +105,14 @@ def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
         return False
     # skip_foreign отсекает только заведомо зарубежные: у местных цена уже "на руках",
     # у зарубежных — без растаможки и доставки. Неизвестный город считаем местным.
+    # (Legacy-поле старых фильтров; новые задают регион ниже, а skip_foreign=False.)
     if user_filter.skip_foreign and is_foreign(listing.city):
+        return False
+    # Регион пользователя: NULL = «Все авто» (без ограничения). Иначе объявление
+    # должно попасть в выбранный регион («Местный рынок» = любой не-зарубежный;
+    # для области/города — точное совпадение, неизвестный/спорный город = не матч,
+    # пуш по неполной геолокации хуже тишины — как и с прочими границами фильтра).
+    if user_filter.region is not None and not region_matches(listing.city, user_filter.region):
         return False
     return True
 
@@ -191,12 +174,17 @@ def match_new_listings(
     factor: float,
     min_samples: int,
     max_age_hours: int = 12,
+    max_per_user: int = 0,
 ) -> list[PendingNotification]:
     """Подбирает пары (пользователь, новое объявление), фиксирует отправку, возвращает DTO.
 
     Строки sent_notifications коммитятся ДО фактической отправки в Telegram:
     при падении между коммитом и отправкой теряется максимум одно уведомление,
     но дубль не возникает никогда.
+
+    max_per_user (>0) — потолок пушей одному пользователю за цикл: сверх лимита
+    объявление НЕ фиксируется в sent_notifications и придёт в следующем цикле,
+    защищая последовательную рассылку от блокировки одним чатом (per-chat delay).
     """
     listings = find_new_listings(session, since, max_age_hours=max_age_hours)
     if not listings:
@@ -228,12 +216,18 @@ def match_new_listings(
     source_names: dict[int, str] = {
         row.id: row.name for row in session.execute(select(Source.id, Source.name))
     }
+    # Пушей уже набрано за этот цикл на пользователя (для max_per_user).
+    sent_counts: dict[int, int] = {}
     pending: list[PendingNotification] = []
 
     for listing in listings:
         for user_filter, user in filter_user_pairs:
             key = (user.id, listing.id)
             if key in already_sent:
+                continue
+            # Потолок на цикл: не фиксируем и не шлём — объявление всплывёт
+            # снова в следующем цикле (в пределах bot_new_lookback_minutes).
+            if max_per_user and sent_counts.get(user.id, 0) >= max_per_user:
                 continue
             if not filter_matches(listing, user_filter):
                 continue
@@ -264,6 +258,7 @@ def match_new_listings(
                     continue
 
             already_sent.add(key)
+            sent_counts[user.id] = sent_counts.get(user.id, 0) + 1
             session.add(
                 SentNotification(user_id=user.id, listing_id=listing.id, filter_id=user_filter.id)
             )

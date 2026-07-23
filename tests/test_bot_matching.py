@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.bot.matching import (
@@ -219,6 +219,28 @@ def test_filter_matches_matrix() -> None:
     assert filter_matches(Listing(brand_id=brand_id, city="Бишкек"), f(skip_foreign=True))
     assert filter_matches(Listing(brand_id=brand_id, city="с. Люксембург"), f(skip_foreign=True))
     assert filter_matches(Listing(brand_id=brand_id, city=None), f(skip_foreign=True))
+    # region: NULL = «Все авто» (без ограничения); иначе город должен попасть
+    # в выбранный регион, неизвестный/спорный город = не матч.
+    bishkek = Listing(brand_id=brand_id, city="Бишкек")
+    osh = Listing(brand_id=brand_id, city="Ош")
+    china = Listing(brand_id=brand_id, city="Китай")
+    assert filter_matches(bishkek, f())  # region=None
+    assert filter_matches(bishkek, f(region="bishkek"))
+    assert not filter_matches(bishkek, f(region="chuy"))
+    assert filter_matches(Listing(brand_id=brand_id, city="Кант"), f(region="chuy"))
+    assert filter_matches(osh, f(region="osh_city"))
+    assert not filter_matches(osh, f(region="osh_region"))  # город Ош ≠ Ошская обл.
+    assert filter_matches(Listing(brand_id=brand_id, city="Ноокат"), f(region="osh_region"))
+    assert filter_matches(china, f(region="foreign"))
+    assert not filter_matches(bishkek, f(region="foreign"))
+    # Спорный/неизвестный город под конкретный регион не матчится, но «Все авто» — да.
+    disputed = Listing(brand_id=brand_id, city="Кызыл-Туу")
+    assert filter_matches(disputed, f())
+    assert not filter_matches(disputed, f(region="issykkul"))
+    # «Местный рынок» (local) — любой не-зарубежный, включая спорные/неизвестные.
+    assert filter_matches(bishkek, f(region="local"))
+    assert filter_matches(disputed, f(region="local"))
+    assert not filter_matches(china, f(region="local"))
 
 
 def test_market_average() -> None:
@@ -383,6 +405,31 @@ def test_match_all_brands_filter() -> None:
 
     pending = match_new_listings(session, since, factor=0.95, min_samples=5)
     assert {note.listing_id for note in pending} == {toyota.id, honda.id}
+
+
+def test_match_caps_notifications_per_user_per_cycle() -> None:
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _add_user_with_filter(session, telegram_id=42)  # все Toyota
+
+    for i in range(5):
+        _add_listing(session, external_id=str(i))
+
+    # Потолок 2: за цикл фиксируем и шлём не больше двух, остальное — не в
+    # sent_notifications (всплывёт в следующем цикле).
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user=2)
+    assert len(pending) == 2
+    assert session.scalar(select(func.count()).select_from(SentNotification)) == 2
+
+    # Следующий цикл (в пределах lookback) добирает ещё двух — дублей нет.
+    pending2 = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user=2)
+    assert len(pending2) == 2
+    sent_ids = {note.listing_id for note in pending} | {note.listing_id for note in pending2}
+    assert len(sent_ids) == 4
+
+    # max_per_user=0 -> без ограничения: последнее пятое объявление уходит.
+    pending3 = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user=0)
+    assert len(pending3) == 1
 
 
 def test_match_skips_blocked_and_revoked_users() -> None:
