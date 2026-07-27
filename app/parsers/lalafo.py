@@ -45,7 +45,7 @@ class LalafoParser(ParserAdapter):
             headers={"User-Agent": self.settings.user_agent},
             follow_redirects=True,
             # Cloudflare lalafo режет датацентровые IP — с сервера ходим
-            # через резидентный прокси (см. LALAFO.md), локально — напрямую.
+            # через резидентный прокси (см. docs/LALAFO.md), локально — напрямую.
             proxy=self.settings.lalafo_proxy_url or None,
         )
 

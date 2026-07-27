@@ -27,8 +27,8 @@ build/
 *.log
 
 # Local archives and dumps
-lalafo.html
-lalafodetail.html
+reports/lalafo.html
+reports/lalafodetail.html
 *.zip
 *.tar
 *.tar.gz

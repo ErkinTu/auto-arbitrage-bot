@@ -68,7 +68,7 @@ curl http://localhost:8000/health
 docker compose run --rm api uv run python -m app.cli targets
 ```
 
-`api` при старте сам выполняет `init-db` и `seed`, затем запускает FastAPI. `worker` при старте тоже выполняет `init-db` и `seed`, затем работает по расписанию: полная сверка каталога по выходным и пересчет статистики каждые 8 часов (детали в `SYNC_STRATEGY.md`). Ежедневные fresh-обновления делает сервис `bot`.
+`api` при старте сам выполняет `init-db` и `seed`, затем запускает FastAPI. `worker` при старте тоже выполняет `init-db` и `seed`, затем работает по расписанию: полная сверка каталога по выходным и пересчет статистики каждые 8 часов (детали в `docs/SYNC_STRATEGY.md`). Ежедневные fresh-обновления делает сервис `bot`.
 
 ### Docker-сценарии запуска
 
@@ -128,7 +128,7 @@ docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -
 > каталоге) одного обхода мало: пока модели не подтверждены алиасами,
 > объявления не `analytics_eligible` и марка не появится во фронте/аналитике.
 > Полный порядок (`.env` → контейнеры → обход → **алиасы →
-> `reprocess-catalog`** → `rebuild-stats`) — в `SYNC_STRATEGY.md §4`.
+> `reprocess-catalog`** → `rebuild-stats`) — в `docs/SYNC_STRATEGY.md §4`.
 
 Для первого заполнения BMW запускай **полный обход без `created_period`**. Парсер идет с `page=1` дальше по страницам, пока API не вернет неполную страницу.
 

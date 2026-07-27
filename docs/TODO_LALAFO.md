@@ -229,16 +229,16 @@ bucket `unknown` собирает NULL-пробеги машин с реальн
 
 1. Код: задачи A + B + C одним заходом (C без A/B опасна). D — отдельно, позже.
 2. `pytest` + `ruff` локально; прогнать `run_cycle` бота и `rebuild-stats`.
-3. Деплой (rsync + `docker compose up -d --build`, см. `DEPLOY.md`).
+3. Деплой (rsync + `docker compose up -d --build`, см. `../DEPLOY.md`).
 4. На проде: `reprocess-catalog` (бэкфиллит `price_implausibly_high`/`_low` из
    `current_price_usd` — задачи A + отсев mashina<$500) → `rebuild-stats`
    (задачи B/C). Оба тяжёлые, запускать синхронно с `</dev/null` (см. грабли в
-   `CLAUDE.md`). Проверено на прод-копии 2026-07-22.
-5. Обновить `CLAUDE.md` (новые настройки/флаг) и `LALAFO.md`.
+   `../CLAUDE.md`). Проверено на прод-копии 2026-07-22.
+5. Обновить `../CLAUDE.md` (новые настройки/флаг) и `LALAFO.md`.
 
 ## Не забыть после реализации
 
-- `pytest` + `ruff`, обновить `CLAUDE.md` (новые настройки) и прод-чеклист в
+- `pytest` + `ruff`, обновить `../CLAUDE.md` (новые настройки) и прод-чеклист в
   `LALAFO.md`, прогнать локально цикл бота (`run_cycle`) и `rebuild-stats`.
 - ~~Идеи на потом~~ — РЕАЛИЗОВАНЫ 2026-07-18 по решению Erkin: точечный
   валидатор карточек (`validate_stale_lalafo_listings`; факт: мёртвая карточка
