@@ -40,7 +40,7 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   Паузы lalafo раздельные: лента 5с, карточки 0.5с с удвоением при 429
   (`lalafo_feed_delay_seconds`/`lalafo_detail_delay_seconds`).
   **На проде lalafo требует `LALAFO_PROXY_URL`** (Cloudflare режет
-  датацентровые IP; WARP не помогает). Детали и прод-чеклист — `LALAFO.md`.
+  датацентровые IP; WARP не помогает). Детали и прод-чеклист — `docs/LALAFO.md`.
 - **Свежесть данных.** Бот пушит только объявления, ОПУБЛИКОВАННЫЕ на
   источнике ≤ 12 ч назад (`bot_max_listing_age_hours`; NULL-дата = молчим) —
   VIP-поднятые старые в БД сохраняются, но «новинками» не считаются.
@@ -56,6 +56,30 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 - **Курс USD/KGS** — НБКР (`app/services/exchange.py`, раз в день, лениво из
   бот-цикла). Цены lalafo в сомах конвертируются в USD только при отсутствии
   собственного USD (флаг `usd_converted`; смена курса ≠ смена цены).
+- **Подписка (freedompay.kg, разовая оплата).** Доступ = член закрытой группы
+  (суперюзер, как раньше) ИЛИ активная платная подписка. Пока
+  `FREEDOMPAY_*`/`PUBLIC_BASE_URL` пусты (`settings.subscription_enabled=false`) —
+  подписка спит, доступ гейтится только группой. Оплата: бот `/subscribe` →
+  `init_payment` → кнопка на hosted-страницу; FreedomPay POST-ит Result URL
+  webhook (`api/payments.py`, проверка `pg_sig`) → продление
+  `subscription_expires_at` + `access_status='subscriber'`. Webhook — ЕДИНСТВЕННОЕ,
+  что торчит наружу, через Caddy (профиль `payments`, только `/api/v1/payments/*`);
+  `api` остаётся на 127.0.0.1. `access_status` синхронизируется в
+  `access.py::resolve_access` (matching Telegram не дёргает). Деплой-чеклист —
+  `DEPLOY.md § Подписка/FreedomPay`.
+- **Защита контента от пересылки.** Всем исходящим методам Bot API, у которых
+  есть поле `protect_content`, оно проставляется централизованно в
+  session-middleware (`bot/protection.py`), а не на каждом `answer()` — иначе
+  новый хендлер молча уехал бы без защиты. Решение принимает
+  `settings.protect_content_for(chat_id)`: `BOT_PROTECT_CONTENT` + whitelist
+  `BOT_SHARE_WHITELIST_IDS` (кому пересылка РАЗРЕШЕНА). Незаданное поле у
+  aiogram — не `None`, а sentinel `Default('protect_content')`; явно
+  переданное в коде значение middleware не трогает. `services/telegram.py`
+  (sync-сендер из worker, минует aiogram) ставит флаг сам по тому же правилу.
+  **Границы:** «Переслать»/«Сохранить» убираются везде, скриншот блокирует
+  только Android-клиент (iOS/Desktop/Web — нет), ссылку из сообщения юзер
+  всё равно может открыть и скопировать. Это барьер от массового репоста,
+  не DRM.
 - **Предохранители качества «ниже рынка»** (защита от выбросов цены):
   (A) абсолютный потолок `MAX_PLAUSIBLE_PRICE_USD=2_000_000` в нормализаторе →
   флаг `price_implausibly_high` (в `CRITICAL_QUALITY_FLAGS`, `analytics_eligible=false`);
@@ -70,10 +94,11 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 - `main.py` — FastAPI-приложение, CORS, роутеры. `cli.py` — все ручные команды.
 - `worker.py` — планировщик full-scan/rebuild. `core/config.py` — все настройки (env).
 - `api/` — роутеры: `routes.py` (estimate/price-trend), `dashboard.py`,
-  `catalog.py`, `market.py`.
+  `catalog.py`, `market.py`, `payments.py` (webhook FreedomPay — см. ниже).
 - `services/` — логика: `sync.py` (обход источника), `normalizer.py` +
   `catalog_service.py` + `catalog.py` (нормализация моделей/алиасы),
-  `analytics.py`, `stats.py` (агрегаты), `dashboard.py`.
+  `analytics.py`, `stats.py` (агрегаты), `dashboard.py`, `freedompay.py` +
+  `subscription.py` (подписка), `telegram.py` (sync sendMessage из worker/api).
 - `bot/` — aiogram: `poller.py` (fresh-циклы), `handlers.py`, `notifier.py`,
   `db.py` (прямой доступ к БД), `access.py` (проверка членства в группе).
 - `models/entities.py` — ORM-модели. `parsers/mashina.py` — адаптер источника.
@@ -115,7 +140,7 @@ docker без sudo. Полный runbook переноса/обновления/�
   `reprocess-catalog` → `rebuild-stats`. `rebuild-stats` до подтверждения
   моделей бесполезен: нераспознанные модели дают `analytics_eligible=false`,
   и марки нет во фронте (`/api/v1/catalog/brands` показывает только марки с
-  analytics-eligible объявлениями). Полный runbook — `SYNC_STRATEGY.md §4`.
+  analytics-eligible объявлениями). Полный runbook — `docs/SYNC_STRATEGY.md §4`.
 - **Баг парсера:** в имя модели «протекают» спеки двигателя (`CX-50 2.0 AT`,
   `EZ-60 1.5hyb AT`). Обходится алиасами на чистую каноническую модель;
   настоящий фикс парсера в бэклоге.
@@ -131,14 +156,14 @@ docker без sudo. Полный runbook переноса/обновления/�
 |---|---|
 | `README.md` | Обзор, детальный quick start, сценарии запуска, парсинг, API |
 | `DEPLOY.md` | Деплой на сервер, порты/безопасность, rsync/scp, бэкапы+cron |
-| `SYNC_STRATEGY.md` | Расписание сбора; §4 — runbook добавления марки |
-| `ANALYTICS_GUIDE.md` | Нормализация, оценка цены, дневные агрегаты, SQL |
-| `DB_SCHEMA_FOR_GPT.md` | Схема БД (таблицы/связи) для генерации запросов |
-| `DB_QUERIES.md` | Готовые SQL-запросы |
-| `FRONTEND_TZ.md` | Тех.задание фронта (`../analytics-front`) |
-| `LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
-| `LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
-| `TODO.md` | Общий бэклог бота: пределы нагрузки, лимиты юзера, доставка уведомлений |
-| `TODO_LALAFO.md` | Согласованные задачи следующей итерации lalafo |
+| `docs/SYNC_STRATEGY.md` | Расписание сбора; §4 — runbook добавления марки |
+| `docs/ANALYTICS_GUIDE.md` | Нормализация, оценка цены, дневные агрегаты, SQL |
+| `docs/DB_SCHEMA_FOR_GPT.md` | Схема БД (таблицы/связи) для генерации запросов |
+| `docs/DB_QUERIES.md` | Готовые SQL-запросы |
+| `docs/FRONTEND_TZ.md` | Тех.задание фронта (`../analytics-front`) |
+| `docs/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
+| `docs/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
+| `docs/TODO.md` | Общий бэклог бота: пределы нагрузки, лимиты юзера, доставка уведомлений |
+| `docs/TODO_LALAFO.md` | Согласованные задачи следующей итерации lalafo |
 
 Долгоживущие факты вне репозитория — в авто-памяти (`MEMORY.md`).

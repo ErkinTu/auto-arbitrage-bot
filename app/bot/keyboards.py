@@ -11,6 +11,13 @@ from app.services.regions import ALL_CARS_CODE, ALL_CARS_LABEL, REGION_CHOICES
 MAX_MODEL_BUTTONS = 96
 
 
+def pay_kb(url: str, label: str) -> InlineKeyboardMarkup:
+    """Одна кнопка-ссылка на hosted-страницу оплаты FreedomPay."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=label, url=url)
+    return builder.as_markup()
+
+
 class BrandCB(CallbackData, prefix="brand"):
     brand_id: int
 

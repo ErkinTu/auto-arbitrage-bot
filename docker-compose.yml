@@ -66,5 +66,28 @@ services:
              uv run python -m app.cli seed &&
              uv run python -m app.bot"
 
+  # Публичный HTTPS-вход для webhook/redirect FreedomPay. Пробрасывает наружу
+  # ТОЛЬКО /api/v1/payments/* (см. Caddyfile); api остаётся на 127.0.0.1.
+  # Профиль payments: локально НЕ стартует (docker compose up), на проде —
+  # `docker compose --profile payments up -d`. Нужен PAYMENTS_DOMAIN в .env.
+  caddy:
+    image: caddy:2-alpine
+    container_name: car_analytics_caddy
+    restart: unless-stopped
+    profiles: ["payments"]
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PAYMENTS_DOMAIN: ${PAYMENTS_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

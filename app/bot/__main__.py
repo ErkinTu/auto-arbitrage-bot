@@ -13,6 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from app.bot.access import AccessMiddleware
 from app.bot.handlers import router
 from app.bot.poller import polling_loop
+from app.bot.protection import ContentProtectionMiddleware
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.catalog_service import seed_default_catalog
@@ -48,6 +49,14 @@ async def main() -> None:
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    # Session-middleware, а не default-параметр: whitelist решает по chat_id
+    # каждого вызова, а DefaultBotProperties одинаков для всех чатов.
+    bot.session.middleware(ContentProtectionMiddleware())
+    if settings.bot_protect_content:
+        logger.info(
+            "content protection on; forwarding allowed for %s id(s)",
+            len(settings.share_whitelist_id_set),
+        )
     dispatcher = Dispatcher(storage=MemoryStorage())
     access = AccessMiddleware()
     dispatcher.message.outer_middleware(access)

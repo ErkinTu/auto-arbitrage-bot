@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
-from app.models import ParserRun
+from app.models import BotUser, ParserRun
+from app.services.telegram import send_message
 from app.parsers.mashina import MashinaParser
 from app.services.catalog_service import seed_default_catalog
 from app.services.lookup import ensure_brand_targets, get_or_create_source
@@ -188,6 +189,51 @@ def lalafo_maintenance_if_due(last_run_date: date | None) -> date | None:
     return today
 
 
+def _reminder_text(expires_at: datetime) -> str:
+    return (
+        f"⏳ Ваша подписка истекает {expires_at.strftime('%d.%m.%Y')}.\n"
+        "Продлите её командой /subscribe, чтобы не пропускать выгодные объявления."
+    )
+
+
+def send_renewal_reminders_if_due(last_run_date: date | None) -> date | None:
+    """Раз в локальные сутки: напоминает подписчикам об истечении.
+
+    Кандидаты — активные подписчики, чей срок истекает в ближайшие
+    SUBSCRIPTION_REMINDER_DAYS_BEFORE дней и кому ещё не напоминали за текущий
+    период (renewal_reminded_at сбрасывается в NULL при оплате). Спит, если
+    подписка не настроена. Возвращает дату запуска (идемпотентна за день).
+    """
+    settings = get_settings()
+    if not settings.subscription_enabled:
+        return None
+    today = local_now(settings.scheduler_timezone).date()
+    if last_run_date == today:
+        return None
+
+    now = utcnow()
+    threshold = now + timedelta(days=settings.subscription_reminder_days_before)
+    reminded = 0
+    with SessionLocal() as session:
+        users = session.scalars(
+            select(BotUser).where(
+                BotUser.access_status == "subscriber",
+                BotUser.subscription_expires_at.is_not(None),
+                BotUser.subscription_expires_at > now,
+                BotUser.subscription_expires_at <= threshold,
+                BotUser.renewal_reminded_at.is_(None),
+            )
+        ).all()
+        for user in users:
+            if send_message(user.telegram_id, _reminder_text(user.subscription_expires_at)):
+                user.renewal_reminded_at = now
+                reminded += 1
+        session.commit()
+    if reminded:
+        logger.info("subscription renewal reminders sent: %s", reminded)
+    return today
+
+
 def main() -> None:
     settings = get_settings()
     init_db()
@@ -209,6 +255,7 @@ def main() -> None:
     )
     last_rebuild_at: datetime | None = None
     last_maintenance_date: date | None = None
+    last_reminder_date: date | None = None
     while True:
         try:
             scans = run_weekend_full_scans()
@@ -229,6 +276,12 @@ def main() -> None:
                 last_rebuild_at = rebuilt_at
         except Exception:
             logger.exception("stats rebuild failed")
+        try:
+            reminded_date = send_renewal_reminders_if_due(last_reminder_date)
+            if reminded_date is not None:
+                last_reminder_date = reminded_date
+        except Exception:
+            logger.exception("subscription renewal reminders failed")
         time.sleep(60)
 
 

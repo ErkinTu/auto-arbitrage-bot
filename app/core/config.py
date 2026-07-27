@@ -1,6 +1,10 @@
+import logging
+from decimal import Decimal
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -65,6 +69,30 @@ class Settings(BaseSettings):
     # сверх лимита пропускаем без записи в sent_notifications — придёт в
     # следующем цикле. 0 = без ограничения.
     bot_max_notifications_per_user_per_cycle: int = 50
+    # Защита контента: sendMessage с protect_content=true убирает «Переслать»/
+    # «Сохранить» и включает блокировку скриншотов там, где клиент это умеет
+    # (Android). iOS/Desktop/Web скриншоты НЕ блокируют — гарантии нет, это
+    # барьер, а не DRM. Whitelist — те, кому пересылка разрешена (свои id через
+    # запятую); для них сообщения уходят без protect_content.
+    bot_protect_content: bool = True
+    bot_share_whitelist_ids: str = ""
+
+    # --- Подписка / FreedomPay (freedompay.kg) --------------------------------
+    # Пока merchant_id пуст — подписочная логика спит: /subscribe отвечает
+    # «временно недоступно», доступ гейтится только группой (как раньше).
+    freedompay_merchant_id: str = ""
+    freedompay_secret_key: str = ""
+    freedompay_base_url: str = "https://api.freedompay.kg"
+    freedompay_testing_mode: bool = True  # pg_testing_mode=1, пока не на боевом мерчанте
+    # Публичный HTTPS-адрес (за Caddy), от которого строятся result/success/failure
+    # URL для FreedomPay. Напр. https://pay.example.com (без хвостового /).
+    public_base_url: str = ""
+    subscription_price_kgs: Decimal = Decimal("500")
+    subscription_period_days: int = 30
+    # За сколько дней до истечения слать напоминание о продлении.
+    subscription_reminder_days_before: int = 3
+    # Окно оплаты счёта в секундах (pg_lifetime): 300..604800.
+    freedompay_payment_lifetime_seconds: int = 3600
 
     scheduler_timezone: str = "Asia/Bishkek"
     bot_active_start_hour: int = 8  # fresh-циклы бота только в окне [start, end)
@@ -106,6 +134,50 @@ class Settings(BaseSettings):
     @property
     def cors_allow_origins(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    @property
+    def share_whitelist_id_set(self) -> frozenset[int]:
+        """Telegram-id, которым пересылка разрешена; нечисловой мусор игнорируем."""
+        ids: set[int] = set()
+        for item in self.bot_share_whitelist_ids.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                ids.add(int(item))
+            except ValueError:
+                logger.warning("BOT_SHARE_WHITELIST_IDS: не число, пропущено: %r", item)
+        return frozenset(ids)
+
+    def protect_content_for(self, chat_id: object) -> bool:
+        """Нужна ли защита контента для чата: да, если включена и чат не в whitelist."""
+        if not self.bot_protect_content:
+            return False
+        try:
+            numeric_id = int(chat_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            # chat_id вида "@channel": по id в whitelist не попадает — защищаем.
+            return True
+        return numeric_id not in self.share_whitelist_id_set
+
+    @property
+    def subscription_enabled(self) -> bool:
+        """Подписка активна, только когда заданы креды мерчанта и публичный URL."""
+        return bool(
+            self.freedompay_merchant_id and self.freedompay_secret_key and self.public_base_url
+        )
+
+    @property
+    def freedompay_result_url(self) -> str:
+        return f"{self.public_base_url.rstrip('/')}/api/v1/payments/result"
+
+    @property
+    def freedompay_success_url(self) -> str:
+        return f"{self.public_base_url.rstrip('/')}/api/v1/payments/success"
+
+    @property
+    def freedompay_failure_url(self) -> str:
+        return f"{self.public_base_url.rstrip('/')}/api/v1/payments/failure"
 
 
 @lru_cache

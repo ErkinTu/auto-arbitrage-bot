@@ -13,6 +13,7 @@ START_TEXT = (
     "Команды:\n"
     "/add_filter — создать фильтр (марка, модель, год, пробег, цена, регион)\n"
     "/filters — мои фильтры и их удаление\n"
+    "/subscribe — оформить/продлить подписку · /status — статус подписки\n"
     "/help — справка"
 )
 
@@ -34,6 +35,38 @@ ACCESS_DENIED_TEXT = (
     "⛔ Доступ только для участников закрытой группы.\n"
     "Если вы считаете, что это ошибка — свяжитесь с администратором."
 )
+
+SUBSCRIPTION_REQUIRED_TEXT = (
+    "🔒 Доступ к боту — по подписке.\n"
+    "Оформите её командой /subscribe, чтобы получать объявления по вашим фильтрам."
+)
+
+SUBSCRIPTION_UNAVAILABLE_TEXT = (
+    "⏳ Оплата подписки временно недоступна. Попробуйте позже или напишите администратору."
+)
+
+
+def subscribe_prompt(price_kgs: int, period_days: int) -> str:
+    return (
+        f"💳 Подписка на {period_days} дней — {_fmt_int(price_kgs)} сом.\n"
+        "Нажмите кнопку ниже, чтобы оплатить через FreedomPay. Доступ откроется "
+        "автоматически сразу после оплаты."
+    )
+
+
+def subscribe_error_text() -> str:
+    return (
+        "⚠️ Не удалось создать платёж. Попробуйте ещё раз через минуту "
+        "командой /subscribe."
+    )
+
+
+def status_text(*, access_status: str, expires_at, active: bool) -> str:
+    if access_status == "member":
+        return "✅ У вас доступ участника закрытой группы — подписка не требуется."
+    if active and expires_at is not None:
+        return f"✅ Подписка активна до {expires_at.strftime('%d.%m.%Y')}.\nПродлить: /subscribe"
+    return "❌ Подписка неактивна. Оформить: /subscribe"
 
 
 def _fmt_int(value: int) -> str:

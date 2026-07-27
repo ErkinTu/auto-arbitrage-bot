@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.catalog import router as catalog_router
 from app.api.dashboard import router as dashboard_router
 from app.api.market import router as market_router
+from app.api.payments import router as payments_router
 from app.api.routes import router as analytics_router
 from app.core.config import get_settings
 from app.db.session import init_db
@@ -38,6 +39,7 @@ app.include_router(analytics_router)
 app.include_router(dashboard_router)
 app.include_router(catalog_router)
 app.include_router(market_router)
+app.include_router(payments_router)
 
 
 @app.get("/health", tags=["system"])

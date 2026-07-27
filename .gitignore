@@ -37,3 +37,6 @@ reports/lalafodetail.html
 *.sqlite
 *.sqlite3
 *.db
+
+# Сгенерированные отчёты (scripts/gen_report.py) — артефакты анализа, не исходники
+reports/*.html

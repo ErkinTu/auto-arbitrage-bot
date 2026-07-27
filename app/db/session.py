@@ -35,6 +35,10 @@ def _upgrade_postgres_schema() -> None:
         "CREATE INDEX IF NOT EXISTS ix_listing_analytics_eligible ON listings (analytics_eligible)",
         # NULL brand_id в фильтре бота = "все марки".
         "ALTER TABLE user_filters ALTER COLUMN brand_id DROP NOT NULL",
+        # Подписка: renewal_reminded_at — новая колонка на существующей bot_users
+        # (create_all не добавляет колонки в уже созданные таблицы). Таблица
+        # payments — новая, её create_all создаёт сам, ALTER не нужен.
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS renewal_reminded_at TIMESTAMPTZ",
     )
     with engine.begin() as connection:
         for statement in statements:

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -15,7 +16,8 @@ from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.models import BotUser, Brand, CarModel, UserFilter
+from app.models import BotUser, Brand, CarModel, Payment, UserFilter
+from app.services.subscription import is_subscription_active
 
 
 class FilterLimitError(Exception):
@@ -57,22 +59,111 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def get_or_create_bot_user(telegram_id: int, username: str | None, first_name: str | None) -> int:
+def decide_access_status(
+    is_member: bool | None, active_sub: bool, current: str = "revoked"
+) -> tuple[str, bool]:
+    """Целевой access_status и признак доступа. Член группы приоритетнее подписки.
+
+    is_member=None — «проверить не удалось» (Telegram недоступен, бот выкинут из
+    группы, неверный chat_id). Понижать статус в этом случае нельзя: matching.py
+    шлёт только 'member'/активным 'subscriber', поэтому один сбой get_chat_member
+    молча отписал бы живого юзера от рассылки до его следующего сообщения боту.
+    Держим прежний статус и пускаем по нему.
+    """
+    if is_member is None:
+        return current, current == "member" or active_sub
+    if is_member:
+        return "member", True
+    if active_sub:
+        return "subscriber", True
+    return "revoked", False
+
+
+def resolve_access(
+    telegram_id: int,
+    username: str | None,
+    first_name: str | None,
+    is_member: bool | None,
+) -> bool:
+    """Апсертит пользователя, синхронизирует access_status и возвращает доступ.
+
+    access_status держим правдивым для matching.py (тот не может звать Telegram):
+    член группы → 'member' (суперюзер), не член но с активной подпиской →
+    'subscriber', иначе → 'revoked'. Пишем в БД только при изменении статуса/
+    идентити — у болтливых юзеров это чаще всего no-op на чтение. Подписку читаем
+    свежей (дёшево), чтобы доступ открывался сразу после оплаты (webhook уже
+    выставил 'subscriber').
+    """
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        created = user is None
+        if created:
+            user = BotUser(telegram_id=telegram_id, username=username, first_name=first_name)
+            session.add(user)
+
+        # У свежедобавленного user access_status ещё None (column default ставится
+        # на INSERT) — для новичка «прежний статус» = отсутствие доступа.
+        desired, has_access = decide_access_status(
+            is_member, is_subscription_active(user), user.access_status or "revoked"
+        )
+
+        changed = (
+            created
+            or user.access_status != desired
+            or user.username != username
+            or user.first_name != first_name
+            or not user.is_active
+        )
+        if changed:
+            user.username = username
+            user.first_name = first_name
+            user.is_active = True
+            user.access_status = desired
+            user.last_access_check_at = _utcnow()
+            session.commit()
+        return has_access
+
+
+@dataclass(slots=True)
+class SubscriptionInfo:
+    access_status: str
+    expires_at: datetime | None
+    active: bool
+
+
+def get_subscription_info(telegram_id: int) -> SubscriptionInfo | None:
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
         if user is None:
-            user = BotUser(telegram_id=telegram_id, username=username, first_name=first_name)
-            session.add(user)
-        else:
-            user.username = username
-            user.first_name = first_name
-            # Пользователь снова пишет боту: значит не заблокировал и доступ проверен.
-            user.is_active = True
-            if user.access_status == "revoked":
-                user.access_status = "member"
-        user.last_access_check_at = _utcnow()
+            return None
+        return SubscriptionInfo(
+            access_status=user.access_status,
+            expires_at=user.subscription_expires_at,
+            active=is_subscription_active(user),
+        )
+
+
+def create_pending_payment(
+    telegram_id: int, *, amount: Decimal, currency: str, period_days: int
+) -> str:
+    """Создаёт pending-платёж, возвращает order_id (уходит в FreedomPay как pg_order_id)."""
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            raise LookupError(f"bot user {telegram_id} is not registered")
+        order_id = uuid.uuid4().hex
+        session.add(
+            Payment(
+                user_id=user.id,
+                order_id=order_id,
+                amount=amount,
+                currency=currency,
+                period_days=period_days,
+                status="pending",
+            )
+        )
         session.commit()
-        return user.id
+        return order_id
 
 
 def list_brands() -> list[BrandDTO]:

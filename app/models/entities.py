@@ -316,6 +316,9 @@ class BotUser(Base, TimestampMixin):
     access_status: Mapped[str] = mapped_column(String(20), default="member", nullable=False)  # member | revoked | subscriber
     subscription_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_access_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Когда юзеру ушло напоминание о продлении текущей подписки (чтобы не слать
+    # повторно за один период). Сбрасывается в NULL при успешной оплате.
+    renewal_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class UserFilter(Base, TimestampMixin):
@@ -355,3 +358,30 @@ class SentNotification(Base):
     listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), nullable=False)
     filter_id: Mapped[int | None] = mapped_column(ForeignKey("user_filters.id", ondelete="SET NULL"))
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Payment(Base, TimestampMixin):
+    """Разовый платёж за подписку через FreedomPay (freedompay.kg).
+
+    Один ряд на попытку оплаты. `order_id` уходит в FreedomPay как `pg_order_id`
+    (в нём — связь с пользователем), `freedompay_payment_id` = `pg_payment_id`
+    из ответа/webhook. Статус двигают init_payment (pending) и Result-URL webhook
+    (paid | failed). Recurring-профили не используем — оплата разовая.
+    """
+
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    order_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    freedompay_payment_id: Mapped[str | None] = mapped_column(String(64))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), default="KGS", nullable=False)
+    period_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending", nullable=False, index=True
+    )  # pending | paid | failed | canceled
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw_callback: Mapped[dict[str, Any] | None] = mapped_column(JSON)

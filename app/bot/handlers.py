@@ -22,14 +22,24 @@ from app.bot.keyboards import (
     brands_kb,
     filters_kb,
     models_kb,
+    pay_kb,
     percent_kb,
     region_kb,
     skip_kb,
     yes_no_kb,
 )
-from app.bot.messages import HELP_TEXT, START_TEXT, format_filter_line
+from app.bot.messages import (
+    HELP_TEXT,
+    START_TEXT,
+    SUBSCRIPTION_UNAVAILABLE_TEXT,
+    format_filter_line,
+    status_text,
+    subscribe_error_text,
+    subscribe_prompt,
+)
 from app.bot.states import AddFilter
 from app.core.config import get_settings
+from app.services.freedompay import init_payment
 from app.services.regions import ALL_CARS_CODE, is_valid_region
 
 router = Router()
@@ -56,6 +66,53 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(HELP_TEXT)
+
+
+@router.message(Command("subscribe"))
+async def cmd_subscribe(message: Message) -> None:
+    settings = get_settings()
+    if not settings.subscription_enabled:
+        await message.answer(SUBSCRIPTION_UNAVAILABLE_TEXT)
+        return
+
+    try:
+        order_id = await asyncio.to_thread(
+            db.create_pending_payment,
+            message.from_user.id,
+            amount=settings.subscription_price_kgs,
+            currency="KGS",
+            period_days=settings.subscription_period_days,
+        )
+    except LookupError:
+        await message.answer(subscribe_error_text())
+        return
+
+    result = await asyncio.to_thread(
+        init_payment,
+        order_id=order_id,
+        amount=settings.subscription_price_kgs,
+        description=f"Подписка на {settings.subscription_period_days} дней",
+    )
+    if not result.ok or not result.redirect_url:
+        await message.answer(subscribe_error_text())
+        return
+
+    price = int(settings.subscription_price_kgs)
+    await message.answer(
+        subscribe_prompt(price, settings.subscription_period_days),
+        reply_markup=pay_kb(result.redirect_url, f"💳 Оплатить {price} сом"),
+    )
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message) -> None:
+    info = await asyncio.to_thread(db.get_subscription_info, message.from_user.id)
+    if info is None:
+        await message.answer("❌ Подписка неактивна. Оформить: /subscribe")
+        return
+    await message.answer(
+        status_text(access_status=info.access_status, expires_at=info.expires_at, active=info.active)
+    )
 
 
 @router.message(Command("cancel"))

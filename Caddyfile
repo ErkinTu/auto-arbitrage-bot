@@ -1,0 +1,16 @@
+# Caddy: единственный публичный вход. Наружу отдаём ТОЛЬКО payment-эндпоинты
+# FreedomPay (webhook + redirect-страницы). Всё остальное API (оценка, каталог,
+# /docs) остаётся закрытым на 127.0.0.1 — сюда не проксируется.
+#
+# Домен берётся из переменной PAYMENTS_DOMAIN (.env); авто-HTTPS Let's Encrypt
+# требует, чтобы домен резолвился на сервер и были открыты порты 80/443.
+{$PAYMENTS_DOMAIN} {
+	@payments path /api/v1/payments/*
+	handle @payments {
+		reverse_proxy api:8000
+	}
+	# Любой другой путь наружу не открываем.
+	handle {
+		respond "Not found" 404
+	}
+}
