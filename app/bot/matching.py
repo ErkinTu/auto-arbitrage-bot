@@ -167,9 +167,14 @@ def market_average(
     # с отсевом выбросов в stats (иначе средняя заражается выбросом из unknown).
     if listing.mileage_km is not None:
         conditions.append(DailyMarketStat.mileage_bucket == mileage_bucket(listing.mileage_km))
-    # Растаможка существенно сдвигает цены: сравниваем только внутри своей группы.
-    if listing.customs_status != "unknown":
-        conditions.append(DailyMarketStat.customs_status == listing.customs_status)
+    # По растаможке НЕ делим: это артефакт источника, а не сегмент рынка. mashina.kg
+    # поле не отдаёт вовсе (весь её парк — customs_status='unknown'), lalafo парсит
+    # «Растаможку» → её объявления с 'cleared' сравнивались лишь с другими lalafo-
+    # 'cleared' (~11% парка) и были отрезаны от 42k mashina: 64% таких объявлений не
+    # набирали min_samples и молча не попадали в рассылку (у всех фильтров включён
+    # below_market_only, поэтому «нет статистики» = тишина). Рынок КР локальный, так
+    # что растаможенные и нерастаможенные сравниваем вместе; понадобится различать —
+    # добавим уточнение в фильтре бота, измерение в ключе daily_market_stats осталось.
 
     latest_date = session.scalar(select(func.max(DailyMarketStat.stat_date)).where(*conditions))
     if latest_date is None:

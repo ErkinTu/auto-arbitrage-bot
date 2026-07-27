@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
@@ -323,13 +324,34 @@ def test_market_average_null_mileage_aggregates_all_buckets() -> None:
     assert market_average(session, known, min_samples=5) is None
 
 
-def test_market_average_respects_customs_status() -> None:
+def test_market_average_ignores_customs_status() -> None:
+    """Растаможка не делит когорту: lalafo-'cleared' сравнивается со всем парком.
+
+    Иначе объявления lalafo с заполненной растаможкой сравнивались бы лишь друг с
+    другом (mashina это поле не отдаёт) и не набирали min_samples.
+    """
     session = _session()
     _add_stat(session, avg="10000", samples=8, customs_status="cleared")
     _add_stat(session, avg="16000", samples=8, customs_status="not_cleared")
 
-    listing = _add_listing(session, external_id="1", price_usd=Decimal("15000"), customs_status="not_cleared")
-    assert market_average(session, listing, min_samples=5) == 16000.0
+    # (10000*8 + 16000*8) / 16 = 13000 — независимо от растаможки самого объявления.
+    for external_id, customs in (("1", "not_cleared"), ("2", "cleared"), ("3", "unknown")):
+        listing = _add_listing(
+            session, external_id=external_id, price_usd=Decimal("15000"), customs_status=customs
+        )
+        assert market_average(session, listing, min_samples=5) == 13000.0
+
+
+def test_market_average_customs_only_cohort_reaches_min_samples() -> None:
+    """Разбор 2026-07-25: когорта из разных групп растаможки складывается и берёт порог."""
+    session = _session()
+    # Поодиночке ни одна группа не даёт 5 образцов, вместе — 6.
+    _add_stat(session, avg="6000", samples=1, customs_status="cleared")
+    _add_stat(session, avg="7000", samples=5, customs_status="unknown")
+
+    listing = _add_listing(session, external_id="1", price_usd=Decimal("3000"), customs_status="cleared")
+    # (6000*1 + 7000*5) / 6 ≈ 6833.33 — раньше здесь была бы None (1 образец).
+    assert market_average(session, listing, min_samples=5) == pytest.approx(6833.33, abs=0.01)
 
 
 def test_match_new_listings_dedup() -> None:
