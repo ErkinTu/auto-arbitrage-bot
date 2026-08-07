@@ -306,6 +306,9 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
    SUBSCRIPTION_PRICE_KGS=2000
    SUBSCRIPTION_PERIOD_DAYS=30
    SUBSCRIPTION_REMINDER_DAYS_BEFORE=1
+   TRIAL_DAYS=3                      # 0 = выключить триал и рефералку
+   REFERRAL_FRIENDS_PER_BONUS=3
+   REFERRAL_BONUS_DAYS=7
    ```
 6. **Схема БД — единственный ручной DDL.** На проде таблица `payments` уже
    существует со старой колонкой `freedompay_payment_id` (спящий код FreedomPay
