@@ -14,6 +14,7 @@ START_TEXT = (
     "/add_filter — создать фильтр (марка, модель, год, пробег, цена, регион)\n"
     "/filters — мои фильтры и их удаление\n"
     "/subscribe — оформить/продлить подписку · /status — статус подписки\n"
+    "/invite — пригласить друзей и получить дни бесплатно\n"
     "/help — справка"
 )
 
@@ -55,6 +56,82 @@ def subscribe_prompt(price_kgs: int, period_days: int) -> str:
     )
 
 
+def onboarding_text(trial_days: int) -> str:
+    """Первое сообщение новичку: приветствие + как работает + оффер триала."""
+    return (
+        "👋 Привет! Я слежу за объявлениями о продаже авто на mashina.kg и "
+        "lalafo.kg и присылаю те, что дешевле рынка.\n\n"
+        "Как это работает: вы задаёте фильтр (марка, модель, год, пробег, цена, "
+        "регион), а я каждые ~10 минут проверяю свежие объявления и сравниваю цену "
+        "со средней по таким же машинам. Ниже рынка — сразу пишу вам.\n\n"
+        f"🎁 Первые {trial_days} дня — бесплатно, без карты."
+    )
+
+
+DEMO_INTRO_TEXT = "Вот пример объявления, которое я нашёл сегодня:"
+
+DEMO_UNAVAILABLE_TEXT = (
+    "Сейчас нет свежего примера под рукой — как только появится машина ниже рынка, "
+    "она придёт вам первой."
+)
+
+
+def trial_started_text(expires_at, trial_days: int) -> str:
+    return (
+        f"🎁 Бесплатный период на {trial_days} дня активирован — до "
+        f"{expires_at.strftime('%d.%m.%Y')}.\n\n"
+        "Создайте первый фильтр: /add_filter\n"
+        "Пригласите друзей и получите ещё дни бесплатно: /invite"
+    )
+
+
+TRIAL_ALREADY_USED_TEXT = (
+    "Бесплатный период уже был использован на этом аккаунте.\n"
+    "Оформить подписку: /subscribe"
+)
+
+
+def trial_paywall_text(price_kgs: int, period_days: int) -> str:
+    """Разовое сообщение после окончания триала (уходит из worker)."""
+    return (
+        "⏳ Бесплатный период закончился — новые объявления я больше не присылаю.\n\n"
+        f"Подписка — {_fmt_int(price_kgs)} сом за {period_days} дней: оплата по QR "
+        "из банковского приложения, без ввода карты.\n"
+        "Оформить: /subscribe\n"
+        "Или получите дни бесплатно за приглашённых друзей: /invite"
+    )
+
+
+def invite_text(
+    *,
+    link: str,
+    qualified: int,
+    friends_to_next_bonus: int,
+    bonus_days: int,
+    friends_per_bonus: int,
+    bonuses_granted: int,
+) -> str:
+    granted = (
+        f"\nУже начислено бонусов: {bonuses_granted} (+{bonuses_granted * bonus_days} дней)."
+        if bonuses_granted
+        else ""
+    )
+    return (
+        f"🤝 Пригласите {friends_per_bonus} друзей — получите +{bonus_days} дней бесплатно.\n\n"
+        f"Ваша ссылка:\n{link}\n\n"
+        f"Друг засчитывается, когда перейдёт по ссылке и активирует бесплатный период.\n"
+        f"Засчитано друзей: {qualified}. До следующего бонуса: {friends_to_next_bonus}."
+        f"{granted}"
+    )
+
+
+def referral_bonus_text(days: int) -> str:
+    return (
+        f"🎉 Ваши друзья активировали бота — вам начислено +{days} дней доступа.\n"
+        "Статус: /status"
+    )
+
+
 def subscribe_error_text() -> str:
     return (
         "⚠️ Не удалось создать платёж. Попробуйте ещё раз через минуту "
@@ -62,11 +139,23 @@ def subscribe_error_text() -> str:
     )
 
 
-def status_text(*, access_status: str, expires_at, active: bool) -> str:
+def status_text(
+    *,
+    access_status: str,
+    expires_at,
+    active: bool,
+    trial_active: bool = False,
+    trial_expires_at=None,
+) -> str:
     if access_status == "member":
         return "✅ У вас доступ участника закрытой группы — подписка не требуется."
     if active and expires_at is not None:
         return f"✅ Подписка активна до {expires_at.strftime('%d.%m.%Y')}.\nПродлить: /subscribe"
+    if trial_active and trial_expires_at is not None:
+        return (
+            f"🎁 Бесплатный период активен до {trial_expires_at.strftime('%d.%m.%Y')}.\n"
+            "Оформить подписку заранее: /subscribe · Продлить бесплатно: /invite"
+        )
     return "❌ Подписка неактивна. Оформить: /subscribe"
 
 

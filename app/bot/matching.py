@@ -222,13 +222,23 @@ def match_new_listings(
             BotUser.is_active.is_(True),
             # Получатели: суперюзеры-члены группы (access_status='member', как
             # раньше — при выключенном гейте по группе все тоже 'member') ИЛИ
-            # платные подписчики с ещё не истёкшей подпиской. 'revoked' — никогда.
+            # платные подписчики с ещё не истёкшей подпиской ИЛИ юзеры на
+            # действующем триале. 'revoked' — никогда.
+            #
+            # Здесь же и весь «пейвол на 4-й день»: с истечением trial_expires_at
+            # юзер просто перестаёт попадать в выборку — отдельного выключателя
+            # уведомлений не нужно (разовое сообщение шлёт worker).
             or_(
                 BotUser.access_status == "member",
                 and_(
                     BotUser.access_status == "subscriber",
                     BotUser.subscription_expires_at.is_not(None),
                     BotUser.subscription_expires_at > utcnow(),
+                ),
+                and_(
+                    BotUser.access_status == "trial",
+                    BotUser.trial_expires_at.is_not(None),
+                    BotUser.trial_expires_at > utcnow(),
                 ),
             ),
         )

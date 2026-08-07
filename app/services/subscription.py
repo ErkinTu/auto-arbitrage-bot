@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import BotUser, Payment
+from app.services.events import EVENT_PAID, log_event
 
 
 def _utcnow() -> datetime:
@@ -44,6 +45,26 @@ def is_subscription_active(user: BotUser, now: datetime | None = None) -> bool:
     return expires is not None and expires > now
 
 
+def extend_paid_access(user: BotUser, days: int, now: datetime | None = None) -> datetime:
+    """Продлевает «платный» доступ на days дней и чинит сопутствующие поля.
+
+    Один хелпер на три источника дней: оплата (webhook), реферальный бонус и
+    ручное продление из CLI. Бонусные дни живут в том же
+    `subscription_expires_at`, что и оплаченные, — для доступа это одно и то же,
+    а различить их всегда можно по `user_events`/`payments` (именно оттуда
+    считается воронка, а не из `access_status`).
+
+    `renewal_reminded_at` обязательно сбрасывается: иначе продлённый юзер не
+    получит напоминание перед НОВЫМ сроком — флаг остался бы от прошлого периода.
+    """
+    now = now or _utcnow()
+    user.subscription_expires_at = next_expiry(user.subscription_expires_at, now, days)
+    user.access_status = "subscriber"
+    user.renewal_reminded_at = None
+    user.is_active = True
+    return user.subscription_expires_at
+
+
 def apply_paid_payment(
     session: Session,
     payment: Payment,
@@ -62,10 +83,6 @@ def apply_paid_payment(
     user = session.get(BotUser, payment.user_id)
     if user is None:  # платёж без пользователя — не должно случаться
         raise ValueError(f"payment {payment.id} references missing user {payment.user_id}")
-    user.subscription_expires_at = next_expiry(
-        user.subscription_expires_at, now, payment.period_days
-    )
-    user.access_status = "subscriber"
-    user.renewal_reminded_at = None
-    user.is_active = True
+    extend_paid_access(user, payment.period_days, now)
+    log_event(session, user.id, EVENT_PAID, {"order_id": payment.order_id, "days": payment.period_days})
     return user

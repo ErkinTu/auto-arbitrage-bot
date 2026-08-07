@@ -29,8 +29,11 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
+from app.bot.messages import trial_paywall_text
 from app.models import BotUser, ParserRun, Payment
+from app.services.events import EVENT_TRIAL_EXPIRED, log_event
 from app.services.telegram import send_message
+from app.services.trial import paywall_candidates
 from app.parsers.mashina import MashinaParser
 from app.services.catalog_service import seed_default_catalog
 from app.services.lookup import ensure_brand_targets, get_or_create_source
@@ -234,6 +237,41 @@ def send_renewal_reminders_if_due(last_run_date: date | None) -> date | None:
     return today
 
 
+def send_trial_paywall_notices() -> int:
+    """Пейвол: разовое сообщение тем, у кого закончился бесплатный период.
+
+    Сами уведомления об объявлениях прекращаются автоматически (matching.py
+    выбирает только активный доступ) — здесь только объясняем человеку, что
+    произошло, и зовём оплатить. Строго один раз на пользователя:
+    `trial_expired_notified_at` выставляется даже при неудачной отправке
+    (заблокировал бота) — иначе бот пытался бы каждый цикл.
+
+    Не «раз в сутки», а каждый цикл worker-а: у каждого юзера свой день
+    окончания триала, и день ожидания сообщения — это потерянная конверсия.
+    Кандидатов почти всегда ноль, запрос дешёвый.
+    """
+    settings = get_settings()
+    if not settings.trial_enabled:
+        return 0
+    price = int(settings.subscription_price_kgs)
+    text = trial_paywall_text(price, settings.subscription_period_days)
+    now = utcnow()
+    sent = 0
+    with SessionLocal() as session:
+        for user in paywall_candidates(session, now):
+            delivered = send_message(user.telegram_id, text)
+            user.trial_expired_notified_at = now
+            log_event(session, user.id, EVENT_TRIAL_EXPIRED, {"delivered": delivered})
+            if user.access_status == "trial":
+                # Держим статус честным для метрик, даже если юзер молчит.
+                user.access_status = "revoked"
+            sent += 1
+        session.commit()
+    if sent:
+        logger.info("trial paywall notices sent: %s", sent)
+    return sent
+
+
 def expire_stale_payments() -> int:
     """Гасит незавершённые платежи: pending старше PAYMENT_PENDING_TTL_HOURS.
 
@@ -303,6 +341,10 @@ def main() -> None:
                 last_reminder_date = reminded_date
         except Exception:
             logger.exception("subscription renewal reminders failed")
+        try:
+            send_trial_paywall_notices()
+        except Exception:
+            logger.exception("trial paywall notices failed")
         try:
             expire_stale_payments()
         except Exception:

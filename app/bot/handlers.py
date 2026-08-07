@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import suppress
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -19,23 +21,35 @@ from app.bot.keyboards import (
     PercentCB,
     RegionCB,
     SkipCB,
+    TrialCB,
     brands_kb,
     filters_kb,
     models_kb,
     pay_kb,
     percent_kb,
     region_kb,
+    share_kb,
     skip_kb,
+    trial_kb,
     yes_no_kb,
 )
 from app.bot.messages import (
+    DEMO_INTRO_TEXT,
+    DEMO_UNAVAILABLE_TEXT,
     HELP_TEXT,
     START_TEXT,
+    SUBSCRIPTION_REQUIRED_TEXT,
     SUBSCRIPTION_UNAVAILABLE_TEXT,
+    TRIAL_ALREADY_USED_TEXT,
     format_filter_line,
+    format_notification,
+    invite_text,
+    onboarding_text,
+    referral_bonus_text,
     status_text,
     subscribe_error_text,
     subscribe_prompt,
+    trial_started_text,
 )
 from app.bot.states import AddFilter
 from app.core.config import get_settings
@@ -59,8 +73,122 @@ def _parse_positive_int(text: str) -> int | None:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
-    await message.answer(START_TEXT)
+async def cmd_start(message: Message, command: CommandObject | None = None) -> None:
+    """Онбординг: приветствие → как работает → демо-лот → кнопка триала.
+
+    Ветки: у кого доступ уже есть (член группы, подписчик, идущий триал) —
+    обычное меню; кто триал ещё не брал — оффер с кнопкой; кто израсходовал —
+    предложение оплаты. Deep-link `ref_<code>` разбирается здесь же.
+    """
+    settings = get_settings()
+    info = await asyncio.to_thread(
+        db.handle_start,
+        message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        deep_link_payload=command.args if command else None,
+    )
+
+    if info.access_status == "member" or info.subscription_active or info.trial_active:
+        await message.answer(START_TEXT)
+        return
+
+    if info.trial_used or not settings.trial_enabled:
+        # Триал израсходован (или выключен) — сразу к оплате.
+        await message.answer(START_TEXT)
+        await message.answer(
+            TRIAL_ALREADY_USED_TEXT
+            if info.trial_used
+            else SUBSCRIPTION_REQUIRED_TEXT
+        )
+        return
+
+    await message.answer(onboarding_text(settings.trial_days))
+    await _send_demo_listing(message)
+    await message.answer(
+        f"🎁 {settings.trial_days} дня бесплатно — без карты и без оплаты.",
+        reply_markup=trial_kb(settings.trial_days),
+    )
+
+
+async def _send_demo_listing(message: Message) -> None:
+    """Показывает реальное объявление ниже рынка — тем же форматом, что и рассылка."""
+    demo = await asyncio.to_thread(db.get_demo_listing, message.from_user.id)
+    if demo is None:
+        await message.answer(DEMO_UNAVAILABLE_TEXT)
+        return
+    await message.answer(DEMO_INTRO_TEXT)
+    await message.answer(format_notification(demo), disable_web_page_preview=False)
+
+
+@router.callback_query(TrialCB.filter(F.action == "start"))
+async def cb_trial_start(callback: CallbackQuery) -> None:
+    settings = get_settings()
+    if not settings.trial_enabled:
+        await callback.answer("Бесплатный период сейчас недоступен", show_alert=True)
+        return
+
+    try:
+        result = await asyncio.to_thread(db.activate_trial, callback.from_user.id)
+    except LookupError:
+        await callback.answer("Не удалось активировать. Отправьте /start ещё раз", show_alert=True)
+        return
+
+    if not result.ok:
+        await callback.answer()
+        await callback.message.answer(TRIAL_ALREADY_USED_TEXT)
+        return
+
+    await callback.answer()
+    # Кнопку убираем: повторные нажатия всё равно ничего не дадут (триал
+    # одноразовый), но выглядели бы как поломка.
+    with suppress(TelegramAPIError):
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(trial_started_text(result.expires_at, settings.trial_days))
+
+    if result.referrer_chat_id and result.referrer_bonus_days:
+        await _notify_referral_bonus(
+            callback.bot, result.referrer_chat_id, result.referrer_bonus_days
+        )
+
+
+async def _notify_referral_bonus(bot, chat_id: int, days: int) -> None:
+    """Сообщает пригласившему о бонусе. Best-effort: он мог заблокировать бота."""
+    with suppress(TelegramAPIError):
+        await bot.send_message(chat_id, referral_bonus_text(days))
+
+
+@router.message(Command("invite"))
+async def cmd_invite(message: Message) -> None:
+    settings = get_settings()
+    if not settings.referral_enabled:
+        await message.answer("Реферальная программа сейчас недоступна.")
+        return
+    if not settings.bot_username:
+        # Без username бота deep-link не собрать — молча отдавать «ссылку» вида
+        # t.me/None было бы хуже честного отказа.
+        await message.answer("Реферальные ссылки временно недоступны.")
+        return
+
+    try:
+        info = await asyncio.to_thread(db.get_invite_info, message.from_user.id)
+    except LookupError:
+        await message.answer("Отправьте /start, чтобы начать пользоваться ботом.")
+        return
+
+    link = f"https://t.me/{settings.bot_username.lstrip('@')}?start=ref_{info.invite_code}"
+    await message.answer(
+        invite_text(
+            link=link,
+            qualified=info.qualified,
+            friends_to_next_bonus=info.friends_to_next_bonus,
+            bonus_days=settings.referral_bonus_days,
+            friends_per_bonus=settings.referral_friends_per_bonus,
+            bonuses_granted=info.bonuses_granted,
+        ),
+        reply_markup=share_kb(link),
+        disable_web_page_preview=True,
+    )
 
 
 @router.message(Command("help"))
@@ -111,7 +239,13 @@ async def cmd_status(message: Message) -> None:
         await message.answer("❌ Подписка неактивна. Оформить: /subscribe")
         return
     await message.answer(
-        status_text(access_status=info.access_status, expires_at=info.expires_at, active=info.active)
+        status_text(
+            access_status=info.access_status,
+            expires_at=info.expires_at,
+            active=info.active,
+            trial_active=info.trial_active,
+            trial_expires_at=info.trial_expires_at,
+        )
     )
 
 

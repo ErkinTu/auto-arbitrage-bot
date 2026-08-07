@@ -29,7 +29,10 @@ ALLOWED_STATUSES = {"creator", "administrator", "member"}
 CHAT_PROBLEM_MARKER = "chat not found"
 # Команды, доступные без активного доступа: иначе неоплативший юзер не смог бы
 # ни узнать о подписке, ни оплатить её.
-ENTRY_COMMANDS = {"start", "help", "subscribe", "status", "cancel"}
+ENTRY_COMMANDS = {"start", "help", "subscribe", "status", "cancel", "invite"}
+# Callback-и, доступные без активного доступа (префикс aiogram CallbackData).
+ENTRY_CALLBACK_PREFIXES = {"trial"}
+ENTRY_CALLBACK_SEP = ":"
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -114,6 +117,11 @@ class AccessMiddleware(BaseMiddleware):
         if isinstance(event, Message) and event.text:
             command = event.text.split(maxsplit=1)[0].lstrip("/").split("@")[0].lower()
             return command in ENTRY_COMMANDS
+        # Кнопка «Начать бесплатный период» — единственный вход через callback:
+        # доступа у нажимающего ещё НЕТ (он его как раз и получает), поэтому без
+        # этой ветки онбординг упирался бы в «доступ по подписке».
+        if isinstance(event, CallbackQuery) and event.data:
+            return event.data.split(ENTRY_CALLBACK_SEP)[0] in ENTRY_CALLBACK_PREFIXES
         return False
 
     async def _deny(self, event: TelegramObject) -> None:

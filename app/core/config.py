@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     # гасим сами: pending старше этого срока -> expired.
     payment_pending_ttl_hours: int = 6
 
+    # --- Триал и рефералка ----------------------------------------------------
+    # Бесплатный период по кнопке в /start — выдаётся один раз на telegram_id.
+    # 0 = триал выключен (кнопки нет, доступ как раньше: группа ИЛИ подписка).
+    trial_days: int = 3
+    # «Пригласи N друзей — получи +M дней». Друг засчитывается только после того,
+    # как активировал триал: иначе накрутка сводится к созданию пустых аккаунтов.
+    referral_friends_per_bonus: int = 3
+    referral_bonus_days: int = 7
+
     scheduler_timezone: str = "Asia/Bishkek"
     bot_active_start_hour: int = 8  # fresh-циклы бота только в окне [start, end)
     bot_active_end_hour: int = 24  # 24 = до полуночи
@@ -178,6 +187,16 @@ class Settings(BaseSettings):
         `api` (webhook) обходится публичным ключом Finik.
         """
         return bool(self.finik_api_key and self.finik_account_id and self.public_base_url)
+
+    @property
+    def trial_enabled(self) -> bool:
+        """Триал выдаём, только если он вообще что-то даёт по сроку."""
+        return self.trial_days > 0
+
+    @property
+    def referral_enabled(self) -> bool:
+        """Рефералка работает поверх триала: друг засчитывается по его активации."""
+        return self.trial_enabled and self.referral_bonus_days > 0 and self.referral_friends_per_bonus > 0
 
     @property
     def finik_base_url(self) -> str:

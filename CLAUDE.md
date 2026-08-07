@@ -86,6 +86,30 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
     страховка на потерянный webhook: `cli.py grant-subscription`.
   - Идемпотентность обязательна: подпись Finik валидна бессрочно, ретраи идут
     сутки; повтор по оплаченному `order_id` отвечает `200 already processed`.
+- **Триал, пейвол, рефералка.** Доступ = группа ИЛИ подписка ИЛИ **активный
+  триал** (`bot/db.py::decide_access_status`, приоритет в этом же порядке —
+  статус нужен честным для метрик и напоминаний). Триал: `TRIAL_DAYS=3` по
+  кнопке в онбординге `/start`, **один раз на telegram_id** —
+  `trial_started_at` не обнуляется никогда, даже после истечения. Срок лежит в
+  ОТДЕЛЬНОЙ `trial_expires_at`, не в `subscription_expires_at`: иначе
+  бесплатные дни попадут в напоминание о продлении и в метрики оплат.
+  **Пейвол наступает сам** — `matching.py` выбирает только активный доступ, так
+  что с истечением триала пуши прекращаются без выключателя; отдельно шлётся
+  ровно одно сообщение (`worker.send_trial_paywall_notices`, флаг
+  `trial_expired_notified_at` ставится даже при неудачной доставке).
+  Рефералка: deep-link `t.me/<bot>?start=ref_<code>` (нужен `BOT_USERNAME`),
+  друг засчитывается **только после активации им триала**, за каждые
+  `REFERRAL_FRIENDS_PER_BONUS=3` — `+REFERRAL_BONUS_DAYS=7` дней; начисление
+  идемпотентно (храним ЧИСЛО выданных бонусов и догоняем до заслуженного),
+  самоприглашение и перепривязка запрещены. Бонусные дни идут в тот же
+  `subscription_expires_at` через `subscription.py::extend_paid_access` (общий
+  хелпер для оплаты/бонуса/CLI) — для доступа это одно и то же, а различить
+  всегда можно по `user_events`/`payments`. Воронка: журнал `user_events`
+  (`start`/`trial_started`/`trial_expired`/`payment_created`/`paid`), отчёт —
+  `cli.py funnel --days N`; по `bot_users` её не построить, там только текущее
+  состояние. Грабля: сессии бота живут с `autoflush=False`, поэтому
+  `grant_due_bonuses` делает `flush()` сам — иначе COUNT не увидит только что
+  выданный триал и бонус молча не начислится.
 - **Защита контента от пересылки.** Всем исходящим методам Bot API, у которых
   есть поле `protect_content`, оно проставляется централизованно в
   session-middleware (`bot/protection.py`), а не на каждом `answer()` — иначе
@@ -117,10 +141,13 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 - `services/` — логика: `sync.py` (обход источника), `normalizer.py` +
   `catalog_service.py` + `catalog.py` (нормализация моделей/алиасы),
   `analytics.py`, `stats.py` (агрегаты), `dashboard.py`, `finik.py` +
-  `subscription.py` (подписка), `telegram.py` (sync sendMessage из worker/api).
+  `subscription.py` (подписка), `trial.py` + `referral.py` + `events.py`
+  (триал, рефералка, журнал воронки), `telegram.py` (sync sendMessage из
+  worker/api).
 - `bot/` — aiogram: `poller.py` (fresh-циклы), `handlers.py`, `notifier.py`,
   `db.py` (прямой доступ к БД), `access.py` (проверка членства в группе).
-- `models/entities.py` — ORM-модели. `parsers/mashina.py` — адаптер источника.
+- `models/entities.py` — ORM-модели (в т.ч. `UserEvent` — журнал воронки).
+  `parsers/mashina.py` — адаптер источника.
 
 ## Запуск и команды
 
@@ -142,7 +169,8 @@ docker compose exec -T worker uv run python -m app.cli <cmd>
 `sync-all [--source]`, `rebuild-stats`, `catalog-issues`, `add-model-alias`,
 `add-generation-alias`, `reprocess-catalog`, `ensure-self-aliases`,
 `refresh-rate`, `grant-subscription --telegram-id --days [--note]` (ручное
-продление подписки: потерянный webhook, бонус, компенсация).
+продление подписки: потерянный webhook, бонус, компенсация),
+`funnel [--days 30]` (воронка: старты → триалы → пейвол → платежи → оплаты).
 
 ## Продакшн
 

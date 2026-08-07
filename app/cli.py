@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -296,24 +296,112 @@ def command_grant_subscription(args: argparse.Namespace) -> None:
     from sqlalchemy import select
 
     from app.models import BotUser
-    from app.services.subscription import next_expiry
+    from app.services.subscription import extend_paid_access
 
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == args.telegram_id))
         if user is None:
             print(f"Bot user with telegram_id={args.telegram_id} not found.")
             return
-        now = utcnow()
-        user.subscription_expires_at = next_expiry(user.subscription_expires_at, now, args.days)
-        user.access_status = "subscriber"
-        user.renewal_reminded_at = None
-        user.is_active = True
+        extend_paid_access(user, args.days, utcnow())
         session.commit()
         note = f" ({args.note})" if args.note else ""
         print(
             f"telegram_id={args.telegram_id}: +{args.days} days, "
             f"subscription until {user.subscription_expires_at:%Y-%m-%d %H:%M} UTC{note}"
         )
+
+
+def command_funnel(args: argparse.Namespace) -> None:
+    """Воронка: старты → триалы → пейвол → платежи → оплаты.
+
+    Считается по `user_events` (журнал переходов), а не по `bot_users`: там
+    только текущее состояние, и «отвал по дням» по нему не построить. Даты — в
+    UTC, как хранятся; расхождение с бишкекским днём (+6) для суточных
+    когорт несущественно, а зависимость от таймзоны запуска — вредна.
+    """
+    from sqlalchemy import func
+
+    from app.models import BotUser, UserEvent
+    from app.services.events import (
+        EVENT_PAID,
+        EVENT_PAYMENT_CREATED,
+        EVENT_START,
+        EVENT_TRIAL_EXPIRED,
+        EVENT_TRIAL_STARTED,
+        FUNNEL_EVENTS,
+    )
+    from app.services.subscription import is_subscription_active
+    from app.services.trial import is_trial_active
+
+    since = utcnow() - timedelta(days=args.days)
+    titles = {
+        EVENT_START: "Стартовали бота",
+        EVENT_TRIAL_STARTED: "Активировали триал",
+        EVENT_TRIAL_EXPIRED: "Дошли до пейвола",
+        EVENT_PAYMENT_CREATED: "Начали оплату",
+        EVENT_PAID: "Оплатили",
+    }
+
+    with SessionLocal() as session:
+        # Уникальные пользователи на каждом шаге: человек, нажавший «оплатить»
+        # трижды, — это один человек, а не три.
+        counts = {
+            event: session.scalar(
+                select(func.count(func.distinct(UserEvent.user_id))).where(
+                    UserEvent.event == event, UserEvent.created_at >= since
+                )
+            )
+            or 0
+            for event in FUNNEL_EVENTS
+        }
+
+        print(f"Воронка за последние {args.days} дн. (с {since:%Y-%m-%d %H:%M} UTC)")
+        print("-" * 52)
+        base = counts[EVENT_START]
+        previous = None
+        for event in FUNNEL_EVENTS:
+            value = counts[event]
+            of_start = f"{value / base * 100:5.1f}% от стартов" if base else "     —"
+            step = ""
+            if previous is not None and previous > 0:
+                step = f", {value / previous * 100:5.1f}% от пред."
+            print(f"{titles[event]:<22} {value:>6}   {of_start}{step}")
+            previous = value
+
+        by_day = session.execute(
+            select(
+                func.date(UserEvent.created_at).label("day"),
+                UserEvent.event,
+                func.count(func.distinct(UserEvent.user_id)),
+            )
+            .where(UserEvent.event.in_(FUNNEL_EVENTS), UserEvent.created_at >= since)
+            .group_by("day", UserEvent.event)
+        ).all()
+        if by_day:
+            per_day: dict[str, dict[str, int]] = {}
+            for day, event, value in by_day:
+                per_day.setdefault(str(day), {})[event] = value
+            print("\nПо дням (старты / триалы / пейвол / оплаты)")
+            print("-" * 52)
+            for day in sorted(per_day):
+                row = per_day[day]
+                print(
+                    f"{day}  {row.get(EVENT_START, 0):>4} / {row.get(EVENT_TRIAL_STARTED, 0):>4}"
+                    f" / {row.get(EVENT_TRIAL_EXPIRED, 0):>4} / {row.get(EVENT_PAID, 0):>4}"
+                )
+
+        # Срез «прямо сейчас» — по состоянию, а не по журналу.
+        users = session.scalars(select(BotUser)).all()
+        subscribers = sum(1 for u in users if is_subscription_active(u))
+        trials = sum(1 for u in users if is_trial_active(u))
+        members = sum(1 for u in users if u.access_status == "member")
+        print("\nСейчас")
+        print("-" * 52)
+        print(f"Всего пользователей   {len(users):>6}")
+        print(f"Члены группы          {members:>6}")
+        print(f"Активная подписка     {subscribers:>6}")
+        print(f"Активный триал        {trials:>6}")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -397,6 +485,10 @@ def parser() -> argparse.ArgumentParser:
     grant.add_argument("--days", type=int, required=True)
     grant.add_argument("--note", default="", help="Free-text reason, printed to the log only")
     grant.set_defaults(func=command_grant_subscription)
+
+    funnel = sub.add_parser("funnel", help="Bot funnel: starts -> trials -> payments -> paid")
+    funnel.add_argument("--days", type=int, default=30)
+    funnel.set_defaults(func=command_funnel)
     return main
 
 

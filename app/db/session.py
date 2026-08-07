@@ -39,6 +39,16 @@ def _upgrade_postgres_schema() -> None:
         # (create_all не добавляет колонки в уже созданные таблицы). Таблица
         # payments — новая, её create_all создаёт сам, ALTER не нужен.
         "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS renewal_reminded_at TIMESTAMPTZ",
+        # Триал и рефералка — колонки на существующей bot_users. Таблицу
+        # user_events create_all создаёт сам (она новая), ALTER для неё не нужен.
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS trial_started_at TIMESTAMPTZ",
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS trial_expires_at TIMESTAMPTZ",
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS trial_expired_notified_at TIMESTAMPTZ",
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS invite_code VARCHAR(16)",
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS referrer_id INTEGER REFERENCES bot_users(id) ON DELETE SET NULL",
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS referral_bonuses_granted INTEGER NOT NULL DEFAULT 0",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_bot_users_invite_code ON bot_users (invite_code)",
+        "CREATE INDEX IF NOT EXISTS ix_bot_users_referrer_id ON bot_users (referrer_id)",
     )
     with engine.begin() as connection:
         for statement in statements:

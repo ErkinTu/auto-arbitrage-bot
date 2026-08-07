@@ -7,17 +7,29 @@
 
 from __future__ import annotations
 
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import func, select
 
+from app.bot.matching import PendingNotification, market_average
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.models import BotUser, Brand, CarModel, Payment, UserFilter
+from app.models import BotUser, Brand, CarModel, Listing, Payment, Source, UserEvent, UserFilter
+from app.services.vehicle_summary import _build_source_url as build_source_url
+from app.services.events import EVENT_PAYMENT_CREATED, EVENT_START, log_event
+from app.services.referral import (
+    ReferralStats,
+    attach_referrer,
+    grant_due_bonuses,
+    parse_deep_link,
+    referral_stats,
+)
 from app.services.subscription import is_subscription_active
+from app.services.trial import is_trial_active, start_trial, trial_used
 
 
 class FilterLimitError(Exception):
@@ -60,22 +72,32 @@ def _utcnow() -> datetime:
 
 
 def decide_access_status(
-    is_member: bool | None, active_sub: bool, current: str = "revoked"
+    is_member: bool | None,
+    active_sub: bool,
+    current: str = "revoked",
+    active_trial: bool = False,
 ) -> tuple[str, bool]:
-    """Целевой access_status и признак доступа. Член группы приоритетнее подписки.
+    """Целевой access_status и признак доступа.
+
+    Три источника доступа, по убыванию приоритета: член группы (суперюзер) →
+    активная платная подписка → активный триал. Приоритет важен не для доступа
+    (он всё равно есть), а для честности статуса: по нему считается, кого
+    догонять пейволом и кому слать напоминание о продлении.
 
     is_member=None — «проверить не удалось» (Telegram недоступен, бот выкинут из
     группы, неверный chat_id). Понижать статус в этом случае нельзя: matching.py
-    шлёт только 'member'/активным 'subscriber', поэтому один сбой get_chat_member
-    молча отписал бы живого юзера от рассылки до его следующего сообщения боту.
-    Держим прежний статус и пускаем по нему.
+    шлёт только 'member'/активным 'subscriber'/'trial', поэтому один сбой
+    get_chat_member молча отписал бы живого юзера от рассылки до его следующего
+    сообщения боту. Держим прежний статус и пускаем по нему.
     """
     if is_member is None:
-        return current, current == "member" or active_sub
+        return current, current == "member" or active_sub or active_trial
     if is_member:
         return "member", True
     if active_sub:
         return "subscriber", True
+    if active_trial:
+        return "trial", True
     return "revoked", False
 
 
@@ -104,7 +126,10 @@ def resolve_access(
         # У свежедобавленного user access_status ещё None (column default ставится
         # на INSERT) — для новичка «прежний статус» = отсутствие доступа.
         desired, has_access = decide_access_status(
-            is_member, is_subscription_active(user), user.access_status or "revoked"
+            is_member,
+            is_subscription_active(user),
+            user.access_status or "revoked",
+            is_trial_active(user),
         )
 
         changed = (
@@ -129,6 +154,9 @@ class SubscriptionInfo:
     access_status: str
     expires_at: datetime | None
     active: bool
+    trial_active: bool = False
+    trial_expires_at: datetime | None = None
+    trial_used: bool = False
 
 
 def get_subscription_info(telegram_id: int) -> SubscriptionInfo | None:
@@ -140,6 +168,9 @@ def get_subscription_info(telegram_id: int) -> SubscriptionInfo | None:
             access_status=user.access_status,
             expires_at=user.subscription_expires_at,
             active=is_subscription_active(user),
+            trial_active=is_trial_active(user),
+            trial_expires_at=user.trial_expires_at,
+            trial_used=trial_used(user),
         )
 
 
@@ -162,8 +193,212 @@ def create_pending_payment(
                 status="pending",
             )
         )
+        log_event(session, user.id, EVENT_PAYMENT_CREATED, {"order_id": order_id})
         session.commit()
         return order_id
+
+
+# --------------------------------------------------------------------------
+# Онбординг, триал, рефералка
+# --------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class StartInfo:
+    """Что нужно /start-у, чтобы выбрать ветку онбординга."""
+
+    access_status: str
+    trial_used: bool
+    trial_active: bool
+    trial_expires_at: datetime | None
+    subscription_active: bool
+    referrer_attached: bool  # пришёл по чужой ссылке, и она засчиталась
+    first_start: bool
+
+
+@dataclass(slots=True)
+class TrialActivation:
+    ok: bool  # триал только что выдан
+    expires_at: datetime | None = None
+    already_used: bool = False
+    # Кого поздравить с бонусом (реферер получает дни в этот же момент).
+    referrer_chat_id: int | None = None
+    referrer_bonus_days: int = 0
+
+
+@dataclass(slots=True)
+class InviteInfo:
+    invite_code: str
+    invited_total: int
+    qualified: int
+    bonuses_granted: int
+    friends_to_next_bonus: int
+
+
+def handle_start(
+    telegram_id: int,
+    *,
+    username: str | None,
+    first_name: str | None,
+    deep_link_payload: str | None = None,
+) -> StartInfo:
+    """Регистрирует /start: событие воронки + привязка реферера.
+
+    Пользователь к этому моменту уже создан AccessMiddleware (`resolve_access`),
+    поэтому здесь только дополняем. Событие `start` пишем ОДИН раз на юзера —
+    метрика «сколько стартовало бота» считает людей, а не нажатия.
+    """
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:  # гейт выключен/юзер удалён между апдейтами — создаём сами
+            user = BotUser(telegram_id=telegram_id, username=username, first_name=first_name)
+            session.add(user)
+            session.flush()
+
+        first_start = (
+            session.scalar(
+                select(UserEvent.id)
+                .where(UserEvent.user_id == user.id, UserEvent.event == EVENT_START)
+                .limit(1)
+            )
+            is None
+        )
+        if first_start:
+            log_event(session, user.id, EVENT_START)
+
+        referrer_attached = False
+        code = parse_deep_link(deep_link_payload)
+        if code and get_settings().referral_enabled:
+            referrer_attached = attach_referrer(session, user, code) is not None
+
+        info = StartInfo(
+            access_status=user.access_status,
+            trial_used=trial_used(user),
+            trial_active=is_trial_active(user),
+            trial_expires_at=user.trial_expires_at,
+            subscription_active=is_subscription_active(user),
+            referrer_attached=referrer_attached,
+            first_start=first_start,
+        )
+        session.commit()
+        return info
+
+
+def activate_trial(telegram_id: int) -> TrialActivation:
+    """Выдаёт триал и сразу догоняет бонус пригласившему.
+
+    Бонус начисляется именно здесь, а не по клику по ссылке: клик бесплатен, а
+    активация триала одноразова (см. `services/referral.py`).
+    """
+    settings = get_settings()
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            raise LookupError(f"bot user {telegram_id} is not registered")
+        expires = start_trial(session, user, days=settings.trial_days)
+        if expires is None:
+            return TrialActivation(ok=False, already_used=True)
+
+        result = TrialActivation(ok=True, expires_at=expires)
+        if user.referrer_id is not None and settings.referral_enabled:
+            referrer = session.get(BotUser, user.referrer_id)
+            if referrer is not None:
+                bonuses = grant_due_bonuses(
+                    session,
+                    referrer,
+                    friends_per_bonus=settings.referral_friends_per_bonus,
+                    bonus_days=settings.referral_bonus_days,
+                )
+                if bonuses:
+                    result.referrer_chat_id = referrer.telegram_id
+                    result.referrer_bonus_days = bonuses * settings.referral_bonus_days
+        session.commit()
+        return result
+
+
+def get_invite_info(telegram_id: int) -> InviteInfo:
+    settings = get_settings()
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            raise LookupError(f"bot user {telegram_id} is not registered")
+        stats: ReferralStats = referral_stats(
+            session, user, friends_per_bonus=settings.referral_friends_per_bonus
+        )
+        session.commit()  # ensure_invite_code мог выдать код
+        return InviteInfo(
+            invite_code=stats.invite_code,
+            invited_total=stats.invited_total,
+            qualified=stats.qualified,
+            bonuses_granted=stats.bonuses_granted,
+            friends_to_next_bonus=stats.friends_to_next_bonus,
+        )
+
+
+# Демо-лот для онбординга: настоящий, но пересчитывать его на каждый /start
+# дорого (market_average — два запроса на объявление), а меняется он медленно.
+DEMO_CANDIDATES = 40
+DEMO_CACHE_TTL_SECONDS = 900
+DEMO_GOOD_ENOUGH_PERCENT = 20.0  # нашли такое — дальше не ищем
+_demo_cache: tuple[float, PendingNotification | None] = (0.0, None)
+
+
+def get_demo_listing(chat_id: int) -> PendingNotification | None:
+    """Живой пример «ниже рынка» для онбординга (не хардкод).
+
+    Берём свежие объявления и считаем по ним ту же `market_average`, что и
+    рассылка, — демо показывает ровно то, что человек будет получать. Результат
+    кэшируется на DEMO_CACHE_TTL_SECONDS: /start редкий, но выдавать по 80
+    запросов на нажатие незачем.
+    """
+    global _demo_cache
+    cached_until, cached = _demo_cache
+    if time.monotonic() < cached_until and cached is not None:
+        return replace(cached, chat_id=chat_id)
+
+    settings = get_settings()
+    best: PendingNotification | None = None
+    best_percent = 0.0
+    with SessionLocal() as session:
+        candidates = session.scalars(
+            select(Listing)
+            .where(
+                Listing.is_active.is_(True),
+                Listing.current_price_usd.is_not(None),
+                Listing.analytics_eligible.is_(True),
+                Listing.source_created_at.is_not(None),
+            )
+            .order_by(Listing.source_created_at.desc())
+            .limit(DEMO_CANDIDATES)
+        ).all()
+        source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
+        for listing in candidates:
+            avg = market_average(session, listing, min_samples=settings.bot_below_avg_min_samples)
+            if avg is None or avg <= 0:
+                continue
+            percent = round((1 - float(listing.current_price_usd) / avg) * 100, 1)
+            if percent <= best_percent:
+                continue
+            best_percent = percent
+            best = PendingNotification(
+                chat_id=chat_id,
+                listing_id=listing.id,
+                filter_id=0,  # демо не привязано к фильтру
+                title=listing.title,
+                year=listing.year,
+                mileage_km=listing.mileage_km,
+                price_usd=float(listing.current_price_usd),
+                city=listing.city,
+                url=build_source_url(listing),
+                below_market_percent=percent,
+                market_avg_usd=avg,
+                source_name=source_names.get(listing.source_id, "mashina.kg"),
+            )
+            if percent >= DEMO_GOOD_ENOUGH_PERCENT:
+                break
+
+    _demo_cache = (time.monotonic() + DEMO_CACHE_TTL_SECONDS, best)
+    return best
 
 
 def list_brands() -> list[BrandDTO]:

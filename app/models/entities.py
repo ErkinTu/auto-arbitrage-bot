@@ -313,12 +313,58 @@ class BotUser(Base, TimestampMixin):
     username: Mapped[str | None] = mapped_column(String(64))
     first_name: Mapped[str | None] = mapped_column(String(120))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    access_status: Mapped[str] = mapped_column(String(20), default="member", nullable=False)  # member | revoked | subscriber
+    access_status: Mapped[str] = mapped_column(String(20), default="member", nullable=False)  # member | subscriber | trial | revoked
     subscription_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_access_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Когда юзеру ушло напоминание о продлении текущей подписки (чтобы не слать
     # повторно за один период). Сбрасывается в NULL при успешной оплате.
     renewal_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # --- Бесплатный триал ---------------------------------------------------
+    # Срок триала держим ОТДЕЛЬНОЙ колонкой, а не в subscription_expires_at:
+    # иначе бесплатный доступ неотличим от оплаченного (метрики воронки врут,
+    # напоминание о продлении уходит тем, кто ничего не покупал), а платёж
+    # поверх триала пришлось бы отличать по «а платил ли он когда-нибудь».
+    # trial_started_at — метка «триал уже выдавали» (одноразовость на telegram_id);
+    # обнулять её нельзя, даже когда триал истёк.
+    trial_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trial_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Пейвол-сообщение об окончании триала — ровно одно на пользователя.
+    trial_expired_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # --- Рефералка ----------------------------------------------------------
+    # Код в deep-link t.me/<bot>?start=ref_<code>; выдаётся лениво, при первом
+    # /invite (у существующей базы иначе понадобился бы бэкфилл).
+    invite_code: Mapped[str | None] = mapped_column(String(16), unique=True, index=True)
+    referrer_id: Mapped[int | None] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="SET NULL"), index=True
+    )
+    # Сколько бонусов уже начислено (1 бонус = REFERRAL_BONUS_DAYS дней за
+    # REFERRAL_FRIENDS_PER_BONUS засчитанных друзей). Счётчик, а не флаг:
+    # начисление идемпотентно — сравниваем с числом заслуженных бонусов.
+    referral_bonuses_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class UserEvent(Base):
+    """Лог событий воронки: старт → триал → оплата.
+
+    `bot_users` хранит только текущее состояние, поэтому «отвал по дням» по нему
+    не построить — нужен именно журнал переходов. Пишется из бота и из webhook,
+    читается CLI-командой `funnel`.
+    """
+
+    __tablename__ = "user_events"
+    __table_args__ = (Index("ix_user_event_event_created", "event", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
 
 
 class UserFilter(Base, TimestampMixin):

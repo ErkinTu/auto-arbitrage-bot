@@ -17,6 +17,7 @@ from app.models.entities import (
     SentNotification,
     Source,
     SyncTarget,
+    UserEvent,
     UserFilter,
 )
 
@@ -39,5 +40,6 @@ __all__ = [
     "SentNotification",
     "Source",
     "SyncTarget",
+    "UserEvent",
     "UserFilter",
 ]

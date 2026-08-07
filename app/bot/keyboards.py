@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -15,6 +17,30 @@ def pay_kb(url: str, label: str) -> InlineKeyboardMarkup:
     """Одна кнопка-ссылка на страницу оплаты Finik (QR / банковское приложение)."""
     builder = InlineKeyboardBuilder()
     builder.button(text=label, url=url)
+    return builder.as_markup()
+
+
+class TrialCB(CallbackData, prefix="trial"):
+    action: str  # "start"
+
+
+def trial_kb(trial_days: int) -> InlineKeyboardMarkup:
+    """Кнопка активации бесплатного периода в онбординге."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"🎁 Начать бесплатный период ({trial_days} дня)",
+        callback_data=TrialCB(action="start"),
+    )
+    return builder.as_markup()
+
+
+def share_kb(link: str) -> InlineKeyboardMarkup:
+    """Кнопка «поделиться» реферальной ссылкой через нативный диалог Telegram."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="📨 Отправить другу",
+        url=f"https://t.me/share/url?url={quote(link, safe='')}",
+    )
     return builder.as_markup()
 
 

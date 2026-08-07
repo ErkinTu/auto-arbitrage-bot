@@ -503,3 +503,36 @@ def test_match_skips_blocked_and_revoked_users() -> None:
 
     _add_listing(session, external_id="1")
     assert match_new_listings(session, since, factor=0.95, min_samples=5) == []
+
+
+def test_trial_user_receives_until_trial_expires() -> None:
+    """Пейвол на 4-й день: истёк trial_expires_at — юзер просто выпадает из выборки."""
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _, brand_id, _ = _ids(session)
+
+    active = BotUser(
+        telegram_id=1,
+        access_status="trial",
+        trial_started_at=_now() - timedelta(days=1),
+        trial_expires_at=_now() + timedelta(days=2),
+    )
+    expired = BotUser(
+        telegram_id=2,
+        access_status="trial",
+        trial_started_at=_now() - timedelta(days=4),
+        trial_expires_at=_now() - timedelta(hours=1),
+    )
+    session.add_all([active, expired])
+    session.flush()
+    session.add_all(
+        [
+            UserFilter(user_id=active.id, brand_id=brand_id),
+            UserFilter(user_id=expired.id, brand_id=brand_id),
+        ]
+    )
+    session.commit()
+
+    _add_listing(session, external_id="1")
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5)
+    assert [note.chat_id for note in pending] == [1]
