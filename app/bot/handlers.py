@@ -39,7 +39,7 @@ from app.bot.messages import (
 )
 from app.bot.states import AddFilter
 from app.core.config import get_settings
-from app.services.freedompay import init_payment
+from app.services.finik import init_payment
 from app.services.regions import ALL_CARS_CODE, is_valid_region
 
 router = Router()

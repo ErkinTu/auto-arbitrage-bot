@@ -1,7 +1,8 @@
 """Логика подписки: продление срока и признак активности.
 
-Держим отдельно от FreedomPay-клиента и роутера, чтобы переиспользовать в
-webhook, worker-напоминаниях и (при желании) тестах. Продление разовое:
+Держим отдельно от платёжного клиента и роутера, чтобы переиспользовать в
+webhook, worker-напоминаниях, ручном продлении (CLI) и тестах — эта логика
+провайдеро-независима. Продление разовое:
 `subscription_expires_at = max(now, текущий срок) + period_days`.
 """
 
@@ -47,7 +48,7 @@ def apply_paid_payment(
     session: Session,
     payment: Payment,
     *,
-    freedompay_payment_id: str | None,
+    provider_txn_id: str | None,
     raw_callback: dict[str, Any] | None,
     now: datetime | None = None,
 ) -> BotUser:
@@ -55,7 +56,7 @@ def apply_paid_payment(
     now = now or _utcnow()
     payment.status = "paid"
     payment.paid_at = now
-    payment.freedompay_payment_id = freedompay_payment_id
+    payment.finik_transaction_id = provider_txn_id
     payment.raw_callback = raw_callback
 
     user = session.get(BotUser, payment.user_id)

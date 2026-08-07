@@ -285,6 +285,37 @@ def command_reprocess_catalog(_: argparse.Namespace) -> None:
         print(result)
 
 
+def command_grant_subscription(args: argparse.Namespace) -> None:
+    """Продлевает подписку вручную.
+
+    Зачем: у Finik нет эндпоинта «проверь статус платежа», а webhook приходит
+    только на успех. Если webhook не доехал совсем (лежал домен/сертификат), а
+    платёж виден в кабинете Finik — продлеваем этой командой. Годится и для
+    бонусов (рефералка, компенсация).
+    """
+    from sqlalchemy import select
+
+    from app.models import BotUser
+    from app.services.subscription import next_expiry
+
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == args.telegram_id))
+        if user is None:
+            print(f"Bot user with telegram_id={args.telegram_id} not found.")
+            return
+        now = utcnow()
+        user.subscription_expires_at = next_expiry(user.subscription_expires_at, now, args.days)
+        user.access_status = "subscriber"
+        user.renewal_reminded_at = None
+        user.is_active = True
+        session.commit()
+        note = f" ({args.note})" if args.note else ""
+        print(
+            f"telegram_id={args.telegram_id}: +{args.days} days, "
+            f"subscription until {user.subscription_expires_at:%Y-%m-%d %H:%M} UTC{note}"
+        )
+
+
 def parser() -> argparse.ArgumentParser:
     main = argparse.ArgumentParser(description="Car Analytics MVP CLI")
     sub = main.add_subparsers(dest="command", required=True)
@@ -357,6 +388,15 @@ def parser() -> argparse.ArgumentParser:
 
     refresh_rate = sub.add_parser("refresh-rate", help="Fetch today's official USD/KGS rate from nbkr.kg")
     refresh_rate.set_defaults(func=command_refresh_rate)
+
+    grant = sub.add_parser(
+        "grant-subscription",
+        help="Extend a user's subscription manually (lost webhook, referral bonus, goodwill)",
+    )
+    grant.add_argument("--telegram-id", type=int, required=True)
+    grant.add_argument("--days", type=int, required=True)
+    grant.add_argument("--note", default="", help="Free-text reason, printed to the log only")
+    grant.set_defaults(func=command_grant_subscription)
     return main
 
 

@@ -6,11 +6,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.13,<4.0",
+    "cryptography>=43,<46",  # RSA-SHA256 подпись запросов/webhook Finik
     "fastapi>=0.115,<1.0",
     "httpx[socks]>=0.27,<1.0",
     "psycopg[binary]>=3.2,<4.0",
     "pydantic-settings>=2.6,<3.0",
-    "python-multipart>=0.0.9,<1.0",  # разбор form-data webhook FreedomPay (request.form())
     "sqlalchemy>=2.0,<3.0",
     "tzdata>=2024.1",
     "uvicorn>=0.30,<1.0",

@@ -29,7 +29,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
-from app.models import BotUser, ParserRun
+from app.models import BotUser, ParserRun, Payment
 from app.services.telegram import send_message
 from app.parsers.mashina import MashinaParser
 from app.services.catalog_service import seed_default_catalog
@@ -234,6 +234,27 @@ def send_renewal_reminders_if_due(last_run_date: date | None) -> date | None:
     return today
 
 
+def expire_stale_payments() -> int:
+    """Гасит незавершённые платежи: pending старше PAYMENT_PENDING_TTL_HOURS.
+
+    Нужно потому, что Finik присылает webhook ТОЛЬКО при успешной оплате: про
+    «человек передумал / ссылка истекла» мы не узнаём никогда, и без этого
+    pending копились бы вечно (и врала бы любая воронка по конверсии).
+    """
+    settings = get_settings()
+    deadline = utcnow() - timedelta(hours=settings.payment_pending_ttl_hours)
+    with SessionLocal() as session:
+        stale = session.scalars(
+            select(Payment).where(Payment.status == "pending", Payment.created_at < deadline)
+        ).all()
+        for payment in stale:
+            payment.status = "expired"
+        session.commit()
+    if stale:
+        logger.info("expired %s stale pending payments", len(stale))
+    return len(stale)
+
+
 def main() -> None:
     settings = get_settings()
     init_db()
@@ -282,6 +303,10 @@ def main() -> None:
                 last_reminder_date = reminded_date
         except Exception:
             logger.exception("subscription renewal reminders failed")
+        try:
+            expire_stale_payments()
+        except Exception:
+            logger.exception("expiring stale payments failed")
         time.sleep(60)
 
 

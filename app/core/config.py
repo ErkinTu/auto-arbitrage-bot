@@ -77,22 +77,32 @@ class Settings(BaseSettings):
     bot_protect_content: bool = True
     bot_share_whitelist_ids: str = ""
 
-    # --- Подписка / FreedomPay (freedompay.kg) --------------------------------
-    # Пока merchant_id пуст — подписочная логика спит: /subscribe отвечает
-    # «временно недоступно», доступ гейтится только группой (как раньше).
-    freedompay_merchant_id: str = ""
-    freedompay_secret_key: str = ""
-    freedompay_base_url: str = "https://api.freedompay.kg"
-    freedompay_testing_mode: bool = True  # pg_testing_mode=1, пока не на боевом мерчанте
-    # Публичный HTTPS-адрес (за Caddy), от которого строятся result/success/failure
-    # URL для FreedomPay. Напр. https://pay.example.com (без хвостового /).
+    # --- Подписка / Finik (finik.kg, Web SDK) ---------------------------------
+    # Пока finik_api_key/finik_account_id/public_base_url пусты — подписочная
+    # логика спит: /subscribe отвечает «временно недоступно», доступ гейтится
+    # только группой (как раньше).
+    finik_api_key: str = ""
+    finik_account_id: str = ""
+    # Приватный RSA-ключ ФАЙЛОМ (монтируется в контейнер bot), а не значением в
+    # .env: не утечёт в docker inspect/логи.
+    finik_private_key_path: str = "/run/secrets/finik_private.pem"
+    finik_env: str = "beta"  # beta | prod — выбирает хост и публичный ключ Finik
+    # name_en: имя, которое плательщик видит на странице оплаты. Латиницей.
+    finik_qr_name: str = "Car Analytics Bot"
+    # Срок жизни ссылки на оплату (endDate у QR), секунды.
+    finik_payment_lifetime_seconds: int = 3600
+    # Публичный HTTPS-адрес (за Caddy), от которого строятся webhook/redirect URL.
+    # Напр. https://pay.example.com (без хвостового /).
     public_base_url: str = ""
-    subscription_price_kgs: Decimal = Decimal("500")
+    # Username бота без @ — чтобы после оплаты возвращать юзера сразу в бота.
+    bot_username: str = ""
+    subscription_price_kgs: Decimal = Decimal("2000")
     subscription_period_days: int = 30
     # За сколько дней до истечения слать напоминание о продлении.
-    subscription_reminder_days_before: int = 3
-    # Окно оплаты счёта в секундах (pg_lifetime): 300..604800.
-    freedompay_payment_lifetime_seconds: int = 3600
+    subscription_reminder_days_before: int = 1
+    # Finik сообщает ТОЛЬКО об успешных оплатах, поэтому неоплаченные платежи
+    # гасим сами: pending старше этого срока -> expired.
+    payment_pending_ttl_hours: int = 6
 
     scheduler_timezone: str = "Asia/Bishkek"
     bot_active_start_hour: int = 8  # fresh-циклы бота только в окне [start, end)
@@ -162,22 +172,29 @@ class Settings(BaseSettings):
 
     @property
     def subscription_enabled(self) -> bool:
-        """Подписка активна, только когда заданы креды мерчанта и публичный URL."""
-        return bool(
-            self.freedompay_merchant_id and self.freedompay_secret_key and self.public_base_url
-        )
+        """Подписка активна, только когда заданы креды Finik и публичный URL.
+
+        Приватный ключ здесь намеренно НЕ проверяется: он нужен лишь боту, а
+        `api` (webhook) обходится публичным ключом Finik.
+        """
+        return bool(self.finik_api_key and self.finik_account_id and self.public_base_url)
 
     @property
-    def freedompay_result_url(self) -> str:
-        return f"{self.public_base_url.rstrip('/')}/api/v1/payments/result"
+    def finik_base_url(self) -> str:
+        if self.finik_env == "prod":
+            return "https://api.acquiring.averspay.kg"
+        return "https://beta.api.acquiring.averspay.kg"
 
     @property
-    def freedompay_success_url(self) -> str:
+    def finik_webhook_url(self) -> str:
+        return f"{self.public_base_url.rstrip('/')}/api/v1/payments/finik"
+
+    @property
+    def finik_redirect_url(self) -> str:
+        """Куда Finik вернёт юзера после оплаты: лучше сразу в бота."""
+        if self.bot_username:
+            return f"https://t.me/{self.bot_username.lstrip('@')}"
         return f"{self.public_base_url.rstrip('/')}/api/v1/payments/success"
-
-    @property
-    def freedompay_failure_url(self) -> str:
-        return f"{self.public_base_url.rstrip('/')}/api/v1/payments/failure"
 
 
 @lru_cache

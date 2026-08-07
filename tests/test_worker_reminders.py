@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine, select
@@ -7,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.worker as worker
 from app.db.base import Base
-from app.models import BotUser
+from app.models import BotUser, Payment
 
 
 def _setup(monkeypatch):
@@ -86,3 +87,55 @@ def test_reminders_skip_when_subscription_disabled(monkeypatch) -> None:
     )
     assert worker.send_renewal_reminders_if_due(None) is None
     assert sent == []
+
+
+def test_expire_stale_payments_only_touches_old_pending(monkeypatch) -> None:
+    """Finik молчит о неуспехе, поэтому pending гасим по таймауту сами."""
+    SessionMaker, _sent = _setup(monkeypatch)
+    monkeypatch.setattr(
+        worker, "get_settings", lambda: SimpleNamespace(payment_pending_ttl_hours=6)
+    )
+    now = datetime.now(timezone.utc)
+    with SessionMaker() as s:
+        user = BotUser(telegram_id=1)
+        s.add(user)
+        s.flush()
+        s.add_all(
+            [
+                Payment(  # просроченный pending -> expired
+                    user_id=user.id,
+                    order_id="old",
+                    amount=Decimal("2000.00"),
+                    currency="KGS",
+                    period_days=30,
+                    status="pending",
+                    created_at=now - timedelta(hours=7),
+                ),
+                Payment(  # свежий pending — человек ещё платит
+                    user_id=user.id,
+                    order_id="fresh",
+                    amount=Decimal("2000.00"),
+                    currency="KGS",
+                    period_days=30,
+                    status="pending",
+                    created_at=now - timedelta(minutes=5),
+                ),
+                Payment(  # оплаченный трогать нельзя
+                    user_id=user.id,
+                    order_id="paid",
+                    amount=Decimal("2000.00"),
+                    currency="KGS",
+                    period_days=30,
+                    status="paid",
+                    created_at=now - timedelta(days=3),
+                ),
+            ]
+        )
+        s.commit()
+
+    assert worker.expire_stale_payments() == 1
+    with SessionMaker() as s:
+        statuses = {p.order_id: p.status for p in s.scalars(select(Payment)).all()}
+    assert statuses == {"old": "expired", "fresh": "pending", "paid": "paid"}
+    # Повторный прогон уже нечего гасить.
+    assert worker.expire_stale_payments() == 0

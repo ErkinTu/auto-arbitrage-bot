@@ -1,4 +1,8 @@
 .env
+# Приватные ключи Finik — только на сервере, никогда в git.
+secrets/*
+!secrets/README.md
+*.pem
 .venv/
 __pycache__/
 .pytest_cache/

@@ -361,12 +361,14 @@ class SentNotification(Base):
 
 
 class Payment(Base, TimestampMixin):
-    """Разовый платёж за подписку через FreedomPay (freedompay.kg).
+    """Разовый платёж за подписку через Finik (finik.kg, Web SDK).
 
-    Один ряд на попытку оплаты. `order_id` уходит в FreedomPay как `pg_order_id`
-    (в нём — связь с пользователем), `freedompay_payment_id` = `pg_payment_id`
-    из ответа/webhook. Статус двигают init_payment (pending) и Result-URL webhook
-    (paid | failed). Recurring-профили не используем — оплата разовая.
+    Один ряд на попытку оплаты. `order_id` уходит в Finik как `PaymentId` (UUID)
+    и возвращается в webhook в `fields.paymentId` — по нему находим платёж и
+    пользователя. `finik_transaction_id` = `transactionId` из webhook (номер на
+    стороне Finik, для сверок с их поддержкой). Статус двигают init_payment
+    (pending) и webhook (paid); `expired` ставит джанитор в worker, потому что об
+    неуспешных оплатах Finik не сообщает вовсе.
     """
 
     __tablename__ = "payments"
@@ -376,12 +378,12 @@ class Payment(Base, TimestampMixin):
         ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     order_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
-    freedompay_payment_id: Mapped[str | None] = mapped_column(String(64))
+    finik_transaction_id: Mapped[str | None] = mapped_column(String(64))
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), default="KGS", nullable=False)
     period_days: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), default="pending", nullable=False, index=True
-    )  # pending | paid | failed | canceled
+    )  # pending | paid | expired
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     raw_callback: Mapped[dict[str, Any] | None] = mapped_column(JSON)

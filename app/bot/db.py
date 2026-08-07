@@ -146,12 +146,12 @@ def get_subscription_info(telegram_id: int) -> SubscriptionInfo | None:
 def create_pending_payment(
     telegram_id: int, *, amount: Decimal, currency: str, period_days: int
 ) -> str:
-    """Создаёт pending-платёж, возвращает order_id (уходит в FreedomPay как pg_order_id)."""
+    """Создаёт pending-платёж, возвращает order_id (уходит в Finik как PaymentId)."""
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
         if user is None:
             raise LookupError(f"bot user {telegram_id} is not registered")
-        order_id = uuid.uuid4().hex
+        order_id = str(uuid.uuid4())  # Finik ждёт UUID (с дефисами), не hex
         session.add(
             Payment(
                 user_id=user.id,

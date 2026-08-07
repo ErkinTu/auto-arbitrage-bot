@@ -56,17 +56,36 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 - **Курс USD/KGS** — НБКР (`app/services/exchange.py`, раз в день, лениво из
   бот-цикла). Цены lalafo в сомах конвертируются в USD только при отсутствии
   собственного USD (флаг `usd_converted`; смена курса ≠ смена цены).
-- **Подписка (freedompay.kg, разовая оплата).** Доступ = член закрытой группы
+- **Подписка (finik.kg, Web SDK, разовая оплата).** Доступ = член закрытой группы
   (суперюзер, как раньше) ИЛИ активная платная подписка. Пока
-  `FREEDOMPAY_*`/`PUBLIC_BASE_URL` пусты (`settings.subscription_enabled=false`) —
-  подписка спит, доступ гейтится только группой. Оплата: бот `/subscribe` →
-  `init_payment` → кнопка на hosted-страницу; FreedomPay POST-ит Result URL
-  webhook (`api/payments.py`, проверка `pg_sig`) → продление
-  `subscription_expires_at` + `access_status='subscriber'`. Webhook — ЕДИНСТВЕННОЕ,
-  что торчит наружу, через Caddy (профиль `payments`, только `/api/v1/payments/*`);
-  `api` остаётся на 127.0.0.1. `access_status` синхронизируется в
-  `access.py::resolve_access` (matching Telegram не дёргает). Деплой-чеклист —
-  `DEPLOY.md § Подписка/FreedomPay`.
+  `FINIK_API_KEY`/`FINIK_ACCOUNT_ID`/`PUBLIC_BASE_URL` пусты
+  (`settings.subscription_enabled=false`) — подписка спит, доступ гейтится только
+  группой. Оплата: бот `/subscribe` → `finik.init_payment` → **302, ссылка на
+  страницу оплаты в заголовке `Location`** (редиректы НЕ следуем) → кнопка в
+  Telegram; юзер платит по QR из банковского приложения; Finik POST-ит
+  `/api/v1/payments/finik` (`api/payments.py`, проверка RSA-подписи их публичным
+  ключом) → продление `subscription_expires_at` + `access_status='subscriber'`.
+  **Webhook — единственный источник истины**: возврат юзера по `RedirectUrl`
+  оплату не подтверждает. Webhook — ЕДИНСТВЕННОЕ, что торчит наружу, через Caddy
+  (профиль `payments`, только `/api/v1/payments/*`); `api` остаётся на 127.0.0.1.
+  `access_status` синхронизируется в `access.py::resolve_access` (matching
+  Telegram не дёргает). Деплой-чеклист — `DEPLOY.md § Подписка/Finik`.
+  Существенные особенности Finik (детали — `docs/PAYMENTS_FINIK_ANALYSIS.md`):
+  - **Подпись** = RSA-SHA256(канон), base64; в канон входят метод, path, `Host` и
+    только заголовки `x-api-*`, query и JSON тела, где отсортированы ТОЛЬКО ключи
+    верхнего уровня. Схема восстановлена из npm-пакета `@mancho.devs/authorizer`
+    и сверена с ним — векторы в `tests/test_finik.py`, менять `finik.py::canonical`
+    без них нельзя. Приватный ключ — файлом в `./secrets/` (volume у `bot`), не в
+    `.env`; публичные ключи Finik зашиты в код по среде `FINIK_ENV=beta|prod`.
+  - **Целые float ломают проверку webhook**: подпись считается по пересобранному
+    JSON, а JS печатает `2000.00` как `2000` (Python — `2000.0`) → нормализация в
+    `_js_number`. Есть тест-регрессия.
+  - **Webhook приходит только на успех** — про отказы Finik молчит, поэтому
+    `pending` гасит `worker.expire_stale_payments` (`PAYMENT_PENDING_TTL_HOURS`).
+  - **Статус платежа запросом не проверить** (нет такого эндпоинта у acquiring) →
+    страховка на потерянный webhook: `cli.py grant-subscription`.
+  - Идемпотентность обязательна: подпись Finik валидна бессрочно, ретраи идут
+    сутки; повтор по оплаченному `order_id` отвечает `200 already processed`.
 - **Защита контента от пересылки.** Всем исходящим методам Bot API, у которых
   есть поле `protect_content`, оно проставляется централизованно в
   session-middleware (`bot/protection.py`), а не на каждом `answer()` — иначе
@@ -94,10 +113,10 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 - `main.py` — FastAPI-приложение, CORS, роутеры. `cli.py` — все ручные команды.
 - `worker.py` — планировщик full-scan/rebuild. `core/config.py` — все настройки (env).
 - `api/` — роутеры: `routes.py` (estimate/price-trend), `dashboard.py`,
-  `catalog.py`, `market.py`, `payments.py` (webhook FreedomPay — см. ниже).
+  `catalog.py`, `market.py`, `payments.py` (webhook Finik — см. выше).
 - `services/` — логика: `sync.py` (обход источника), `normalizer.py` +
   `catalog_service.py` + `catalog.py` (нормализация моделей/алиасы),
-  `analytics.py`, `stats.py` (агрегаты), `dashboard.py`, `freedompay.py` +
+  `analytics.py`, `stats.py` (агрегаты), `dashboard.py`, `finik.py` +
   `subscription.py` (подписка), `telegram.py` (sync sendMessage из worker/api).
 - `bot/` — aiogram: `poller.py` (fresh-циклы), `handlers.py`, `notifier.py`,
   `db.py` (прямой доступ к БД), `access.py` (проверка членства в группе).
@@ -122,7 +141,8 @@ docker compose exec -T worker uv run python -m app.cli <cmd>
 `cmd`: `init-db`, `seed`, `targets`, `add-target`, `sync [--source]`,
 `sync-all [--source]`, `rebuild-stats`, `catalog-issues`, `add-model-alias`,
 `add-generation-alias`, `reprocess-catalog`, `ensure-self-aliases`,
-`refresh-rate`.
+`refresh-rate`, `grant-subscription --telegram-id --days [--note]` (ручное
+продление подписки: потерянный webhook, бонус, компенсация).
 
 ## Продакшн
 
@@ -163,6 +183,8 @@ docker без sudo. Полный runbook переноса/обновления/�
 | `docs/FRONTEND_TZ.md` | Тех.задание фронта (`../analytics-front`) |
 | `docs/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
+| `docs/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `web-sdk-flow.png`, что нужно завести |
+| `docs/PAYMENTS_FINIK_ANALYSIS.md` | **Провайдер меняется на Finik**: анализ, спецификация протокола, восстановленный алгоритм подписи + векторы, грабли, пошаговый план работ |
 | `docs/TODO.md` | Общий бэклог бота: пределы нагрузки, лимиты юзера, доставка уведомлений |
 | `docs/TODO_LALAFO.md` | Согласованные задачи следующей итерации lalafo |
 

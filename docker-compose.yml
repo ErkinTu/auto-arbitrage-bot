@@ -61,12 +61,19 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Приватный RSA-ключ Finik — файлом в ./secrets/ (не значением в .env: не
+    # утечёт в docker inspect). Подписывает исходящие запросы только бот; api
+    # проверяет webhook публичным ключом Finik, который лежит в коде.
+    # Монтируем КАТАЛОГ, а не файл: отсутствующий файл docker превратил бы в
+    # каталог, и бот читал бы «ключ»-папку.
+    volumes:
+      - ./secrets:/run/secrets:ro
     command: >
       sh -c "uv run python -m app.cli init-db &&
              uv run python -m app.cli seed &&
              uv run python -m app.bot"
 
-  # Публичный HTTPS-вход для webhook/redirect FreedomPay. Пробрасывает наружу
+  # Публичный HTTPS-вход для webhook/redirect Finik. Пробрасывает наружу
   # ТОЛЬКО /api/v1/payments/* (см. Caddyfile); api остаётся на 127.0.0.1.
   # Профиль payments: локально НЕ стартует (docker compose up), на проде —
   # `docker compose --profile payments up -d`. Нужен PAYMENTS_DOMAIN в .env.

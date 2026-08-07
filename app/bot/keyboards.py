@@ -12,7 +12,7 @@ MAX_MODEL_BUTTONS = 96
 
 
 def pay_kb(url: str, label: str) -> InlineKeyboardMarkup:
-    """Одна кнопка-ссылка на hosted-страницу оплаты FreedomPay."""
+    """Одна кнопка-ссылка на страницу оплаты Finik (QR / банковское приложение)."""
     builder = InlineKeyboardBuilder()
     builder.button(text=label, url=url)
     return builder.as_markup()
