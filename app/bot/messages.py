@@ -13,6 +13,7 @@ START_TEXT = (
     "Команды:\n"
     "/add_filter — создать фильтр (марка, модель, год, пробег, цена, регион)\n"
     "/filters — мои фильтры и их удаление\n"
+    "/blacklist — что не показывать никогда\n"
     "/subscribe — оформить/продлить подписку · /status — статус подписки\n"
     "/invite — пригласить друзей и получить дни бесплатно\n"
     "/help — справка"
@@ -29,6 +30,8 @@ HELP_TEXT = (
     "по таким же марке/модели/году/пробегу.\n"
     "«Регион» — область/город КР, «Зарубежные авто» (Китай, Корея, США и т.п.) "
     "или «Все авто». У зарубежных цены обычно без растаможки и доставки.\n\n"
+    "Надоела марка, модель или город? Нажмите «🚫 Не показывать такие» под "
+    "объявлением — это подействует сразу на все ваши фильтры (/blacklist).\n\n"
     "/filters — посмотреть и удалить фильтры."
 )
 
@@ -44,6 +47,14 @@ SUBSCRIPTION_REQUIRED_TEXT = (
 
 SUBSCRIPTION_UNAVAILABLE_TEXT = (
     "⏳ Оплата подписки временно недоступна. Попробуйте позже или напишите администратору."
+)
+
+# Оплата уже работает, но пока обкатывается на тестировщиках
+# (SUBSCRIPTION_TESTER_IDS). Обещать «оплатите» человеку, которому кнопка не
+# откроется, нельзя — он один раз упрётся и уйдёт.
+SUBSCRIPTION_SOON_TEXT = (
+    "🛠 Оплата сейчас в последней настройке — откроем со дня на день.\n"
+    "Доступ пока не отключаем: напишите сюда, если он закончился, и мы продлим вручную."
 )
 
 
@@ -91,8 +102,21 @@ TRIAL_ALREADY_USED_TEXT = (
 )
 
 
-def trial_paywall_text(price_kgs: int, period_days: int) -> str:
-    """Разовое сообщение после окончания триала (уходит из worker)."""
+def trial_paywall_text(price_kgs: int, period_days: int, payments_open: bool = True) -> str:
+    """Разовое сообщение после окончания триала (уходит из worker).
+
+    `payments_open=False` — оплата ещё обкатывается (или выключена): звать в
+    /subscribe нельзя, там человека ждёт «скоро». Сообщение одно на всю жизнь
+    пользователя (`trial_expired_notified_at`), поэтому потратить его на тупик —
+    значит потерять человека молча.
+    """
+    if not payments_open:
+        return (
+            "⏳ Бесплатный период закончился — новые объявления я пока не присылаю.\n\n"
+            "Оплата подписки открывается со дня на день. Напишите сюда «хочу» — "
+            "включим доступ вручную, как только всё заработает.\n"
+            "А пока можно получить дни за приглашённых друзей: /invite"
+        )
     return (
         "⏳ Бесплатный период закончился — новые объявления я больше не присылаю.\n\n"
         f"Подписка — {_fmt_int(price_kgs)} сом за {period_days} дней: оплата по QR "
@@ -110,17 +134,27 @@ def invite_text(
     bonus_days: int,
     friends_per_bonus: int,
     bonuses_granted: int,
+    limit_reached: bool = False,
 ) -> str:
+    """Экран /invite. Потолок бонусов озвучиваем сразу, а не после отказа."""
+    if limit_reached:
+        return (
+            f"🤝 Бонус за друзей уже начислен: +{bonuses_granted * bonus_days} дней.\n\n"
+            f"Ваша ссылка (друзья по-прежнему могут заходить по ней):\n{link}\n\n"
+            "Бонус даётся один раз, поэтому новых дней за приглашения больше не будет.\n"
+            "Продлить доступ: /subscribe"
+        )
     granted = (
         f"\nУже начислено бонусов: {bonuses_granted} (+{bonuses_granted * bonus_days} дней)."
         if bonuses_granted
         else ""
     )
     return (
-        f"🤝 Пригласите {friends_per_bonus} друзей — получите +{bonus_days} дней бесплатно.\n\n"
+        f"🤝 Пригласите {friends_per_bonus} друзей — получите +{bonus_days} дней бесплатно "
+        "(бонус даётся один раз).\n\n"
         f"Ваша ссылка:\n{link}\n\n"
         f"Друг засчитывается, когда перейдёт по ссылке и активирует бесплатный период.\n"
-        f"Засчитано друзей: {qualified}. До следующего бонуса: {friends_to_next_bonus}."
+        f"Засчитано друзей: {qualified}. До бонуса: {friends_to_next_bonus}."
         f"{granted}"
     )
 
@@ -129,6 +163,61 @@ def referral_bonus_text(days: int) -> str:
     return (
         f"🎉 Ваши друзья активировали бота — вам начислено +{days} дней доступа.\n"
         "Статус: /status"
+    )
+
+
+def filters_limit_text(used: int, limit: int) -> str:
+    """Отказ добавить фильтр. Разводит «занято ровно лимит» и «занято больше».
+
+    Второе — законное наследие прежнего лимита 10: старые фильтры продолжают
+    работать, но добавить новый можно, только освободив место.
+    """
+    if used > limit:
+        return (
+            f"📋 Сейчас у вас {used} фильтров, а добавлять можно до {limit}.\n"
+            f"Старые продолжают работать. Чтобы создать новый, удалите "
+            f"{used - limit + 1} в /filters."
+        )
+    return (
+        f"📋 Занято {used} из {limit} фильтров.\n"
+        "Удалите ненужный в /filters, чтобы добавить новый."
+    )
+
+
+BLOCK_MENU_TEXT = "Что именно больше не показывать?"
+
+BLOCK_LIST_EMPTY_TEXT = (
+    "🚫 Чёрный список пуст.\n\n"
+    "Он работает поверх всех ваших фильтров: что сюда попало — не придёт никогда.\n"
+    "Добавить проще всего кнопкой «🚫 Не показывать такие» под любым объявлением."
+)
+
+
+def blocks_text(blocks: list) -> str:
+    lines = ["🚫 Чёрный список (не приходит ни по одному фильтру):\n"]
+    for index, item in enumerate(blocks, start=1):
+        lines.append(f"{index}. {item.label}")
+    lines.append("\nКнопкой ниже можно вернуть любое обратно.")
+    return "\n".join(lines)
+
+
+def block_added_text(label: str) -> str:
+    return f"Больше не покажу: {label}. Вернуть — /blacklist"
+
+
+def block_limit_text(limit: int) -> str:
+    return (
+        f"В чёрном списке уже {limit} записей — это потолок.\n"
+        "Удалите лишнее в /blacklist или сузьте сам фильтр: длинный чёрный список "
+        "обычно значит, что фильтр задан слишком широко."
+    )
+
+
+def duplicate_filter_text() -> str:
+    return (
+        "🤔 Такой фильтр у вас уже есть — второй такой же ничего не добавит "
+        "(объявление всё равно приходит один раз).\n"
+        "Ваши фильтры: /filters"
     )
 
 
@@ -196,6 +285,43 @@ def format_notification(p: PendingNotification) -> str:
         f"{foreign_note}\n"
         f'<a href="{p.url}">Открыть на {p.source_name}</a>'
     )
+
+
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    if 11 <= count % 100 <= 14:
+        return many
+    last = count % 10
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+
+def format_digest(brand_name: str, notes: list[PendingNotification]) -> str:
+    """Несколько авто одной марки одним сообщением.
+
+    Формат намеренно плотнее карточки: цель — чтобы утренний залп читался
+    сверху вниз за один экран, а не 30 отдельными пушами. Превью ссылок у
+    такого сообщения нет (Telegram показал бы одно, первое) — поэтому ссылка
+    даётся текстом на каждой строке.
+    """
+    word = _plural(len(notes), "объявление", "объявления", "объявлений")
+    lines = [f"🚗 <b>{html.escape(brand_name)}</b> — {len(notes)} {word} по вашим фильтрам\n"]
+    for index, note in enumerate(notes, start=1):
+        title = html.escape(note.title) if note.title else "Объявление"
+        price = f"${_fmt_int(round(note.price_usd))}" if note.price_usd is not None else "—"
+        details = [price]
+        if note.below_market_percent is not None and note.below_market_percent > 0:
+            details.append(f"на {note.below_market_percent:g}% ниже средней")
+        if note.mileage_km is not None:
+            details.append(f"{_fmt_int(note.mileage_km)} км")
+        if note.city:
+            details.append(html.escape(note.city))
+        if is_foreign(note.city):
+            details.append("🌍 за рубежом")
+        lines.append(f'{index}. <a href="{note.url}">{title}</a>\n    {" · ".join(details)}')
+    return "\n".join(lines)
 
 
 def format_filter_line(

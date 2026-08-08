@@ -118,8 +118,13 @@ async def polling_loop(bot: BotLike) -> None:
         try:
             pending = await asyncio.to_thread(run_cycle)
             if pending:
-                sent = await send_notifications(bot, pending, on_blocked=_on_blocked)
-                logger.info("notifications: sent %s of %s", sent, len(pending))
+                sent = await send_notifications(
+                    bot,
+                    pending,
+                    on_blocked=_on_blocked,
+                    group_min=settings.bot_group_min_listings,
+                )
+                logger.info("notifications: %s message(s) for %s listing(s)", sent, len(pending))
             else:
                 logger.info("cycle complete, no matching new listings")
         except Exception:

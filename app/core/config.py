@@ -63,12 +63,25 @@ class Settings(BaseSettings):
     bot_access_cache_ttl_seconds: int = 600
     # Потолок фильтров на пользователя: ограничивает объём матчинга и флуд.
     # Проверяется в начале визарда (/add_filter) и защитно при создании фильтра.
-    bot_max_filters_per_user: int = 10
+    # Действует ТОЛЬКО на создание: у кого фильтров уже больше (лимит снижали
+    # с 10), они продолжают работать — молча выключать чужую настройку хуже,
+    # чем временно нарушенный инвариант. См. db.py::filters_quota.
+    bot_max_filters_per_user: int = 5
     # Потолок пушей одному чату за цикл: PER_CHAT_DELAY_SECONDS=1.05 делает
     # рассылку одному юзеру блокирующей для всего последовательного цикла;
     # сверх лимита пропускаем без записи в sent_notifications — придёт в
     # следующем цикле. 0 = без ограничения.
     bot_max_notifications_per_user_per_cycle: int = 50
+    # Группировка: если за цикл одному человеку набирается столько и больше
+    # объявлений ОДНОЙ марки, они уезжают одним сообщением-списком вместо N
+    # карточек. 0 = выключено (по карточке на объявление, как сейчас).
+    # Замер на проде (14 дней): обычный цикл — 5 сообщений на человека (p90 12),
+    # а первый цикл после ночной паузы — в среднем 28, максимум 55. Значение 3
+    # сжимает утренний залп в несколько раз; лимиты Telegram при этом те же
+    # (≈30 сообщений/с суммарно, не чаще 1/с в один чат).
+    # Цена включения: у сгруппированного сообщения нет кнопки «не показывать
+    # такие» — она привязана к конкретному объявлению.
+    bot_group_min_listings: int = 0
     # Защита контента: sendMessage с protect_content=true убирает «Переслать»/
     # «Сохранить» и включает блокировку скриншотов там, где клиент это умеет
     # (Android). iOS/Desktop/Web скриншоты НЕ блокируют — гарантии нет, это
@@ -96,6 +109,11 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     # Username бота без @ — чтобы после оплаты возвращать юзера сразу в бота.
     bot_username: str = ""
+    # Обкатка оплаты на проде: пока список НЕ пуст, платить может только тот, чей
+    # telegram_id в нём есть — остальные получают «оплата скоро», платёж им даже
+    # не заводится (иначе в payments копились бы pending, а воронка врала бы).
+    # Пусто = оплата открыта всем (боевой режим).
+    subscription_tester_ids: str = ""
     subscription_price_kgs: Decimal = Decimal("2000")
     subscription_period_days: int = 30
     # За сколько дней до истечения слать напоминание о продлении.
@@ -112,6 +130,11 @@ class Settings(BaseSettings):
     # как активировал триал: иначе накрутка сводится к созданию пустых аккаунтов.
     referral_friends_per_bonus: int = 3
     referral_bonus_days: int = 7
+    # Сколько бонусов максимум может получить ОДИН пригласивший. 1 = «+7 дней
+    # один раз в жизни»: телеграм-ботов middleware отсекает (`user.is_bot`), но
+    # мультиаккаунтинг живым человеком не ловится ничем, а без потолка 30
+    # приглашённых = 70 бесплатных дней. 0 = без ограничения.
+    referral_max_bonuses: int = 1
 
     scheduler_timezone: str = "Asia/Bishkek"
     bot_active_start_hour: int = 8  # fresh-циклы бота только в окне [start, end)
@@ -187,6 +210,32 @@ class Settings(BaseSettings):
         `api` (webhook) обходится публичным ключом Finik.
         """
         return bool(self.finik_api_key and self.finik_account_id and self.public_base_url)
+
+    @property
+    def subscription_tester_id_set(self) -> frozenset[int]:
+        """Telegram-id тестировщиков оплаты; нечисловой мусор игнорируем."""
+        ids: set[int] = set()
+        for item in self.subscription_tester_ids.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                ids.add(int(item))
+            except ValueError:
+                logger.warning("SUBSCRIPTION_TESTER_IDS: не число, пропущено: %r", item)
+        return frozenset(ids)
+
+    @property
+    def subscription_testing(self) -> bool:
+        """Режим обкатки: оплата включена, но доступна не всем."""
+        return self.subscription_enabled and bool(self.subscription_tester_id_set)
+
+    def subscription_allowed_for(self, telegram_id: int) -> bool:
+        """Может ли этот пользователь начать оплату прямо сейчас."""
+        if not self.subscription_enabled:
+            return False
+        testers = self.subscription_tester_id_set
+        return not testers or telegram_id in testers
 
     @property
     def trial_enabled(self) -> bool:

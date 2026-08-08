@@ -303,13 +303,23 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
    PAYMENTS_DOMAIN=pay.example.com
    PUBLIC_BASE_URL=https://pay.example.com
    BOT_USERNAME=your_bot             # возврат из оплаты прямо в бота
+   SUBSCRIPTION_TESTER_IDS=123456789 # ОБКАТКА: платить может только этот id
    SUBSCRIPTION_PRICE_KGS=2000
    SUBSCRIPTION_PERIOD_DAYS=30
    SUBSCRIPTION_REMINDER_DAYS_BEFORE=1
    TRIAL_DAYS=3                      # 0 = выключить триал и рефералку
    REFERRAL_FRIENDS_PER_BONUS=3
    REFERRAL_BONUS_DAYS=7
+   REFERRAL_MAX_BONUSES=1            # бонус за друзей — один раз на человека
    ```
+   > **`SUBSCRIPTION_TESTER_IDS` — главный предохранитель обкатки.** Пока он
+   > заполнен, `/subscribe` отвечает «оплата скоро» всем, кроме перечисленных, и
+   > платёж им не заводится вовсе. Пейвол после триала в этом режиме тоже не
+   > зовёт в `/subscribe`, а предлагает написать в бот (продлеваем через
+   > `grant-subscription`): сообщение о конце триала уходит РОВНО ОДИН раз за всю
+   > жизнь пользователя, и потратить его на «оплатите» → «оплата недоступна»
+   > значит потерять человека молча. Открыть оплату всем = очистить переменную и
+   > пересоздать контейнер `bot`.
 6. **Схема БД — единственный ручной DDL.** На проде таблица `payments` уже
    существует со старой колонкой `freedompay_payment_id` (спящий код FreedomPay
    уехал коммитом `1080a8d`), а `create_all` её не переименует. Строк в ней 0
@@ -339,6 +349,21 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
    активируется автоматически.
 10. Обкатав `FINIK_ENV=beta` (первый платёж — на 1 сом, чтобы заодно проверить
     единицы `Amount`), переключить на `prod` и пересоздать контейнеры.
+11. **Боевая проверка на 1 сом, пока оплата закрыта вайтлистом.** Временно
+    `SUBSCRIPTION_PRICE_KGS=1`, тестировщик платит по-настоящему и сверяет всю
+    цепочку:
+    ```bash
+    docker compose exec -T postgres psql -U car_user -d car_analytics -c \
+      "SELECT order_id, status, amount, paid_at FROM payments ORDER BY id DESC LIMIT 3;"
+    docker compose exec -T postgres psql -U car_user -d car_analytics -c \
+      "SELECT telegram_id, access_status, subscription_expires_at FROM bot_users
+       WHERE telegram_id = <TESTER_ID>;"
+    ```
+    Ожидаем: `status='paid'`, `paid_at` заполнен, `access_status='subscriber'`,
+    срок продлён, в бот пришло «✅ Оплата получена». Повторная доставка того же
+    webhook должна отвечать `200 already processed` (Finik ретраит сутки).
+12. **Открыть всем**: вернуть `SUBSCRIPTION_PRICE_KGS=2000`, очистить
+    `SUBSCRIPTION_TESTER_IDS`, `docker compose up -d bot api worker`.
 
 ### Триал, пейвол и рефералка (выкатывается вместе с подпиской)
 
@@ -346,16 +371,21 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
 
 1. **Ручного DDL нет.** Новые колонки `bot_users` (`trial_*`, `invite_code`,
    `referrer_id`, `referral_bonuses_granted`) добавляются идемпотентными
-   `ALTER … IF NOT EXISTS` в `_upgrade_postgres_schema`, таблицу `user_events`
-   создаёт `create_all`. Но это те самые ALTER-ы на `bot_users`, которые могут
-   застрять при DDL-заторе на старте — если контейнеры зависли, искать
-   `idle in transaction` (см. раздел про деплой выше).
+   `ALTER … IF NOT EXISTS` в `_upgrade_postgres_schema`, таблицы `user_events` и
+   `user_blocks` (чёрный список) создаёт `create_all`. Но это те самые ALTER-ы на
+   `bot_users`, которые могут застрять при DDL-заторе на старте — если контейнеры
+   зависли, искать `idle in transaction` (см. раздел про деплой выше).
 2. **`BOT_USERNAME` обязателен для `/invite`**: без него deep-link
    `t.me/<bot>?start=ref_<code>` не собрать, и команда честно отвечает
    «временно недоступно». Он же используется для возврата после оплаты.
 3. **Выключатели.** `TRIAL_DAYS=0` — триал и рефералка выключены целиком
    (кнопки в онбординге нет, доступ как раньше: группа ИЛИ подписка).
    Это же и способ отката без выкатывания кода.
+   ⚠️ **Дефолт `TRIAL_DAYS` в коде — 3, а не 0.** Переменной нет в прод-`.env`
+   → после выката триал включится САМ, и бот из закрытого станет доступен любому
+   на 3 дня. Хотите выкатить код без изменения поведения — впишите `TRIAL_DAYS=0`
+   явно. Триал одноразовый (`trial_started_at` не обнуляется никогда), поэтому
+   «случайно включили и выключили» = у этих людей второй попытки уже не будет.
 
 Проверка после выката: `/start` от нового аккаунта → онбординг с демо-лотом и
 кнопкой; `/invite` отдаёт ссылку; `docker compose exec -T worker uv run python

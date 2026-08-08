@@ -18,8 +18,25 @@ from sqlalchemy import func, select
 from app.bot.matching import PendingNotification, market_average
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.models import BotUser, Brand, CarModel, Listing, Payment, Source, UserEvent, UserFilter
+from app.models import (
+    BotUser,
+    Brand,
+    CarModel,
+    Listing,
+    Payment,
+    Source,
+    UserBlock,
+    UserEvent,
+    UserFilter,
+)
 from app.services.vehicle_summary import _build_source_url as build_source_url
+from app.services.blocklist import (
+    KIND_BRAND,
+    KIND_CITY,
+    KIND_MODEL,
+    MAX_BLOCKS_PER_USER,
+    block_value,
+)
 from app.services.events import EVENT_PAYMENT_CREATED, EVENT_START, log_event
 from app.services.referral import (
     ReferralStats,
@@ -33,11 +50,29 @@ from app.services.trial import is_trial_active, start_trial, trial_used
 
 
 class FilterLimitError(Exception):
-    """У пользователя уже максимум фильтров (bot_max_filters_per_user)."""
+    """У пользователя уже максимум фильтров (bot_max_filters_per_user).
 
-    def __init__(self, limit: int) -> None:
+    Несёт и `used`: лимит снижали с 10 до 5, поэтому «7 из 5» — законное
+    состояние, и сообщение о нём должно отличаться от «5 из 5».
+    """
+
+    def __init__(self, limit: int, used: int = 0) -> None:
         self.limit = limit
-        super().__init__(f"filter limit reached: {limit}")
+        self.used = used
+        super().__init__(f"filter limit reached: {used}/{limit}")
+
+
+class DuplicateFilterError(Exception):
+    """Такой же фильтр у пользователя уже есть.
+
+    При лимите 5 слот стоит дорого: молча создать копию — значит списать слот
+    ни за что (дублей в рассылке не будет, sent_notifications дедуплицирует по
+    паре юзер+объявление).
+    """
+
+    def __init__(self, filter_id: int) -> None:
+        self.filter_id = filter_id
+        super().__init__(f"duplicate of filter {filter_id}")
 
 
 @dataclass(slots=True)
@@ -233,6 +268,7 @@ class InviteInfo:
     qualified: int
     bonuses_granted: int
     friends_to_next_bonus: int
+    limit_reached: bool = False
 
 
 def handle_start(
@@ -308,6 +344,7 @@ def activate_trial(telegram_id: int) -> TrialActivation:
                     referrer,
                     friends_per_bonus=settings.referral_friends_per_bonus,
                     bonus_days=settings.referral_bonus_days,
+                    max_bonuses=settings.referral_max_bonuses,
                 )
                 if bonuses:
                     result.referrer_chat_id = referrer.telegram_id
@@ -323,7 +360,10 @@ def get_invite_info(telegram_id: int) -> InviteInfo:
         if user is None:
             raise LookupError(f"bot user {telegram_id} is not registered")
         stats: ReferralStats = referral_stats(
-            session, user, friends_per_bonus=settings.referral_friends_per_bonus
+            session,
+            user,
+            friends_per_bonus=settings.referral_friends_per_bonus,
+            max_bonuses=settings.referral_max_bonuses,
         )
         session.commit()  # ensure_invite_code мог выдать код
         return InviteInfo(
@@ -332,6 +372,7 @@ def get_invite_info(telegram_id: int) -> InviteInfo:
             qualified=stats.qualified,
             bonuses_granted=stats.bonuses_granted,
             friends_to_next_bonus=stats.friends_to_next_bonus,
+            limit_reached=stats.limit_reached,
         )
 
 
@@ -418,6 +459,25 @@ def list_models(brand_id: int) -> list[ModelDTO]:
         return [ModelDTO(id=model.id, name=model.name) for model in models]
 
 
+def _filter_signature(user_filter: UserFilter) -> tuple:
+    """Значимые поля фильтра — для сравнения «это тот же самый фильтр».
+
+    `enabled` и `id` не входят: сравниваем НАСТРОЙКУ, а не строку.
+    """
+    return (
+        user_filter.brand_id,
+        user_filter.car_model_id,
+        user_filter.year_from,
+        user_filter.year_to,
+        user_filter.mileage_max_km,
+        float(user_filter.price_max_usd) if user_filter.price_max_usd is not None else None,
+        user_filter.below_market_only,
+        user_filter.below_market_percent,
+        user_filter.skip_foreign,
+        user_filter.region,
+    )
+
+
 def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
     brand = session.get(Brand, user_filter.brand_id) if user_filter.brand_id else None
     model = session.get(CarModel, user_filter.car_model_id) if user_filter.car_model_id else None
@@ -438,17 +498,41 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
     )
 
 
-def count_filters(telegram_id: int) -> int:
-    """Число активных фильтров пользователя (0, если юзера ещё нет)."""
+@dataclass(slots=True)
+class FiltersQuota:
+    used: int
+    limit: int
+
+    @property
+    def can_add(self) -> bool:
+        return self.used < self.limit
+
+    @property
+    def over_limit(self) -> bool:
+        """Фильтров больше лимита — наследие прежнего лимита 10, не ошибка."""
+        return self.used > self.limit
+
+    @property
+    def to_delete(self) -> int:
+        """Сколько удалить, чтобы снова можно было добавлять."""
+        return max(self.used - self.limit + 1, 0)
+
+
+def _count_filters(session, user_id: int) -> int:
+    return session.scalar(
+        select(func.count())
+        .select_from(UserFilter)
+        .where(UserFilter.user_id == user_id, UserFilter.enabled.is_(True))
+    ) or 0
+
+
+def filters_quota(telegram_id: int) -> FiltersQuota:
+    """Занято/можно фильтров (для незнакомого юзера — 0 из лимита)."""
+    limit = get_settings().bot_max_filters_per_user
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
-        if user is None:
-            return 0
-        return session.scalar(
-            select(func.count())
-            .select_from(UserFilter)
-            .where(UserFilter.user_id == user.id, UserFilter.enabled.is_(True))
-        ) or 0
+        used = _count_filters(session, user.id) if user is not None else 0
+        return FiltersQuota(used=used, limit=limit)
 
 
 def list_filters(telegram_id: int) -> list[FilterDTO]:
@@ -483,13 +567,29 @@ def create_filter(
         if user is None:
             raise LookupError(f"bot user {telegram_id} is not registered")
         limit = get_settings().bot_max_filters_per_user
-        current = session.scalar(
-            select(func.count())
-            .select_from(UserFilter)
-            .where(UserFilter.user_id == user.id, UserFilter.enabled.is_(True))
-        ) or 0
+        current = _count_filters(session, user.id)
         if current >= limit:
-            raise FilterLimitError(limit)
+            raise FilterLimitError(limit, current)
+        existing = session.scalars(
+            select(UserFilter).where(
+                UserFilter.user_id == user.id, UserFilter.enabled.is_(True)
+            )
+        ).all()
+        candidate = (
+            brand_id,
+            car_model_id,
+            year_from,
+            year_to,
+            mileage_max_km,
+            float(price_max_usd) if price_max_usd is not None else None,
+            below_market_only,
+            below_market_percent,
+            skip_foreign,
+            region,
+        )
+        for item in existing:
+            if _filter_signature(item) == candidate:
+                raise DuplicateFilterError(item.id)
         user_filter = UserFilter(
             user_id=user.id,
             brand_id=brand_id,
@@ -519,6 +619,129 @@ def delete_filter(telegram_id: int, filter_id: int) -> bool:
         if user_filter is None:
             return False
         session.delete(user_filter)
+        session.commit()
+        return True
+
+
+# --------------------------------------------------------------------------
+# Чёрный список
+# --------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class BlockDTO:
+    id: int
+    kind: str
+    label: str
+
+
+@dataclass(slots=True)
+class BlockOptions:
+    """Что можно запретить по конкретному объявлению (None = признака нет)."""
+
+    brand_name: str | None
+    model_name: str | None  # уже с маркой: «Toyota Camry»
+    city: str | None
+
+
+@dataclass(slots=True)
+class BlockResult:
+    ok: bool
+    label: str = ""
+    already: bool = False
+    limit_reached: bool = False
+    unavailable: bool = False  # у объявления нет такого признака (NULL в БД)
+
+
+def _block_labels(session, listing: Listing) -> dict[str, tuple[str, str]]:
+    """kind -> (value, label) для того, что у объявления реально заполнено."""
+    options: dict[str, tuple[str, str]] = {}
+    brand = session.get(Brand, listing.brand_id) if listing.brand_id else None
+    if brand is not None:
+        options[KIND_BRAND] = (block_value(KIND_BRAND, brand_id=brand.id), brand.name)
+    model = session.get(CarModel, listing.car_model_id) if listing.car_model_id else None
+    if model is not None:
+        label = f"{brand.name} {model.name}" if brand is not None else model.name
+        options[KIND_MODEL] = (block_value(KIND_MODEL, car_model_id=model.id), label)
+    city = (listing.city or "").strip()
+    if city:
+        options[KIND_CITY] = (block_value(KIND_CITY, city=city), city)
+    return options
+
+
+def block_options(listing_id: int) -> BlockOptions | None:
+    """Варианты для меню «не показывать такие»; None — объявление исчезло."""
+    with SessionLocal() as session:
+        listing = session.get(Listing, listing_id)
+        if listing is None:
+            return None
+        options = _block_labels(session, listing)
+        return BlockOptions(
+            brand_name=options.get(KIND_BRAND, (None, None))[1],
+            model_name=options.get(KIND_MODEL, (None, None))[1],
+            city=options.get(KIND_CITY, (None, None))[1],
+        )
+
+
+def add_block_from_listing(telegram_id: int, listing_id: int, kind: str) -> BlockResult:
+    """Заносит в чёрный список признак объявления (марку/модель/город).
+
+    Идёт от объявления, а не от справочника: кнопка живёт под карточкой, и
+    пользователю не нужно вспоминать, как называется марка в нашем каталоге.
+    """
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            raise LookupError(f"bot user {telegram_id} is not registered")
+        listing = session.get(Listing, listing_id)
+        if listing is None:
+            return BlockResult(ok=False, unavailable=True)
+        option = _block_labels(session, listing).get(kind)
+        if option is None:
+            return BlockResult(ok=False, unavailable=True)
+        value, label = option
+
+        existing = session.scalar(
+            select(UserBlock).where(
+                UserBlock.user_id == user.id, UserBlock.kind == kind, UserBlock.value == value
+            )
+        )
+        if existing is not None:
+            return BlockResult(ok=False, already=True, label=existing.label)
+
+        used = session.scalar(
+            select(func.count()).select_from(UserBlock).where(UserBlock.user_id == user.id)
+        ) or 0
+        if used >= MAX_BLOCKS_PER_USER:
+            return BlockResult(ok=False, limit_reached=True, label=label)
+
+        session.add(UserBlock(user_id=user.id, kind=kind, value=value, label=label))
+        session.commit()
+        return BlockResult(ok=True, label=label)
+
+
+def list_blocks(telegram_id: int) -> list[BlockDTO]:
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            return []
+        blocks = session.scalars(
+            select(UserBlock).where(UserBlock.user_id == user.id).order_by(UserBlock.id)
+        ).all()
+        return [BlockDTO(id=item.id, kind=item.kind, label=item.label) for item in blocks]
+
+
+def delete_block(telegram_id: int, block_id: int) -> bool:
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            return False
+        block = session.scalar(
+            select(UserBlock).where(UserBlock.id == block_id, UserBlock.user_id == user.id)
+        )
+        if block is None:
+            return False
+        session.delete(block)
         session.commit()
         return True
 

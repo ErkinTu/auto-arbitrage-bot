@@ -43,8 +43,11 @@ def _settings(**overrides) -> SimpleNamespace:
         referral_enabled=True,
         referral_bonus_days=BONUS_DAYS,
         referral_friends_per_bonus=FRIENDS_PER_BONUS,
+        referral_max_bonuses=0,  # без потолка: тесты про сам механизм начисления
         subscription_price_kgs=2000,
         subscription_period_days=30,
+        subscription_enabled=True,
+        subscription_testing=False,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -189,6 +192,28 @@ def test_worker_sends_paywall_notice_exactly_once(sessions, monkeypatch) -> None
         assert s.scalars(select(UserEvent.event)).all() == [EVENT_TRIAL_EXPIRED]
 
 
+def test_paywall_does_not_send_to_subscribe_while_payments_are_being_tested(
+    sessions, monkeypatch
+) -> None:
+    """Пока оплата обкатывается, единственное пейвол-сообщение не зовёт в тупик."""
+    monkeypatch.setattr(worker, "SessionLocal", sessions)
+    monkeypatch.setattr(
+        worker, "get_settings", lambda: _settings(subscription_testing=True)
+    )
+    sent: list[tuple[int, str]] = []
+    monkeypatch.setattr(worker, "send_message", lambda cid, text: (sent.append((cid, text)) or True))
+
+    now = _now()
+    with sessions() as s:
+        _add_user(s, 1, access_status="trial", trial_started_at=now - timedelta(days=4),
+                  trial_expires_at=now - timedelta(hours=2))
+        s.commit()
+
+    assert worker.send_trial_paywall_notices() == 1
+    assert "/subscribe" not in sent[0][1]
+    assert "вручную" in sent[0][1]
+
+
 def test_paywall_notice_marked_even_if_delivery_failed(sessions, monkeypatch) -> None:
     """Заблокировавший бота не должен получать попытку каждую минуту."""
     monkeypatch.setattr(worker, "SessionLocal", sessions)
@@ -301,6 +326,78 @@ def test_bonus_catches_up_several_thresholds_at_once(sessions) -> None:
         assert inviter.referral_bonuses_granted == 2
         granted_days = (inviter.subscription_expires_at - now).days
         assert granted_days == 2 * BONUS_DAYS
+
+
+def test_bonus_stops_at_max_bonuses(sessions) -> None:
+    """Потолок: 6 друзей заслуживают 2 бонуса, но при max_bonuses=1 дадим один."""
+    with sessions() as s:
+        inviter = _add_user(s, 1)
+        s.flush()
+        for tid in range(2, 8):  # 6 друзей = 2 бонуса по заслугам
+            _add_user(s, tid, referrer_id=inviter.id, trial_started_at=_now())
+        s.commit()
+        now = _now()
+        assert (
+            grant_due_bonuses(
+                s,
+                inviter,
+                friends_per_bonus=FRIENDS_PER_BONUS,
+                bonus_days=BONUS_DAYS,
+                max_bonuses=1,
+                now=now,
+            )
+            == 1
+        )
+        assert inviter.referral_bonuses_granted == 1
+        assert (inviter.subscription_expires_at - now).days == BONUS_DAYS
+
+        # Ещё трое друзей потолок не пробивают.
+        for tid in range(8, 11):
+            _add_user(s, tid, referrer_id=inviter.id, trial_started_at=_now())
+        s.commit()
+        assert (
+            grant_due_bonuses(
+                s,
+                inviter,
+                friends_per_bonus=FRIENDS_PER_BONUS,
+                bonus_days=BONUS_DAYS,
+                max_bonuses=1,
+            )
+            == 0
+        )
+        assert inviter.referral_bonuses_granted == 1
+
+        stats = referral_stats(
+            s, inviter, friends_per_bonus=FRIENDS_PER_BONUS, max_bonuses=1
+        )
+        assert stats.limit_reached is True
+        assert stats.friends_to_next_bonus == 0
+
+
+def test_lowering_max_bonuses_does_not_take_days_back(sessions) -> None:
+    """Понизили потолок задним числом — уже выданные дни остаются."""
+    with sessions() as s:
+        inviter = _add_user(s, 1)
+        s.flush()
+        for tid in range(2, 8):
+            _add_user(s, tid, referrer_id=inviter.id, trial_started_at=_now())
+        s.commit()
+        grant_due_bonuses(s, inviter, friends_per_bonus=FRIENDS_PER_BONUS, bonus_days=BONUS_DAYS)
+        assert inviter.referral_bonuses_granted == 2
+        expiry = inviter.subscription_expires_at
+
+        assert (
+            grant_due_bonuses(
+                s,
+                inviter,
+                friends_per_bonus=FRIENDS_PER_BONUS,
+                bonus_days=BONUS_DAYS,
+                max_bonuses=1,
+            )
+            == 0
+        )
+        assert inviter.referral_bonuses_granted == 2
+        assert inviter.subscription_expires_at == expiry
 
 
 def test_referral_stats_counts_only_qualified(sessions) -> None:

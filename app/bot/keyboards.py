@@ -124,6 +124,67 @@ def region_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+class BlockMenuCB(CallbackData, prefix="blkm"):
+    """Кнопка под карточкой: открыть меню «что именно не показывать»."""
+
+    listing_id: int
+
+
+class BlockCB(CallbackData, prefix="blk"):
+    kind: str  # brand | model | city
+    listing_id: int
+
+
+class BlockDeleteCB(CallbackData, prefix="blkd"):
+    block_id: int
+
+
+def block_menu_kb(listing_id: int) -> InlineKeyboardMarkup:
+    """Одна кнопка под карточкой: не мешает читать объявление."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🚫 Не показывать такие", callback_data=BlockMenuCB(listing_id=listing_id)
+    )
+    return builder.as_markup()
+
+
+def block_choice_kb(
+    listing_id: int, *, brand_name: str | None, model_name: str | None, city: str | None
+) -> InlineKeyboardMarkup:
+    """Второй шаг: чем именно надоело — маркой, моделью или городом.
+
+    Показываем только то, что у объявления заполнено: кнопка «Скрыть город»
+    у объявления без города обманывала бы.
+    """
+    builder = InlineKeyboardBuilder()
+    if model_name:
+        builder.button(
+            text=f"🚫 {model_name}", callback_data=BlockCB(kind="model", listing_id=listing_id)
+        )
+    if brand_name:
+        builder.button(
+            text=f"🚫 Вся марка {brand_name}",
+            callback_data=BlockCB(kind="brand", listing_id=listing_id),
+        )
+    if city:
+        builder.button(
+            text=f"🚫 Город {city}", callback_data=BlockCB(kind="city", listing_id=listing_id)
+        )
+    builder.button(text="← Отмена", callback_data=BlockMenuCB(listing_id=0))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def blocks_kb(blocks: list) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for item in blocks:
+        builder.button(
+            text=f"↩️ Вернуть: {item.label}", callback_data=BlockDeleteCB(block_id=item.id)
+        )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def filters_kb(filters: list[FilterDTO]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for index, item in enumerate(filters, start=1):

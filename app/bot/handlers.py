@@ -14,6 +14,9 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot import db
 from app.bot.keyboards import (
+    BlockCB,
+    BlockDeleteCB,
+    BlockMenuCB,
     BoolCB,
     BrandCB,
     FilterDeleteCB,
@@ -22,6 +25,8 @@ from app.bot.keyboards import (
     RegionCB,
     SkipCB,
     TrialCB,
+    block_choice_kb,
+    blocks_kb,
     brands_kb,
     filters_kb,
     models_kb,
@@ -34,13 +39,20 @@ from app.bot.keyboards import (
     yes_no_kb,
 )
 from app.bot.messages import (
+    BLOCK_LIST_EMPTY_TEXT,
     DEMO_INTRO_TEXT,
     DEMO_UNAVAILABLE_TEXT,
     HELP_TEXT,
     START_TEXT,
     SUBSCRIPTION_REQUIRED_TEXT,
+    SUBSCRIPTION_SOON_TEXT,
     SUBSCRIPTION_UNAVAILABLE_TEXT,
     TRIAL_ALREADY_USED_TEXT,
+    block_added_text,
+    block_limit_text,
+    blocks_text,
+    duplicate_filter_text,
+    filters_limit_text,
     format_filter_line,
     format_notification,
     invite_text,
@@ -53,6 +65,7 @@ from app.bot.messages import (
 )
 from app.bot.states import AddFilter
 from app.core.config import get_settings
+from app.services.blocklist import MAX_BLOCKS_PER_USER
 from app.services.finik import init_payment
 from app.services.regions import ALL_CARS_CODE, is_valid_region
 
@@ -185,6 +198,7 @@ async def cmd_invite(message: Message) -> None:
             bonus_days=settings.referral_bonus_days,
             friends_per_bonus=settings.referral_friends_per_bonus,
             bonuses_granted=info.bonuses_granted,
+            limit_reached=info.limit_reached,
         ),
         reply_markup=share_kb(link),
         disable_web_page_preview=True,
@@ -199,8 +213,14 @@ async def cmd_help(message: Message) -> None:
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: Message) -> None:
     settings = get_settings()
-    if not settings.subscription_enabled:
-        await message.answer(SUBSCRIPTION_UNAVAILABLE_TEXT)
+    if not settings.subscription_allowed_for(message.from_user.id):
+        # Обкатка платежей на проде: контур включён и проверяется тестировщиком,
+        # остальным честно говорим «скоро», а не «сломалось».
+        await message.answer(
+            SUBSCRIPTION_SOON_TEXT
+            if settings.subscription_testing
+            else SUBSCRIPTION_UNAVAILABLE_TEXT
+        )
         return
 
     try:
@@ -260,7 +280,8 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 
 def _filters_text(filters: list[db.FilterDTO]) -> str:
-    lines = ["📋 Ваши фильтры:\n"]
+    limit = get_settings().bot_max_filters_per_user
+    lines = [f"📋 Ваши фильтры ({len(filters)} из {limit}):\n"]
     for index, item in enumerate(filters, start=1):
         line = format_filter_line(
             brand_name=item.brand_name,
@@ -300,19 +321,97 @@ async def delete_filter_cb(query: CallbackQuery, callback_data: FilterDeleteCB) 
     await query.message.edit_text(_filters_text(filters), reply_markup=filters_kb(filters))
 
 
+# --- Чёрный список ----------------------------------------------------------
+# Запрет глобальный: действует поверх всех фильтров пользователя (matching.py).
+
+
+@router.message(Command("blacklist"))
+async def cmd_blacklist(message: Message) -> None:
+    blocks = await asyncio.to_thread(db.list_blocks, message.from_user.id)
+    if not blocks:
+        await message.answer(BLOCK_LIST_EMPTY_TEXT)
+        return
+    await message.answer(blocks_text(blocks), reply_markup=blocks_kb(blocks))
+
+
+@router.callback_query(BlockDeleteCB.filter())
+async def block_delete_cb(query: CallbackQuery, callback_data: BlockDeleteCB) -> None:
+    deleted = await asyncio.to_thread(db.delete_block, query.from_user.id, callback_data.block_id)
+    await query.answer("Вернул в выдачу" if deleted else "Уже удалено")
+    blocks = await asyncio.to_thread(db.list_blocks, query.from_user.id)
+    if not blocks:
+        await query.message.edit_text(BLOCK_LIST_EMPTY_TEXT)
+        return
+    await query.message.edit_text(blocks_text(blocks), reply_markup=blocks_kb(blocks))
+
+
+@router.callback_query(BlockMenuCB.filter())
+async def block_menu_cb(query: CallbackQuery, callback_data: BlockMenuCB) -> None:
+    """Разворачивает/сворачивает меню прямо под карточкой.
+
+    listing_id=0 — «Отмена»: возвращаем исходную одну кнопку, но по ней уже не
+    восстановить listing_id, поэтому просто убираем клавиатуру.
+    """
+    if callback_data.listing_id == 0:
+        await query.answer()
+        with suppress(TelegramAPIError):
+            await query.message.edit_reply_markup(reply_markup=None)
+        return
+
+    options = await asyncio.to_thread(db.block_options, callback_data.listing_id)
+    if options is None:
+        await query.answer("Объявление больше недоступно", show_alert=True)
+        return
+    await query.answer()
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(
+            reply_markup=block_choice_kb(
+                callback_data.listing_id,
+                brand_name=options.brand_name,
+                model_name=options.model_name,
+                city=options.city,
+            )
+        )
+
+
+@router.callback_query(BlockCB.filter())
+async def block_add_cb(query: CallbackQuery, callback_data: BlockCB) -> None:
+    try:
+        result = await asyncio.to_thread(
+            db.add_block_from_listing,
+            query.from_user.id,
+            callback_data.listing_id,
+            callback_data.kind,
+        )
+    except LookupError:
+        await query.answer("Отправьте /start, чтобы начать пользоваться ботом", show_alert=True)
+        return
+
+    if result.limit_reached:
+        await query.answer()
+        await query.message.answer(block_limit_text(MAX_BLOCKS_PER_USER))
+        return
+    if result.unavailable:
+        await query.answer("По этому объявлению так не получится", show_alert=True)
+        return
+    if result.already:
+        await query.answer(f"Уже в чёрном списке: {result.label}")
+    else:
+        await query.answer(block_added_text(result.label), show_alert=True)
+    # Меню сделало своё дело — убираем, чтобы карточка не мигала кнопками.
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(reply_markup=None)
+
+
 # --- Визард /add_filter -----------------------------------------------------
 
 
 @router.message(Command("add_filter"))
 async def cmd_add_filter(message: Message, state: FSMContext) -> None:
     await state.clear()
-    limit = get_settings().bot_max_filters_per_user
-    current = await asyncio.to_thread(db.count_filters, message.from_user.id)
-    if current >= limit:
-        await message.answer(
-            f"У вас уже максимум фильтров ({limit}). "
-            "Удалите ненужный в /filters, чтобы добавить новый."
-        )
+    quota = await asyncio.to_thread(db.filters_quota, message.from_user.id)
+    if not quota.can_add:
+        await message.answer(filters_limit_text(quota.used, quota.limit))
         return
     brands = await asyncio.to_thread(db.list_brands)
     if not brands:
@@ -544,10 +643,11 @@ async def wizard_region(query: CallbackQuery, callback_data: RegionCB, state: FS
         )
     except db.FilterLimitError as exc:
         await query.answer()
-        await query.message.edit_text(
-            f"У вас уже максимум фильтров ({exc.limit}). "
-            "Удалите ненужный в /filters, чтобы добавить новый."
-        )
+        await query.message.edit_text(filters_limit_text(exc.used, exc.limit))
+        return
+    except db.DuplicateFilterError:
+        await query.answer()
+        await query.message.edit_text(duplicate_filter_text())
         return
     await query.answer("Фильтр сохранен")
     summary = format_filter_line(

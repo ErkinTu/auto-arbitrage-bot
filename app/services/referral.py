@@ -40,6 +40,7 @@ class ReferralStats:
     qualified: int  # из них активировали триал — только они идут в зачёт
     bonuses_granted: int
     friends_to_next_bonus: int
+    limit_reached: bool = False  # потолок бонусов исчерпан, новые не начисляются
 
 
 def parse_deep_link(payload: str | None) -> str | None:
@@ -103,6 +104,7 @@ def grant_due_bonuses(
     *,
     friends_per_bonus: int,
     bonus_days: int,
+    max_bonuses: int = 0,
     now: datetime | None = None,
 ) -> int:
     """Догоняет начисления до заслуженного уровня. Возвращает число НОВЫХ бонусов.
@@ -111,11 +113,18 @@ def grant_due_bonuses(
     flush: сессии бота живут с `autoflush=False`, и без него COUNT не увидел бы
     только что проставленный `trial_started_at` — бонус молча не начислялся бы
     ровно на том друге, который его и заработал.
+
+    `max_bonuses` (>0) — потолок на пригласившего: заслуженное срезается сверху,
+    поэтому дальнейшие приглашения просто не приносят дней. Понижать потолок
+    задним числом безопасно — уже выданные дни не отбираются (pending уходит в
+    минус и начисление не делается).
     """
     if friends_per_bonus <= 0 or bonus_days <= 0:
         return 0
     session.flush()
     earned = _qualified_count(session, referrer.id) // friends_per_bonus
+    if max_bonuses > 0:
+        earned = min(earned, max_bonuses)
     pending = earned - (referrer.referral_bonuses_granted or 0)
     if pending <= 0:
         return 0
@@ -127,7 +136,7 @@ def grant_due_bonuses(
 
 
 def referral_stats(
-    session: Session, user: BotUser, *, friends_per_bonus: int
+    session: Session, user: BotUser, *, friends_per_bonus: int, max_bonuses: int = 0
 ) -> ReferralStats:
     invited_total = (
         session.scalar(
@@ -137,10 +146,16 @@ def referral_stats(
     )
     qualified = _qualified_count(session, user.id)
     remainder = qualified % friends_per_bonus if friends_per_bonus > 0 else 0
+    granted = user.referral_bonuses_granted or 0
+    limit_reached = max_bonuses > 0 and granted >= max_bonuses
     return ReferralStats(
         invite_code=ensure_invite_code(session, user),
         invited_total=invited_total,
         qualified=qualified,
-        bonuses_granted=user.referral_bonuses_granted or 0,
-        friends_to_next_bonus=max(friends_per_bonus - remainder, 0) if friends_per_bonus > 0 else 0,
+        bonuses_granted=granted,
+        # Исчерпан потолок — «до следующего бонуса» нет смысла считать.
+        friends_to_next_bonus=0
+        if limit_reached or friends_per_bonus <= 0
+        else max(friends_per_bonus - remainder, 0),
+        limit_reached=limit_reached,
     )

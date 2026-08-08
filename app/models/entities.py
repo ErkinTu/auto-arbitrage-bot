@@ -393,6 +393,46 @@ class UserFilter(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class UserBlock(Base):
+    """Чёрный список пользователя: «это не показывать никогда».
+
+    Отдельная сущность, а не поле фильтра: фильтр отвечает на вопрос «что
+    показывать», и отрицание пришлось бы дублировать в каждый из пяти. Здесь же
+    запрет глобальный — применяется поверх ВСЕХ фильтров пользователя
+    (`matching.py`, после `filter_matches`).
+
+    Гранулярность задаётся `kind`; заполнена ровно одна колонка-значение:
+      brand  — марка целиком (`brand_id`);
+      model  — модель (`car_model_id`; марка выводится из самой модели);
+      city   — город/локация как её пишет источник (`city`, регистр сохраняем
+               для показа, сравниваем нормализованно).
+    Продавца заблокировать нельзя: в `listings` нет его идентификатора.
+    """
+
+    __tablename__ = "user_blocks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", "value", name="uq_user_block_value"),
+        Index("ix_user_block_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # brand | model | city
+    # Нормализованное значение для сравнения и уникальности: id как строка для
+    # brand/model, приведённый к нижнему регистру город для city. Одна колонка
+    # вместо трёх nullable-полей в UNIQUE — потому что в Postgres NULL не равен
+    # NULL, и уникальность по кортежу с NULL-ами не сработала бы.
+    value: Mapped[str] = mapped_column(String(120), nullable=False)
+    # Человекочитаемая подпись на момент добавления: показываем в /blacklist,
+    # не резолвя каждый раз марки/модели.
+    label: Mapped[str] = mapped_column(String(160), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class SentNotification(Base):
     __tablename__ = "sent_notifications"
     __table_args__ = (

@@ -254,7 +254,10 @@ def send_trial_paywall_notices() -> int:
     if not settings.trial_enabled:
         return 0
     price = int(settings.subscription_price_kgs)
-    text = trial_paywall_text(price, settings.subscription_period_days)
+    # Пока оплата закрыта или обкатывается на тестировщиках, зовём не в
+    # /subscribe (там «скоро»), а к ручному продлению — см. trial_paywall_text.
+    payments_open = settings.subscription_enabled and not settings.subscription_testing
+    text = trial_paywall_text(price, settings.subscription_period_days, payments_open)
     now = utcnow()
     sent = 0
     with SessionLocal() as session:

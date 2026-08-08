@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     BotUser,
+    Brand,
     DailyMarketStat,
     Listing,
     ListingStatusHistory,
@@ -21,6 +22,7 @@ from app.models import (
     Source,
     UserFilter,
 )
+from app.services.blocklist import load_block_sets
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.regions import FOREIGN_LOCATIONS, region_matches
 from app.services.stats import mileage_bucket
@@ -47,6 +49,8 @@ class PendingNotification:
     below_market_percent: float | None
     market_avg_usd: float | None = None
     source_name: str = "mashina.kg"
+    # Марка — для группировки нескольких авто в одно сообщение (notifier).
+    brand_name: str | None = None
 
 
 def find_new_listings(session: Session, since: datetime, *, max_age_hours: int = 12) -> list[Listing]:
@@ -134,6 +138,24 @@ def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
     if user_filter.region is not None and not region_matches(listing.city, user_filter.region):
         return False
     return True
+
+
+def _match_signature(user_filter: UserFilter) -> tuple:
+    """Поля, от которых зависит `filter_matches` — ключ мемоизации.
+
+    `below_market_only`/`below_market_percent` сюда НЕ входят: они проверяются
+    отдельно, после расчёта средней по рынку.
+    """
+    return (
+        user_filter.brand_id,
+        user_filter.car_model_id,
+        user_filter.year_from,
+        user_filter.year_to,
+        user_filter.mileage_max_km,
+        user_filter.price_max_usd,
+        user_filter.skip_foreign,
+        user_filter.region,
+    )
 
 
 def market_average(
@@ -260,12 +282,38 @@ def match_new_listings(
     source_names: dict[int, str] = {
         row.id: row.name for row in session.execute(select(Source.id, Source.name))
     }
+    brand_names: dict[int, str] = {
+        row.id: row.name for row in session.execute(select(Brand.id, Brand.name))
+    }
+    # Чёрные списки — одним запросом на цикл: дальше проверка идёт в памяти.
+    block_sets = load_block_sets(session, {user.id for _, user in filter_user_pairs})
+    # Индекс фильтров по марке: у объявления марка ровно одна, и прогонять по
+    # нему фильтры чужих марок незачем. Ключ None — фильтры «все марки», их
+    # проверяем всегда. Порядок внутри группы фиксируем по id фильтра, чтобы
+    # при равных правах на объявление всегда выигрывал один и тот же фильтр.
+    filters_by_brand: dict[int | None, list[tuple[UserFilter, BotUser]]] = {}
+    for pair in filter_user_pairs:
+        filters_by_brand.setdefault(pair[0].brand_id, []).append(pair)
+    for group in filters_by_brand.values():
+        group.sort(key=lambda pair: pair[0].id)
+    any_brand_pairs = filters_by_brand.get(None, [])
+
     # Пушей уже набрано за этот цикл на пользователя (для max_per_user).
     sent_counts: dict[int, int] = {}
     pending: list[PendingNotification] = []
 
     for listing in listings:
-        for user_filter, user in filter_user_pairs:
+        candidates = any_brand_pairs
+        if listing.brand_id is not None and listing.brand_id in filters_by_brand:
+            candidates = sorted(
+                any_brand_pairs + filters_by_brand[listing.brand_id],
+                key=lambda pair: pair[0].id,
+            )
+        # Одинаково настроенные фильтры разных людей дают одинаковый ответ по
+        # одному и тому же объявлению — считаем его один раз на объявление.
+        match_cache: dict[tuple, bool] = {}
+
+        for user_filter, user in candidates:
             key = (user.id, listing.id)
             if key in already_sent:
                 continue
@@ -273,7 +321,16 @@ def match_new_listings(
             # снова в следующем цикле (в пределах bot_new_lookback_minutes).
             if max_per_user and sent_counts.get(user.id, 0) >= max_per_user:
                 continue
-            if not filter_matches(listing, user_filter):
+            signature = _match_signature(user_filter)
+            matched = match_cache.get(signature)
+            if matched is None:
+                matched = filter_matches(listing, user_filter)
+                match_cache[signature] = matched
+            if not matched:
+                continue
+            # Чёрный список сильнее фильтра: человек сказал «никогда».
+            blocked = block_sets.get(user.id)
+            if blocked is not None and blocked.blocks(listing):
                 continue
 
             if listing.id not in avg_cache:
@@ -322,6 +379,7 @@ def match_new_listings(
                     below_market_percent=below_percent,
                     market_avg_usd=avg,
                     source_name=source_names.get(listing.source_id, "mashina.kg"),
+                    brand_name=brand_names.get(listing.brand_id) if listing.brand_id else None,
                 )
             )
 

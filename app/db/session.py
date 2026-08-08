@@ -49,6 +49,7 @@ def _upgrade_postgres_schema() -> None:
         "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS referral_bonuses_granted INTEGER NOT NULL DEFAULT 0",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_bot_users_invite_code ON bot_users (invite_code)",
         "CREATE INDEX IF NOT EXISTS ix_bot_users_referrer_id ON bot_users (referrer_id)",
+        # Чёрный список — новая таблица, её создаёт create_all; ALTER не нужен.
     )
     with engine.begin() as connection:
         for statement in statements:
