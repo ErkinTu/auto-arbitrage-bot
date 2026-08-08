@@ -11,6 +11,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.bot.access import AccessMiddleware
+from app.bot.commands import setup_bot_commands
 from app.bot.handlers import router
 from app.bot.poller import polling_loop
 from app.bot.protection import ContentProtectionMiddleware
@@ -62,6 +63,8 @@ async def main() -> None:
     dispatcher.message.outer_middleware(access)
     dispatcher.callback_query.outer_middleware(access)
     dispatcher.include_router(router)
+
+    await setup_bot_commands(bot)
 
     poller_task = asyncio.create_task(polling_loop(bot))
     try:

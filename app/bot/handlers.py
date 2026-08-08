@@ -43,7 +43,6 @@ from app.bot.messages import (
     DEMO_INTRO_TEXT,
     DEMO_UNAVAILABLE_TEXT,
     HELP_TEXT,
-    START_TEXT,
     SUBSCRIPTION_REQUIRED_TEXT,
     SUBSCRIPTION_SOON_TEXT,
     SUBSCRIPTION_UNAVAILABLE_TEXT,
@@ -58,6 +57,7 @@ from app.bot.messages import (
     invite_text,
     onboarding_text,
     referral_bonus_text,
+    start_text,
     status_text,
     subscribe_error_text,
     subscribe_prompt,
@@ -103,12 +103,12 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
     )
 
     if info.access_status == "member" or info.subscription_active or info.trial_active:
-        await message.answer(START_TEXT)
+        await message.answer(start_text())
         return
 
     if info.trial_used or not settings.trial_enabled:
         # Триал израсходован (или выключен) — сразу к оплате.
-        await message.answer(START_TEXT)
+        await message.answer(start_text())
         await message.answer(
             TRIAL_ALREADY_USED_TEXT
             if info.trial_used
