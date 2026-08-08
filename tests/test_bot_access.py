@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -159,3 +160,57 @@ def test_trial_already_used_avoids_dead_end_while_payment_is_closed() -> None:
 )
 def test_no_text_mentions_the_closed_group(text: str) -> None:
     assert "групп" not in text.lower()
+
+
+# --- гонка вставки пользователя ---------------------------------------------
+
+
+def test_resolve_access_survives_parallel_insert_of_the_same_new_user(sessions) -> None:
+    """Два апдейта одного новичка пришли одновременно — оба должны отработать.
+
+    Ловили на проде 08.08.2026: Telegram отдал накопленные апдейты пачкой после
+    перезапуска, оба потока увидели «юзера нет», второй INSERT упал на уникальном
+    telegram_id, и aiogram уронил апдейт — человеку бот не ответил.
+
+    Воспроизводим исход гонки: строка соседа уже закоммичена, а наша вставка
+    свалилась с IntegrityError. Повтор обязан отработать по ветке «юзер найден».
+    """
+    telegram_id = 8787285475
+    original = botdb._resolve_access_once
+    calls: list[int] = []
+
+    def racing(tg_id, username, first_name, is_member):
+        calls.append(1)
+        if len(calls) == 1:
+            with sessions() as other:
+                other.add(BotUser(telegram_id=tg_id, username=username, first_name=first_name))
+                other.commit()
+            raise IntegrityError("INSERT INTO bot_users", {}, Exception("duplicate key"))
+        return original(tg_id, username, first_name, is_member)
+
+    botdb._resolve_access_once = racing
+    try:
+        has_access = botdb.resolve_access(telegram_id, None, "Myrzabekov", False)
+    finally:
+        botdb._resolve_access_once = original
+
+    assert len(calls) == 2, "повтор после гонки не сработал"
+    assert has_access is False  # не член группы, без подписки — доступа нет
+    with sessions() as session:
+        users = session.scalars(
+            select(BotUser).where(BotUser.telegram_id == telegram_id)
+        ).all()
+    assert len(users) == 1, "дубль пользователя"
+
+
+def test_insert_race_retried_only_once(sessions) -> None:
+    """Если конфликт повторился — пробрасываем: это уже не гонка, а поломка."""
+    calls: list[int] = []
+
+    def always_conflicting():
+        calls.append(1)
+        raise IntegrityError("INSERT INTO bot_users", {}, Exception("duplicate key"))
+
+    with pytest.raises(IntegrityError):
+        botdb._retry_on_user_insert_race(always_conflicting)
+    assert len(calls) == 2

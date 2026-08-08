@@ -118,21 +118,27 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
         return
 
     await message.answer(onboarding_text(settings.trial_days))
-    await _send_demo_listing(message)
-    await message.answer(
-        f"🎁 {settings.trial_days} дня бесплатно — без карты и без оплаты.",
-        reply_markup=trial_kb(settings.trial_days),
-    )
+    await _send_demo_listing(message, reply_markup=trial_kb(settings.trial_days))
 
 
-async def _send_demo_listing(message: Message) -> None:
-    """Показывает реальное объявление ниже рынка — тем же форматом, что и рассылка."""
+async def _send_demo_listing(message: Message, *, reply_markup=None) -> None:
+    """Показывает реальное объявление ниже рынка — тем же форматом, что и рассылка.
+
+    Кнопка триала едет ПОД этим объявлением, а не отдельным сообщением: текст
+    «N дня бесплатно, без карты» уже сказан в приветствии, и третьим сообщением
+    он только повторял сам себя. Кнопка нужнее прямо под примером — там человек
+    как раз увидел, что именно он получит.
+    """
     demo = await asyncio.to_thread(db.get_demo_listing, message.from_user.id)
     if demo is None:
-        await message.answer(DEMO_UNAVAILABLE_TEXT)
+        await message.answer(DEMO_UNAVAILABLE_TEXT, reply_markup=reply_markup)
         return
     await message.answer(DEMO_INTRO_TEXT)
-    await message.answer(format_notification(demo), disable_web_page_preview=False)
+    await message.answer(
+        format_notification(demo),
+        disable_web_page_preview=False,
+        reply_markup=reply_markup,
+    )
 
 
 @router.callback_query(TrialCB.filter(F.action == "start"))

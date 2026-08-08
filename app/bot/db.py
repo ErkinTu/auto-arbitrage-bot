@@ -7,13 +7,16 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Callable, TypeVar
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.bot.matching import PendingNotification, market_average
 from app.core.config import get_settings
@@ -47,6 +50,30 @@ from app.services.referral import (
 )
 from app.services.subscription import is_subscription_active
 from app.services.trial import is_trial_active, start_trial, trial_used
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+def _retry_on_user_insert_race(action: Callable[[], _T]) -> _T:
+    """Повторяет операцию, если строку пользователя параллельно вставил сосед.
+
+    Апдейты одного и того же НОВОГО юзера приходят пачкой (Telegram отдаёт
+    накопленное сразу после перезапуска бота), обрабатываются параллельно в
+    разных потоках, оба видят «юзера нет» и оба делают INSERT. Второй падает на
+    уникальном `ix_bot_users_telegram_id`, aiogram роняет апдейт целиком — и
+    человек, впервые написавший боту, не получает ответа. Ловили на проде
+    08.08.2026 на первом же новом пользователе.
+
+    Одной повторной попытки достаточно: к этому моменту строка соседа уже
+    закоммичена, и повтор идёт по ветке «пользователь найден».
+    """
+    try:
+        return action()
+    except IntegrityError:
+        logger.info("bot user insert race detected, retrying once")
+        return action()
 
 
 class FilterLimitError(Exception):
@@ -137,6 +164,18 @@ def decide_access_status(
 
 
 def resolve_access(
+    telegram_id: int,
+    username: str | None,
+    first_name: str | None,
+    is_member: bool | None,
+) -> bool:
+    """Апсерт пользователя с защитой от гонки вставки (см. `_retry_on_user_insert_race`)."""
+    return _retry_on_user_insert_race(
+        lambda: _resolve_access_once(telegram_id, username, first_name, is_member)
+    )
+
+
+def _resolve_access_once(
     telegram_id: int,
     username: str | None,
     first_name: str | None,
@@ -272,6 +311,24 @@ class InviteInfo:
 
 
 def handle_start(
+    telegram_id: int,
+    *,
+    username: str | None,
+    first_name: str | None,
+    deep_link_payload: str | None = None,
+) -> StartInfo:
+    """Регистрация /start с защитой от гонки вставки (см. `_retry_on_user_insert_race`)."""
+    return _retry_on_user_insert_race(
+        lambda: _handle_start_once(
+            telegram_id,
+            username=username,
+            first_name=first_name,
+            deep_link_payload=deep_link_payload,
+        )
+    )
+
+
+def _handle_start_once(
     telegram_id: int,
     *,
     username: str | None,
