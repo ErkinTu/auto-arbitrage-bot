@@ -46,7 +46,6 @@ from app.bot.messages import (
     SUBSCRIPTION_REQUIRED_TEXT,
     SUBSCRIPTION_SOON_TEXT,
     SUBSCRIPTION_UNAVAILABLE_TEXT,
-    TRIAL_ALREADY_USED_TEXT,
     block_added_text,
     block_limit_text,
     blocks_text,
@@ -61,6 +60,7 @@ from app.bot.messages import (
     status_text,
     subscribe_error_text,
     subscribe_prompt,
+    trial_already_used_text,
     trial_started_text,
 )
 from app.bot.states import AddFilter
@@ -108,9 +108,10 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
 
     if info.trial_used or not settings.trial_enabled:
         # Триал израсходован (или выключен) — сразу к оплате.
+        payments_open = settings.subscription_allowed_for(message.from_user.id)
         await message.answer(start_text())
         await message.answer(
-            TRIAL_ALREADY_USED_TEXT
+            trial_already_used_text(payments_open)
             if info.trial_used
             else SUBSCRIPTION_REQUIRED_TEXT
         )
@@ -149,7 +150,9 @@ async def cb_trial_start(callback: CallbackQuery) -> None:
 
     if not result.ok:
         await callback.answer()
-        await callback.message.answer(TRIAL_ALREADY_USED_TEXT)
+        await callback.message.answer(
+            trial_already_used_text(settings.subscription_allowed_for(callback.from_user.id))
+        )
         return
 
     await callback.answer()

@@ -1,9 +1,13 @@
-"""Контроль доступа: бот отвечает суперюзерам (члены группы) и подписчикам.
+"""Контроль доступа: бот отвечает членам группы, подписчикам и тем, у кого идёт триал.
 
 Доступ = член закрытой группы (TELEGRAM_ACCESS_CHAT_ID) ИЛИ активная платная
-подписка. Команды входа (/start, /subscribe, /status…) пропускаем всегда, иначе
-неоплативший не дошёл бы до оплаты. Признак доступа синхронизируется в
-access_status (для matching.py, который Telegram не дёргает).
+подписка ИЛИ активный триал. Команды входа (/start, /subscribe, /status…)
+пропускаем всегда, иначе неоплативший не дошёл бы до оплаты. Признак доступа
+синхронизируется в access_status (для matching.py, который Telegram не дёргает).
+
+Отказ (`_deny`) про закрытую группу НЕ говорит: для человека без доступа она
+не объяснение, а тупик. Вместо этого предлагаем следующий шаг — кнопку триала,
+если он не израсходован, иначе оплату или ручное включение.
 """
 
 from __future__ import annotations
@@ -17,8 +21,9 @@ from aiogram import BaseMiddleware
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-from app.bot.db import resolve_access
-from app.bot.messages import ACCESS_DENIED_TEXT, SUBSCRIPTION_REQUIRED_TEXT
+from app.bot.db import get_subscription_info, resolve_access
+from app.bot.keyboards import trial_kb
+from app.bot.messages import access_denied_text
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -125,15 +130,36 @@ class AccessMiddleware(BaseMiddleware):
         return False
 
     async def _deny(self, event: TelegramObject) -> None:
-        text = (
-            SUBSCRIPTION_REQUIRED_TEXT
-            if get_settings().subscription_enabled
-            else ACCESS_DENIED_TEXT
+        """Отказ с кнопкой следующего шага, а не с сообщением про группу.
+
+        Кнопку триала шлём отдельным сообщением даже в ответ на callback:
+        всплывающий alert клавиатуру нести не умеет, а без кнопки человек
+        остаётся ровно там же, где был, — знает про бесплатный период, но
+        нажать его не может.
+        """
+        settings = get_settings()
+        user = getattr(event, "from_user", None)
+        telegram_id = user.id if user is not None else 0
+
+        info = await asyncio.to_thread(get_subscription_info, telegram_id)
+        # Незнакомого юзера (info is None) resolve_access уже завёл, но если
+        # его почему-то нет — триал он точно не расходовал.
+        trial_available = settings.trial_enabled and (info is None or not info.trial_used)
+        text = access_denied_text(
+            trial_days=settings.trial_days,
+            trial_available=trial_available,
+            payments_open=settings.subscription_allowed_for(telegram_id),
         )
+        markup = trial_kb(settings.trial_days) if trial_available else None
+
         try:
             if isinstance(event, CallbackQuery):
-                await event.answer(text, show_alert=True)
+                await event.answer()
+                if event.message is not None:
+                    await event.message.answer(text, reply_markup=markup)
+                else:
+                    await event.answer(text, show_alert=True)
             elif isinstance(event, Message):
-                await event.answer(text)
+                await event.answer(text, reply_markup=markup)
         except TelegramAPIError:
             logger.debug("failed to deliver access-denied message", exc_info=True)

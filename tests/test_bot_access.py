@@ -7,6 +7,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.bot.db as botdb
 from app.db.base import Base
+from app.bot.messages import access_denied_text, trial_already_used_text
 from app.models import BotUser, Payment
 
 
@@ -116,3 +117,45 @@ def test_create_pending_payment_persists_row(sessions) -> None:
         assert payment.status == "pending"
         assert payment.amount == Decimal("500")
         assert payment.period_days == 30
+
+
+# --- текст отказа -----------------------------------------------------------
+# Про закрытую группу человеку без доступа говорить нельзя: она объясняет, как
+# доступ выдаётся другим, а ему не оставляет следующего шага.
+
+
+def test_denied_offers_trial_when_it_is_still_available() -> None:
+    text = access_denied_text(trial_days=3, trial_available=True, payments_open=False)
+    assert "3 дня" in text
+    assert "/subscribe" not in text  # оплата тут ни при чём, триал ещё не взят
+
+
+def test_denied_after_trial_sends_to_payment_when_it_is_open() -> None:
+    text = access_denied_text(trial_days=3, trial_available=False, payments_open=True)
+    assert "/subscribe" in text
+
+
+def test_denied_after_trial_offers_manual_help_while_payment_is_closed() -> None:
+    """Пока оплата обкатывается, /subscribe отвечает «скоро» — звать туда нельзя."""
+    text = access_denied_text(trial_days=3, trial_available=False, payments_open=False)
+    assert "/subscribe" not in text
+    assert "вручную" in text
+
+
+def test_trial_already_used_avoids_dead_end_while_payment_is_closed() -> None:
+    assert "/subscribe" not in trial_already_used_text(payments_open=False)
+    assert "/subscribe" in trial_already_used_text(payments_open=True)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        access_denied_text(trial_days=3, trial_available=True, payments_open=False),
+        access_denied_text(trial_days=3, trial_available=False, payments_open=True),
+        access_denied_text(trial_days=3, trial_available=False, payments_open=False),
+        trial_already_used_text(payments_open=True),
+        trial_already_used_text(payments_open=False),
+    ],
+)
+def test_no_text_mentions_the_closed_group(text: str) -> None:
+    assert "групп" not in text.lower()
