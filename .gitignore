@@ -1,8 +1,12 @@
 .env
+.env.bak*
 # Приватные ключи Finik — только на сервере, никогда в git.
 secrets/*
 !secrets/README.md
 *.pem
+# Слепки серверной конфигурации перед миграцией (MIGRATION.md): внутри боевой
+# .env с токеном/паролями и креды прокси. В git не попадает НИКОГДА.
+migration/
 .venv/
 __pycache__/
 .pytest_cache/
