@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from contextlib import suppress
 
@@ -55,6 +56,7 @@ from app.bot.messages import (
     format_notification,
     invite_text,
     onboarding_text,
+    preview_intro_text,
     referral_bonus_text,
     start_text,
     status_text,
@@ -63,11 +65,14 @@ from app.bot.messages import (
     trial_already_used_text,
     trial_started_text,
 )
+from app.bot.notifier import send_notifications
 from app.bot.states import AddFilter
 from app.core.config import get_settings
 from app.services.blocklist import MAX_BLOCKS_PER_USER
 from app.services.finik import init_payment
 from app.services.regions import ALL_CARS_CODE, is_valid_region
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -676,6 +681,28 @@ async def wizard_region(query: CallbackQuery, callback_data: RegionCB, state: FS
         "Как только появится подходящее объявление — пришлю его сюда.\n"
         "/filters — мои фильтры, /add_filter — еще один."
     )
+    await _send_filter_preview(query.message, created.id)
+
+
+async def _send_filter_preview(message: Message, filter_id: int) -> None:
+    """Разовая подборка «что уже есть» сразу после создания фильтра.
+
+    Противовес точке отсчёта в matching: та шлёт только появившееся ПОСЛЕ
+    фильтра, и без превью человек остаётся в тишине до первой новой машины —
+    на триале это читается как «бот не работает». Отправляем тем же путём, что
+    и обычную рассылку: те же карточки, та же пауза 1 с на чат, та же кнопка
+    чёрного списка.
+    """
+    settings = get_settings()
+    try:
+        preview = await asyncio.to_thread(db.preview_for_filter, filter_id)
+    except Exception:
+        logger.exception("filter preview failed for filter %s", filter_id)
+        return
+    if not preview:
+        return
+    await message.answer(preview_intro_text(len(preview)))
+    await send_notifications(message.bot, preview, group_min=settings.bot_group_min_listings)
 
 
 # --- Fallback: неожиданный ввод внутри визарда ------------------------------

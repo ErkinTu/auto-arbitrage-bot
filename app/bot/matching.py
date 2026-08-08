@@ -104,6 +104,59 @@ def find_new_listings(session: Session, since: datetime, *, max_age_hours: int =
     )
 
 
+def qualifying_event_times(session: Session, since: datetime) -> dict[int, datetime]:
+    """Когда объявление стало кандидатом на пуш: MIN(observed_at) в окне since.
+
+    Нужно для точки отсчёта фильтра: пуш уместен, только если событие случилось
+    ПОСЛЕ того, как человек завёл фильтр. Иначе новый фильтр (и вообще любой
+    новичок) забирает себе всё окно `bot_new_lookback_minutes` целиком —
+    на проде это ~500 объявлений, то есть пачка в потолок и «капель» ещё
+    несколько часов, пока окно не состарится.
+    """
+    rows = session.execute(
+        select(
+            ListingStatusHistory.listing_id,
+            func.min(ListingStatusHistory.observed_at),
+        )
+        .where(
+            ListingStatusHistory.event_type.in_(("new", "price_changed")),
+            ListingStatusHistory.observed_at >= since,
+        )
+        .group_by(ListingStatusHistory.listing_id)
+    )
+    return {listing_id: observed_at for listing_id, observed_at in rows}
+
+
+def _build_pending(
+    listing: Listing,
+    *,
+    chat_id: int,
+    filter_id: int,
+    below_percent: float | None,
+    avg: float | None,
+    source_names: dict[int, str],
+    brand_names: dict[int, str],
+) -> PendingNotification:
+    """Сборка DTO уведомления — общая для рассылки и для превью нового фильтра."""
+    return PendingNotification(
+        chat_id=chat_id,
+        listing_id=listing.id,
+        filter_id=filter_id,
+        title=listing.title,
+        year=listing.year,
+        mileage_km=listing.mileage_km,
+        price_usd=float(listing.current_price_usd)
+        if listing.current_price_usd is not None
+        else None,
+        city=listing.city,
+        url=build_source_url(listing),
+        below_market_percent=below_percent,
+        market_avg_usd=avg,
+        source_name=source_names.get(listing.source_id, "mashina.kg"),
+        brand_name=brand_names.get(listing.brand_id) if listing.brand_id else None,
+    )
+
+
 def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
     """Проверка объявления против одного фильтра. NULL-поле фильтра = любое значение.
 
@@ -235,6 +288,7 @@ def match_new_listings(
     listings = find_new_listings(session, since, max_age_hours=max_age_hours)
     if not listings:
         return []
+    event_times = qualifying_event_times(session, since)
 
     filter_user_pairs = session.execute(
         select(UserFilter, BotUser)
@@ -317,6 +371,12 @@ def match_new_listings(
             key = (user.id, listing.id)
             if key in already_sent:
                 continue
+            # Точка отсчёта фильтра: объявления, появившиеся ДО его создания, —
+            # не новинки для этого человека, а backfill. Без этой проверки
+            # свежесозданный фильтр забирал всё окно lookback разом.
+            event_at = event_times.get(listing.id)
+            if event_at is not None and event_at < user_filter.created_at:
+                continue
             # Потолок на цикл: не фиксируем и не шлём — объявление всплывёт
             # снова в следующем цикле (в пределах bot_new_lookback_minutes).
             if max_per_user and sent_counts.get(user.id, 0) >= max_per_user:
@@ -364,24 +424,119 @@ def match_new_listings(
                 SentNotification(user_id=user.id, listing_id=listing.id, filter_id=user_filter.id)
             )
             pending.append(
-                PendingNotification(
+                _build_pending(
+                    listing,
                     chat_id=user.telegram_id,
-                    listing_id=listing.id,
                     filter_id=user_filter.id,
-                    title=listing.title,
-                    year=listing.year,
-                    mileage_km=listing.mileage_km,
-                    price_usd=float(listing.current_price_usd)
-                    if listing.current_price_usd is not None
-                    else None,
-                    city=listing.city,
-                    url=build_source_url(listing),
-                    below_market_percent=below_percent,
-                    market_avg_usd=avg,
-                    source_name=source_names.get(listing.source_id, "mashina.kg"),
-                    brand_name=brand_names.get(listing.brand_id) if listing.brand_id else None,
+                    below_percent=below_percent,
+                    avg=avg,
+                    source_names=source_names,
+                    brand_names=brand_names,
                 )
             )
 
+    session.commit()
+    return pending
+
+
+def preview_for_filter(
+    session: Session,
+    filter_id: int,
+    *,
+    limit: int = 10,
+    max_age_hours: int = 24,
+    factor: float = 0.95,
+    min_samples: int = 5,
+) -> list[PendingNotification]:
+    """Разовая подборка сразу после создания фильтра.
+
+    Нужна как противовес точке отсчёта: сама по себе она означает, что человек,
+    настроив фильтр, сидит в тишине до первой новой машины — а это могут быть
+    часы, и на триале это выглядит как «бот не работает». Поэтому показываем,
+    что уже есть на рынке за последние сутки.
+
+    Отобранное пишем в sent_notifications: иначе те же машины придут ещё раз
+    обычной рассылкой. Сортировка — по величине отставания от рынка, чтобы в
+    ограниченный лимит попало лучшее, а не случайное.
+    """
+    user_filter = session.get(UserFilter, filter_id)
+    if user_filter is None:
+        return []
+    user = session.get(BotUser, user_filter.user_id)
+    if user is None:
+        return []
+
+    published_after = utcnow() - timedelta(hours=max_age_hours)
+    query = select(Listing).where(
+        Listing.is_active.is_(True),
+        Listing.current_price_usd.is_not(None),
+        Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
+        Listing.source_created_at >= published_after,
+    )
+    if user_filter.brand_id is not None:
+        query = query.where(Listing.brand_id == user_filter.brand_id)
+    candidates = list(session.scalars(query).all())
+    if not candidates:
+        return []
+
+    already_sent = {
+        row.listing_id
+        for row in session.execute(
+            select(SentNotification.listing_id).where(SentNotification.user_id == user.id)
+        )
+    }
+    blocked = load_block_sets(session, {user.id}).get(user.id)
+    source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
+    brand_names = {row.id: row.name for row in session.execute(select(Brand.id, Brand.name))}
+
+    scored: list[tuple[float, Listing, float | None, float | None]] = []
+    for listing in candidates:
+        if listing.id in already_sent:
+            continue
+        if not filter_matches(listing, user_filter):
+            continue
+        if blocked is not None and blocked.blocks(listing):
+            continue
+
+        avg = market_average(session, listing, min_samples=min_samples)
+        below_percent: float | None = None
+        if avg is not None and avg > 0:
+            diff = round((1 - float(listing.current_price_usd) / avg) * 100, 1)
+            if diff > 0:
+                below_percent = diff
+
+        if user_filter.below_market_only:
+            if avg is None or avg <= 0:
+                continue
+            threshold = (
+                1 - user_filter.below_market_percent / 100
+                if user_filter.below_market_percent is not None
+                else factor
+            )
+            if float(listing.current_price_usd) > avg * threshold:
+                continue
+
+        # Без статистики ставим в конец: такие показываем, только если лучших
+        # не набралось — «ниже рынка» у них не доказано.
+        scored.append((below_percent if below_percent is not None else -1.0, listing, below_percent, avg))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    pending: list[PendingNotification] = []
+    for _, listing, below_percent, avg in scored[:limit]:
+        session.add(
+            SentNotification(user_id=user.id, listing_id=listing.id, filter_id=user_filter.id)
+        )
+        pending.append(
+            _build_pending(
+                listing,
+                chat_id=user.telegram_id,
+                filter_id=user_filter.id,
+                below_percent=below_percent,
+                avg=avg,
+                source_names=source_names,
+                brand_names=brand_names,
+            )
+        )
     session.commit()
     return pending

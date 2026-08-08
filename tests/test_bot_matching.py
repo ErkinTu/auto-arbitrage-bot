@@ -10,6 +10,7 @@ from app.bot.matching import (
     find_new_listings,
     market_average,
     match_new_listings,
+    preview_for_filter,
 )
 from app.db.base import Base
 from app.models import (
@@ -536,3 +537,57 @@ def test_trial_user_receives_until_trial_expires() -> None:
     _add_listing(session, external_id="1")
     pending = match_new_listings(session, since, factor=0.95, min_samples=5)
     assert [note.chat_id for note in pending] == [1]
+
+
+# --- точка отсчёта фильтра и превью -----------------------------------------
+
+
+def test_filter_does_not_backfill_listings_older_than_itself() -> None:
+    """Фильтр создан после появления объявления — это не новинка, а backfill.
+
+    Раньше новичок забирал всё окно lookback разом: на проде это ~500
+    объявлений, из которых он получал потолок за цикл и «капель» ещё часами.
+    """
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _add_listing(session, external_id="old", observed_at=_now() - timedelta(minutes=30))
+    _add_user_with_filter(session, telegram_id=42)  # фильтр появился ПОСЛЕ объявления
+
+    assert match_new_listings(session, since, factor=0.95, min_samples=5) == []
+
+
+def test_listing_after_filter_creation_still_arrives() -> None:
+    """Обратная сторона: то, что появилось после фильтра, приходить обязано."""
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _add_user_with_filter(session, telegram_id=42)
+    _add_listing(session, external_id="fresh")
+
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5)
+    assert len(pending) == 1
+
+
+def test_preview_returns_recent_matches_and_marks_them_sent() -> None:
+    """Превью показывает, что уже есть на рынке, и гасит повтор рассылкой."""
+    session = _session()
+    user_filter = _add_user_with_filter(session, telegram_id=42)
+    for index in range(3):
+        _add_listing(session, external_id=f"p{index}")
+
+    preview = preview_for_filter(session, user_filter.id, limit=10, min_samples=5)
+    assert len(preview) == 3
+    assert {note.chat_id for note in preview} == {42}
+
+    # Те же машины обычной рассылкой уже не придут.
+    since = _now() - timedelta(minutes=60)
+    assert match_new_listings(session, since, factor=0.95, min_samples=5) == []
+
+
+def test_preview_respects_the_limit() -> None:
+    session = _session()
+    user_filter = _add_user_with_filter(session, telegram_id=42)
+    for index in range(14):
+        _add_listing(session, external_id=f"many{index}")
+
+    preview = preview_for_filter(session, user_filter.id, limit=10, min_samples=5)
+    assert len(preview) == 10

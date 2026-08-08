@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.bot.matching import PendingNotification, market_average
+from app.bot.matching import preview_for_filter as _preview_for_filter
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models import (
@@ -809,3 +810,17 @@ def mark_user_blocked(telegram_id: int) -> None:
         if user is not None:
             user.is_active = False
             session.commit()
+
+
+def preview_for_filter(filter_id: int) -> list[PendingNotification]:
+    """Подборка «что уже есть» для только что созданного фильтра."""
+    settings = get_settings()
+    with SessionLocal() as session:
+        return _preview_for_filter(
+            session,
+            filter_id,
+            limit=settings.bot_filter_preview_limit,
+            max_age_hours=settings.bot_filter_preview_max_age_hours,
+            factor=settings.bot_below_avg_factor,
+            min_samples=settings.bot_below_avg_min_samples,
+        )
