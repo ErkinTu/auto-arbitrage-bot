@@ -125,22 +125,30 @@ def test_middleware_is_wired_into_bot_session(monkeypatch, patch_settings):
 # --- HTTP-сендер из worker/api ---------------------------------------------
 
 
+class FakeResponse:
+    """Минимальный ответ Bot API: сендер смотрит на status_code и тело."""
+
+    def __init__(self, status_code: int = 200, payload: dict | None = None) -> None:
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {"ok": True}
+        self.text = str(self._payload)
+
+    def json(self):
+        return self._payload
+
+
 def test_http_sender_sets_protect_content(monkeypatch, patch_settings):
     patch_settings(_settings(telegram_bot_token="token"))
     sent = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
 
     def fake_post(url, json, timeout):
         sent.update(json)
         return FakeResponse()
 
     monkeypatch.setattr("app.services.telegram.httpx.post", fake_post)
-    from app.services.telegram import send_message
+    from app.services.telegram import SendOutcome, send_message
 
-    assert send_message(777, "напоминание") is True
+    assert send_message(777, "напоминание") is SendOutcome.DELIVERED
     assert sent["protect_content"] is True
 
 
@@ -148,16 +156,90 @@ def test_http_sender_skips_protection_for_whitelisted(monkeypatch, patch_setting
     patch_settings(_settings(telegram_bot_token="token", bot_share_whitelist_ids="777"))
     sent = {}
 
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
     def fake_post(url, json, timeout):
         sent.update(json)
         return FakeResponse()
 
     monkeypatch.setattr("app.services.telegram.httpx.post", fake_post)
-    from app.services.telegram import send_message
+    from app.services.telegram import SendOutcome, send_message
 
-    assert send_message(777, "напоминание") is True
+    assert send_message(777, "напоминание") is SendOutcome.DELIVERED
     assert "protect_content" not in sent
+
+
+# --- Классификация исхода отправки ------------------------------------------
+
+
+def test_http_sender_reports_blocked_user_as_undeliverable(monkeypatch, patch_settings):
+    patch_settings(_settings(telegram_bot_token="token"))
+    monkeypatch.setattr(
+        "app.services.telegram.httpx.post",
+        lambda url, json, timeout: FakeResponse(
+            403, {"ok": False, "description": "Forbidden: bot was blocked by the user"}
+        ),
+    )
+    from app.services.telegram import SendOutcome, send_message
+
+    assert send_message(777, "текст") is SendOutcome.UNDELIVERABLE
+
+
+def test_http_sender_reports_gone_chat_as_undeliverable(monkeypatch, patch_settings):
+    """Удалённый аккаунт — это HTTP 400, а не 403; повторять бессмысленно."""
+    patch_settings(_settings(telegram_bot_token="token"))
+    monkeypatch.setattr(
+        "app.services.telegram.httpx.post",
+        lambda url, json, timeout: FakeResponse(
+            400, {"ok": False, "description": "Bad Request: chat not found"}
+        ),
+    )
+    from app.services.telegram import SendOutcome, send_message
+
+    assert send_message(777, "текст") is SendOutcome.UNDELIVERABLE
+
+
+def test_http_sender_retries_once_on_429(monkeypatch, patch_settings):
+    patch_settings(_settings(telegram_bot_token="token"))
+    calls = []
+    monkeypatch.setattr("app.services.telegram.time.sleep", lambda _: None)
+
+    def fake_post(url, json, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            return FakeResponse(
+                429, {"ok": False, "description": "Too Many Requests", "parameters": {"retry_after": 1}}
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr("app.services.telegram.httpx.post", fake_post)
+    from app.services.telegram import SendOutcome, send_message
+
+    assert send_message(777, "текст") is SendOutcome.DELIVERED
+    assert len(calls) == 2
+
+
+def test_http_sender_defers_when_retry_after_is_too_long(monkeypatch, patch_settings):
+    """Долгий бан не выстаиваем в worker-е: цикл вернётся через минуту сам."""
+    patch_settings(_settings(telegram_bot_token="token"))
+    monkeypatch.setattr(
+        "app.services.telegram.httpx.post",
+        lambda url, json, timeout: FakeResponse(
+            429, {"ok": False, "description": "Too Many Requests", "parameters": {"retry_after": 300}}
+        ),
+    )
+    from app.services.telegram import SendOutcome, send_message
+
+    assert send_message(777, "текст") is SendOutcome.FAILED
+
+
+def test_http_sender_reports_our_own_bad_request_as_failed(monkeypatch, patch_settings):
+    """Битая разметка — не «адресата нет»: одноразовое сообщение не гасим."""
+    patch_settings(_settings(telegram_bot_token="token"))
+    monkeypatch.setattr(
+        "app.services.telegram.httpx.post",
+        lambda url, json, timeout: FakeResponse(
+            400, {"ok": False, "description": "Bad Request: can't parse entities"}
+        ),
+    )
+    from app.services.telegram import SendOutcome, send_message
+
+    assert send_message(777, "текст") is SendOutcome.FAILED

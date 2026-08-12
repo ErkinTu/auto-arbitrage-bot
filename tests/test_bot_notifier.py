@@ -1,6 +1,6 @@
 import asyncio
 
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from app.bot.matching import PendingNotification
 from app.bot.messages import format_filter_line, format_notification
@@ -147,6 +147,68 @@ def test_send_notifications_blocked_user_calls_on_blocked() -> None:
     assert sent == 1
     assert blocked_ids == [7]
     assert [chat_id for chat_id, _ in bot.messages] == [8]
+
+
+def test_send_notifications_deactivates_gone_chat() -> None:
+    """Удалённый аккаунт отдаёт BadRequest, а не Forbidden — тоже деактивируем.
+
+    Без этого бот долбился бы в мёртвый чат каждый цикл вечно: на проде один
+    такой пользователь давал ~600 неудачных отправок в сутки.
+    """
+    bot = FakeBot(
+        errors=[TelegramBadRequest(method=None, message="Bad Request: chat not found")]
+    )
+    blocked_ids: list[int] = []
+
+    async def on_blocked(chat_id: int) -> None:
+        blocked_ids.append(chat_id)
+
+    pending = [_note(chat_id=7), _note(chat_id=8, listing_id=2)]
+    sent = asyncio.run(send_notifications(bot, pending, on_blocked=on_blocked))
+    assert sent == 1
+    assert blocked_ids == [7]
+    assert [chat_id for chat_id, _ in bot.messages] == [8]
+
+
+def test_send_notifications_keeps_user_on_our_own_bad_request() -> None:
+    """Битая разметка — наш баг, а не мёртвый чат: пользователя не трогаем.
+
+    Иначе одна ошибка форматирования молча отписала бы всю базу.
+    """
+    bot = FakeBot(
+        errors=[TelegramBadRequest(method=None, message="Bad Request: can't parse entities")]
+    )
+    blocked_ids: list[int] = []
+
+    async def on_blocked(chat_id: int) -> None:
+        blocked_ids.append(chat_id)
+
+    pending = [_note(chat_id=7), _note(chat_id=8, listing_id=2)]
+    sent = asyncio.run(send_notifications(bot, pending, on_blocked=on_blocked))
+    assert sent == 1
+    assert blocked_ids == []
+
+
+def test_send_notifications_skips_rest_of_cycle_for_gone_chat() -> None:
+    """Отвалившемуся чату не шлём остаток уже собранной очереди.
+
+    Очередь строится до отправки, поэтому иначе мы бы отстояли паузу
+    PER_CHAT_DELAY_SECONDS перед каждой оставшейся отправкой в пустоту.
+    """
+    bot = FakeBot(
+        errors=[TelegramBadRequest(method=None, message="Bad Request: chat not found")]
+    )
+    blocked_ids: list[int] = []
+
+    async def on_blocked(chat_id: int) -> None:
+        blocked_ids.append(chat_id)
+
+    pending = [_note(chat_id=7, listing_id=n) for n in range(1, 4)]
+    sent = asyncio.run(send_notifications(bot, pending, on_blocked=on_blocked))
+    assert sent == 0
+    assert bot.messages == []
+    # Ровно одна попытка и ровно одна деактивация, а не три.
+    assert blocked_ids == [7]
 
 
 def test_send_notifications_retry_after() -> None:

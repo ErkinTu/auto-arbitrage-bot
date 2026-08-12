@@ -18,6 +18,7 @@ import app.worker as worker
 from app.db.base import Base
 from app.models import BotUser, UserEvent
 from app.services.events import EVENT_START, EVENT_TRIAL_EXPIRED, EVENT_TRIAL_STARTED
+from app.services.telegram import SendOutcome
 from app.services.referral import (
     attach_referrer,
     ensure_invite_code,
@@ -172,7 +173,11 @@ def test_worker_sends_paywall_notice_exactly_once(sessions, monkeypatch) -> None
     monkeypatch.setattr(worker, "SessionLocal", sessions)
     monkeypatch.setattr(worker, "get_settings", lambda: _settings())
     sent: list[tuple[int, str]] = []
-    monkeypatch.setattr(worker, "send_message", lambda cid, text: (sent.append((cid, text)) or True))
+    monkeypatch.setattr(
+        worker,
+        "send_message",
+        lambda cid, text: (sent.append((cid, text)), SendOutcome.DELIVERED)[1],
+    )
 
     now = _now()
     with sessions() as s:
@@ -201,7 +206,11 @@ def test_paywall_does_not_send_to_subscribe_while_payments_are_being_tested(
         worker, "get_settings", lambda: _settings(subscription_testing=True)
     )
     sent: list[tuple[int, str]] = []
-    monkeypatch.setattr(worker, "send_message", lambda cid, text: (sent.append((cid, text)) or True))
+    monkeypatch.setattr(
+        worker,
+        "send_message",
+        lambda cid, text: (sent.append((cid, text)), SendOutcome.DELIVERED)[1],
+    )
 
     now = _now()
     with sessions() as s:
@@ -214,25 +223,55 @@ def test_paywall_does_not_send_to_subscribe_while_payments_are_being_tested(
     assert "вручную" in sent[0][1]
 
 
-def test_paywall_notice_marked_even_if_delivery_failed(sessions, monkeypatch) -> None:
+def test_paywall_notice_marked_when_user_is_unreachable(sessions, monkeypatch) -> None:
     """Заблокировавший бота не должен получать попытку каждую минуту."""
     monkeypatch.setattr(worker, "SessionLocal", sessions)
     monkeypatch.setattr(worker, "get_settings", lambda: _settings())
-    monkeypatch.setattr(worker, "send_message", lambda cid, text: False)
+    monkeypatch.setattr(worker, "send_message", lambda cid, text: SendOutcome.UNDELIVERABLE)
     now = _now()
     with sessions() as s:
         _add_user(s, 1, access_status="trial", trial_started_at=now - timedelta(days=4),
                   trial_expires_at=now - timedelta(hours=2))
         s.commit()
 
-    assert worker.send_trial_paywall_notices() == 1
+    # Доставки не было (в счётчике 0), но повторять некому — флаг проставлен.
     assert worker.send_trial_paywall_notices() == 0
+    with sessions() as s:
+        user = s.scalar(select(BotUser).where(BotUser.telegram_id == 1))
+        assert user.trial_expired_notified_at is not None
+        assert user.access_status == "revoked"
+
+
+def test_paywall_notice_is_retried_after_temporary_failure(sessions, monkeypatch) -> None:
+    """429/сеть не должны сжигать единственное сообщение человека.
+
+    Флаг разовости ставится навсегда, поэтому пометить его при временной
+    ошибке — значит оставить юзера без объяснения, почему пуши прекратились.
+    """
+    monkeypatch.setattr(worker, "SessionLocal", sessions)
+    monkeypatch.setattr(worker, "get_settings", lambda: _settings())
+    monkeypatch.setattr(worker, "send_message", lambda cid, text: SendOutcome.FAILED)
+    now = _now()
+    with sessions() as s:
+        _add_user(s, 1, access_status="trial", trial_started_at=now - timedelta(days=4),
+                  trial_expires_at=now - timedelta(hours=2))
+        s.commit()
+
+    assert worker.send_trial_paywall_notices() == 0
+    with sessions() as s:
+        user = s.scalar(select(BotUser).where(BotUser.telegram_id == 1))
+        assert user.trial_expired_notified_at is None
+        assert s.scalars(select(UserEvent.event)).all() == []
+
+    # Связь восстановилась — сообщение всё-таки уходит.
+    monkeypatch.setattr(worker, "send_message", lambda cid, text: SendOutcome.DELIVERED)
+    assert worker.send_trial_paywall_notices() == 1
 
 
 def test_paywall_skipped_when_trial_disabled(sessions, monkeypatch) -> None:
     monkeypatch.setattr(worker, "SessionLocal", sessions)
     monkeypatch.setattr(worker, "get_settings", lambda: _settings(trial_enabled=False))
-    monkeypatch.setattr(worker, "send_message", lambda cid, text: True)
+    monkeypatch.setattr(worker, "send_message", lambda cid, text: SendOutcome.DELIVERED)
     assert worker.send_trial_paywall_notices() == 0
 
 

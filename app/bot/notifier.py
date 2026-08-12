@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Protocol
 
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from app.bot.keyboards import block_menu_kb
 from app.bot.matching import PendingNotification
@@ -25,6 +25,25 @@ PER_CHAT_DELAY_SECONDS = 1.05  # чуть больше лимита 1 сообщ
 # Потолок позиций в одном сгруппированном сообщении: у Telegram лимит 4096
 # символов на сообщение, строка занимает ~120. Сверх — следующим сообщением.
 DIGEST_MAX_ITEMS = 10
+# Тексты Bot API, означающие «чата больше нет»: удалённый аккаунт, кик из
+# группы. Прилетают как TelegramBadRequest, а не TelegramForbiddenError, и
+# сами по себе не повторяемы — адресата больше не существует.
+#
+# Сверяем именно по тексту, а не ловим TelegramBadRequest целиком: под то же
+# исключение попадают НАШИ баги (битая разметка, сообщение длиннее 4096), и
+# деактивация по ним молча отписала бы всю базу от одной ошибки форматирования.
+GONE_CHAT_MARKERS = (
+    "chat not found",
+    "user is deactivated",
+    "bot was kicked",
+    "peer_id_invalid",
+)
+
+
+def is_gone_chat(error: TelegramBadRequest) -> bool:
+    """Мёртвый ли адресат (в отличие от нашей же ошибки в запросе)."""
+    text = str(error).lower()
+    return any(marker in text for marker in GONE_CHAT_MARKERS)
 
 
 @dataclass(slots=True)
@@ -118,8 +137,14 @@ async def send_notifications(
     """
     sent = 0
     last_sent_per_chat: dict[int, float] = {}
+    # Чаты, отвалившиеся прямо в этом цикле: очередь собрана заранее, и без
+    # этого мы бы честно отстояли PER_CHAT_DELAY_SECONDS перед каждой из
+    # оставшихся отправок в пустоту (до max_per_user штук на чат).
+    gone_chats: set[int] = set()
 
     for message in build_outgoing(pending, group_min=group_min):
+        if message.chat_id in gone_chats:
+            continue
         elapsed = time.monotonic() - last_sent_per_chat.get(message.chat_id, 0.0)
         if elapsed < PER_CHAT_DELAY_SECONDS:
             await asyncio.sleep(PER_CHAT_DELAY_SECONDS - elapsed)
@@ -139,8 +164,22 @@ async def send_notifications(
             last_sent_per_chat[message.chat_id] = time.monotonic()
         except TelegramForbiddenError:
             logger.info("user %s blocked the bot", message.chat_id)
+            gone_chats.add(message.chat_id)
             if on_blocked is not None:
                 await on_blocked(message.chat_id)
+        except TelegramBadRequest as exc:
+            if not is_gone_chat(exc):
+                # Наш собственный баг в запросе — деактивировать нельзя.
+                logger.exception(
+                    "bad request sending to %s (listing %s)",
+                    message.chat_id,
+                    message.listing_id,
+                )
+            else:
+                logger.info("chat %s is gone (%s)", message.chat_id, exc)
+                gone_chats.add(message.chat_id)
+                if on_blocked is not None:
+                    await on_blocked(message.chat_id)
         except Exception:
             logger.exception(
                 "failed to send notification to %s (listing %s)",

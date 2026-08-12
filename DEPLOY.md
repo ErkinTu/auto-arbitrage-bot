@@ -87,19 +87,15 @@ curl http://127.0.0.1:8000/health
 ```bash
 # выполняется в ЛОКАЛЬНОМ терминале
 
-# БОЕВОЙ сервер (чужой аккаунт, сервер друга) — пока сюда:
-KEY=~/Desktop/aws/LightsailDefaultKey-eu-central-1.pem
-SRV=ubuntu@63.180.133.249
-
-# новый сервер на своём аккаунте (переезд в процессе, см. MIGRATION.md):
-# KEY=~/Desktop/aws/car-analytics-prod-key.pem
-# SRV=ubuntu@63.182.28.250
+# БОЕВОЙ сервер (свой аккаунт 279341437912, прод с 08.08.2026):
+KEY=~/Desktop/aws/car-analytics-prod-key.pem
+SRV=ubuntu@63.182.28.250
 
 cd ~/Desktop/myskupka/car-analytics-mvp
 ```
 
-После переключения прода на новый сервер — раскомментировать вторую пару и
-удалить первую (и здесь, и в разделе обновления ниже).
+Старый сервер (`ubuntu@63.180.133.249`, ключ `LightsailDefaultKey-eu-central-1.pem`,
+чужой аккаунт) остановлен и держится только как путь отката — см. `MIGRATION.md`.
 
 ### 1. Docker на сервере (один раз)
 
@@ -194,9 +190,8 @@ docker compose logs -f bot               # Ctrl+C для выхода
 
 ```bash
 # локально, из папки проекта
-KEY=~/Desktop/aws/LightsailDefaultKey-eu-central-1.pem   # боевой (сервер друга)
-SRV=ubuntu@63.180.133.249
-# новый сервер: KEY=~/Desktop/aws/car-analytics-prod-key.pem; SRV=ubuntu@63.182.28.250
+KEY=~/Desktop/aws/car-analytics-prod-key.pem   # боевой (свой аккаунт)
+SRV=ubuntu@63.182.28.250
 
 rsync -av -e "ssh -i $KEY" \
   --exclude '.env' --exclude '.venv' --exclude '.git' --exclude 'backups' \
@@ -288,10 +283,9 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
 
 Чек-лист включения на проде:
 
-1. **Домен** → A-запись на IP того сервера, где реально поднимаешь оплату.
-   Оплата не запускалась ни на одном, а прод переезжает — значит это **новый
-   сервер, `63.182.28.250`** (старый: `63.180.133.249`). Открыть в firewall
-   Lightsail порты 80 и 443 (нужны Let's Encrypt) — на новом сервере они закрыты.
+1. **Домен** → A-запись на боевой сервер, **`63.182.28.250`**. Открыть в
+   firewall Lightsail порты 80 и 443 (нужны Let's Encrypt) — сейчас на сервере
+   открыт только 22.
 2. **Аккаунт Finik**: корпоративный счёт (ИП — онлайн-идентификация в приложении
    Finik; организация — через их представителей). На выходе нужен `accountId`.
 3. **Ключи** (генерировать локально, приватный на сервер не по git):
@@ -451,7 +445,7 @@ docker compose exec -T worker uv run python -m app.cli grant-subscription \
   ```
   Проверка снаружи (с локальной машины) — должно быть refused/timeout:
   ```bash
-  curl -m 5 http://63.180.133.249:8000/health    # старый; новый — 63.182.28.250
+  curl -m 5 http://63.182.28.250:8000/health
   ```
 - Бот и worker к API **не обращаются** — работают с БД по внутренней сети
   Docker (`postgres:5432`), поэтому закрытый наружу API их не затрагивает.

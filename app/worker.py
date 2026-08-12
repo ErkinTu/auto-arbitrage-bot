@@ -32,7 +32,7 @@ from app.db.session import SessionLocal, init_db
 from app.bot.messages import trial_paywall_text
 from app.models import BotUser, ParserRun, Payment
 from app.services.events import EVENT_TRIAL_EXPIRED, log_event
-from app.services.telegram import send_message
+from app.services.telegram import SendOutcome, send_message
 from app.services.trial import paywall_candidates
 from app.parsers.mashina import MashinaParser
 from app.services.catalog_service import seed_default_catalog
@@ -228,8 +228,13 @@ def send_renewal_reminders_if_due(last_run_date: date | None) -> date | None:
             )
         ).all()
         for user in users:
-            if send_message(user.telegram_id, _reminder_text(user.subscription_expires_at)):
+            outcome = send_message(user.telegram_id, _reminder_text(user.subscription_expires_at))
+            # UNDELIVERABLE тоже закрываем флагом: адресата больше нет, и без
+            # этого мы бы дёргали заблокировавшего бота каждый день до конца
+            # его подписки. Повторяем только то, что реально стоит повторить.
+            if outcome is not SendOutcome.FAILED:
                 user.renewal_reminded_at = now
+            if outcome is SendOutcome.DELIVERED:
                 reminded += 1
         session.commit()
     if reminded:
@@ -243,8 +248,11 @@ def send_trial_paywall_notices() -> int:
     Сами уведомления об объявлениях прекращаются автоматически (matching.py
     выбирает только активный доступ) — здесь только объясняем человеку, что
     произошло, и зовём оплатить. Строго один раз на пользователя:
-    `trial_expired_notified_at` выставляется даже при неудачной отправке
-    (заблокировал бота) — иначе бот пытался бы каждый цикл.
+    `trial_expired_notified_at` выставляется и когда доставить не удалось —
+    но только если адресата больше нет (заблокировал, удалился), иначе бот
+    пытался бы каждый цикл. А вот на 429/сеть флаг НЕ ставим: сообщение одно
+    на всю жизнь юзера, и сжечь его на временной ошибке — значит навсегда
+    оставить человека без объяснения, почему пуши прекратились.
 
     Не «раз в сутки», а каждый цикл worker-а: у каждого юзера свой день
     окончания триала, и день ожидания сообщения — это потерянная конверсия.
@@ -260,18 +268,30 @@ def send_trial_paywall_notices() -> int:
     text = trial_paywall_text(price, settings.subscription_period_days, payments_open)
     now = utcnow()
     sent = 0
+    deferred = 0
     with SessionLocal() as session:
         for user in paywall_candidates(session, now):
-            delivered = send_message(user.telegram_id, text)
+            outcome = send_message(user.telegram_id, text)
+            if outcome is SendOutcome.FAILED:
+                # Ничего не трогаем: юзер остаётся кандидатом и получит своё
+                # сообщение следующим циклом (worker крутится раз в минуту).
+                deferred += 1
+                continue
             user.trial_expired_notified_at = now
-            log_event(session, user.id, EVENT_TRIAL_EXPIRED, {"delivered": delivered})
+            log_event(
+                session,
+                user.id,
+                EVENT_TRIAL_EXPIRED,
+                {"delivered": outcome is SendOutcome.DELIVERED},
+            )
             if user.access_status == "trial":
                 # Держим статус честным для метрик, даже если юзер молчит.
                 user.access_status = "revoked"
-            sent += 1
+            if outcome is SendOutcome.DELIVERED:
+                sent += 1
         session.commit()
-    if sent:
-        logger.info("trial paywall notices sent: %s", sent)
+    if sent or deferred:
+        logger.info("trial paywall notices: %s sent, %s deferred", sent, deferred)
     return sent
 
 
