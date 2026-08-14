@@ -448,7 +448,7 @@ ECharts уже подключён (`UiChart`). Правила: высота фи
 | 7 | `/admin/listings` + `/admin/listings/{id}` + экраны | 3, 5 | **сделано** 14.08 |
 | 8 | `/admin/overview`, `/admin/stats/funnel`, `/admin/ops/parser-runs` + главная | 3, 5 | **сделано** 14.08 |
 | 9а | `mileage_km` в `/market/vehicle-summary` (общий код с `/estimate`) | 0 | **сделано** 14.08 |
-| 9б | Шаг пробега в FSM, перенос `/market`, полировка на реальном телефоне | 5, 9а | |
+| 9б | Шаг пробега в FSM, перенос `/market` | 5, 9а | **сделано** 15.08 |
 | 10 | Caddy: `ADMIN_DOMAIN`, DNS, деплой статики, разделы в `DEPLOY.md` | 3 | |
 | 11 | Починка N+1 в `services/dashboard.py` | 8 | |
 
