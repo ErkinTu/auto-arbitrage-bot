@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin.auth import router as admin_auth_router
+from app.api.admin.users import router as admin_users_router
 from app.api.catalog import router as catalog_router
 from app.api.dashboard import router as dashboard_router
 from app.api.market import router as market_router
@@ -47,6 +48,7 @@ app.include_router(payments_router)
 # — 404, а не «есть, но с гейтом». Меньше поверхности там, где она не нужна.
 if settings.admin_panel_enabled:
     app.include_router(admin_auth_router)
+    app.include_router(admin_users_router)
 
 
 @app.get("/health", tags=["system"])

@@ -223,8 +223,8 @@ POST /api/v1/admin/auth/logout             → 204
 |---|---|
 | `GET /admin/listings` | Фильтры: source, brand_id, model_id, year_from/to, price_from/to, city, is_active, analytics_eligible, normalization_status, поиск по title. Сортировка: last_seen_at / first_seen_at / price. Пагинация |
 | `GET /admin/listings/{id}` | Все поля + `listing_price_history` + `listing_status_history` + quality_flags; raw payload — по явному флагу запроса |
-| `GET /admin/users` | telegram_id, username, access_status, trial_expires_at, subscription_expires_at, число фильтров/блоков/платежей, последняя активность. Фильтр по статусу, поиск по id/username |
-| `GET /admin/users/{id}` | Карточка: **чем именно** даётся доступ (группа / подписка / триал — через `bot/db.py::decide_access_status`, без дёрганья Telegram), фильтры, чёрный список, платежи, события воронки, рефералы, число отправленных пушей |
+| `GET /admin/users` | **сделано.** telegram_id, username, access_status, релевантный срок, число фильтров/блоков/платежей, последняя активность. Фильтр по статусу, поиск по id/username/имени. Плюс `status_counts` — числа для чипов одним GROUP BY, чтобы фронт не ходил четырьмя запросами. Сортировка по возрастанию срока с NULLS LAST: члены группы без срока иначе вытеснили бы тех, ради кого список и нужен. Счётчики — коррелированными подзапросами, а не джойнами: четыре джойна перемножили бы строки («3 фильтра» × «2 платежа») |
+| `GET /admin/users/{id}` | **сделано.** Карточка: все три источника доступа сразу (группа / подписка / триал) со свежестью проверки `last_access_check_at` — Telegram не дёргаем, показываем сохранённое ботом решение и время его принятия. Фильтры печатаются `bot/messages.py::format_filter_line` — тем же кодом, что видит пользователь: иначе разговор о фильтре превращается в сверку двух формулировок. Плюс чёрный список, платежи, события воронки, рефералка, счётчик пушей |
 | `GET /admin/stats/funnel?days=30` | Воронка `start → trial_started → trial_expired → payment_created → paid`. Логику вынести из `cli.py` в сервис, CLI переключить на него же |
 | `GET /admin/ops/parser-runs` | Последние прогоны по источникам: mode, статус, счётчики, ошибка. Ответ на «почему нет новых объявлений» |
 | `GET /admin/overview` | Плитки главной: сводка базы + активные юзеры по статусам + свежесть последнего прогона |
@@ -444,7 +444,7 @@ ECharts уже подключён (`UiChart`). Правила: высота фи
 | 3 | `/admin/auth/*` + `current_admin` + сессии в БД + тесты гейта | 1 | **сделано** 14.08 |
 | 4 | `AppShell` (таб-бар/сайдбар), токены статусов, `UiListRow`/`UiSheet`/`UiBadge` | — | **сделано** 14.08 |
 | 5 | `/login` и guard на фронте | 3, 4 | **сделано** 14.08 |
-| 6 | `/admin/users` + `/admin/users/{id}` + экраны | 3, 5 | |
+| 6 | `/admin/users` + `/admin/users/{id}` + экраны | 3, 5 | **сделано** 14.08 |
 | 7 | `/admin/listings` + `/admin/listings/{id}` + экраны | 3, 5 | |
 | 8 | `/admin/overview`, `/admin/stats/funnel`, `/admin/ops/parser-runs` + главная | 3, 5 | |
 | 9а | `mileage_km` в `/market/vehicle-summary` (общий код с `/estimate`) | 0 | **сделано** 14.08 |
