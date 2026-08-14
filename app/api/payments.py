@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/payments", tags=["payments"])
 
 
+# Успешный статус в webhook. Доки Finik обещают "success", боевой Finik прислал
+# "succeeded" (первая реальная оплата 14.08.2026, order edc0249b — деньги ушли,
+# подписка не открылась). Держим оба: сравнение в нижнем регистре, потому что
+# регистр они тоже не гарантируют.
+SUCCESS_STATUSES = frozenset({"success", "succeeded"})
+
+
 def _ok(description: str) -> Response:
     return JSONResponse({"status": "ok", "description": description})
 
@@ -86,7 +93,7 @@ async def finik_webhook(
     if payment.status == "paid":  # идемпотентность: Finik ретраит доставку
         return _ok("already processed")
 
-    if str(payload.get("status", "")).lower() != "success":
+    if str(payload.get("status", "")).lower() not in SUCCESS_STATUSES:
         # По докам webhook приходит только на успех; всё прочее — не наш случай.
         logger.warning(
             "finik webhook: non-success status %r for order %s", payload.get("status"), order_id

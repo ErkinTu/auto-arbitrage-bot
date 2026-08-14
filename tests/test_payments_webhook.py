@@ -177,6 +177,24 @@ def test_webhook_status_check_is_case_insensitive() -> None:
         app.dependency_overrides.clear()
 
 
+def test_webhook_accepts_succeeded_status() -> None:
+    """Регрессия: доки Finik обещают "success", боевой Finik шлёт "succeeded".
+
+    На этом отвалилась первая реальная оплата 14.08.2026: webhook пришёл, подпись
+    сошлась, а платёж был отброшен как «не успех» — и ретраев не будет, мы же
+    ответили 200.
+    """
+    client, SessionMaker = _client()
+    try:
+        _, order_id = _seed_pending_payment(SessionMaker)
+        raw, headers = _signed_webhook(order_id, status="succeeded")
+        assert client.post(WEBHOOK_URL, content=raw, headers=headers).status_code == 200
+        with SessionMaker() as session:
+            assert session.get(Payment, 1).status == "paid"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_webhook_is_idempotent() -> None:
     client, SessionMaker = _client()
     try:
