@@ -214,6 +214,80 @@ class AdminUserDetail(BaseModel):
     notifications: AdminUserNotifications
 
 
+class AdminListingItem(BaseModel):
+    id: int
+    title: str
+    price_usd: float | None
+    year: int | None
+    mileage_km: int | None
+    city: str | None
+    source: str
+    is_active: bool
+    analytics_eligible: bool
+    quality_flags: list[str]
+    last_seen_at: datetime | None
+    deactivated_at: datetime | None
+
+
+class AdminListingPage(BaseModel):
+    items: list[AdminListingItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class AdminPricePoint(BaseModel):
+    observed_at: datetime | None
+    price_usd: float | None
+    event_type: str
+
+
+class AdminStatusPoint(BaseModel):
+    observed_at: datetime | None
+    event_type: str
+    old_status: str | None
+    new_status: str | None
+    details: dict | None
+
+
+class AdminListingDetail(BaseModel):
+    id: int
+    title: str
+    raw_title: str | None
+    brand: str | None
+    model: str | None
+    generation: str | None
+    source: str
+    external_id: str
+    source_url: str
+    image_url: str | None
+    price_usd: float | None
+    price_currency: str | None
+    market_average_usd: float | None
+    deviation_percent: float | None
+    year: int | None
+    mileage_km: int | None
+    city: str | None
+    body_type: str | None
+    engine_volume: float | None
+    fuel_type: str | None
+    gearbox: str | None
+    drive_type: str | None
+    customs_status: str
+    seller_type: str | None
+    is_active: bool
+    status: str
+    analytics_eligible: bool
+    normalization_status: str
+    quality_flags: list[str]
+    source_created_at: datetime | None
+    first_seen_at: datetime | None
+    last_seen_at: datetime | None
+    deactivated_at: datetime | None
+    price_history: list[AdminPricePoint]
+    status_history: list[AdminStatusPoint]
+
+
 class MileageInfo(BaseModel):
     """Что сделали с пробегом: без него честнее показать «поправки не было»."""
 
