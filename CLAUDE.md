@@ -260,6 +260,7 @@ AWS Lightsail, проект в `/home/ubuntu/car-analytics`, docker без sudo.
 | `docs/DB_SCHEMA_FOR_GPT.md` | Схема БД (таблицы/связи) для генерации запросов |
 | `docs/DB_QUERIES.md` | Готовые SQL-запросы |
 | `docs/FRONTEND_TZ.md` | Тех.задание фронта (`../analytics-front`) |
+| `docs/ADMIN_PANEL_PLAN.md` | **План:** фронт → mobile-first админка (вход через бота, админ-API, Caddy, дизайн) |
 | `docs/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `docs/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `web-sdk-flow.png`, что нужно завести |
