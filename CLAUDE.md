@@ -26,9 +26,11 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 
 - **Бот читает БД напрямую** (`app/bot/db.py`, `SessionLocal`), НЕ через HTTP
   API. Поэтому API боту не нужен и закрыт наружу.
-- **API без аутентификации.** Порты `api:8000` и `postgres:5432` публикуются
-  только на `127.0.0.1` (через `API_HOST`/`POSTGRES_HOST`, дефолт localhost).
-  Наружу открывать нельзя без reverse-proxy+auth. См. `DEPLOY.md`.
+- **Публичная часть API без аутентификации** (оценка, каталог, дашборд —
+  гейта нет; он есть только у `admin/*`, см. ниже). Порты `api:8000` и
+  `postgres:5432` публикуются только на `127.0.0.1` (через
+  `API_HOST`/`POSTGRES_HOST`, дефолт localhost). Наружу открывать нельзя без
+  reverse-proxy+auth. См. `DEPLOY.md`.
 - **Время.** Контейнеры в UTC; всё расписание код считает сам по
   `SCHEDULER_TIMEZONE` (`Asia/Bishkek`). Контейнерный TZ не трогать.
 - **Расписание встроено в сервисы**, cron не нужен (кроме бэкапов).
@@ -165,22 +167,45 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   `bot/matching.py::market_average` агрегирует ВСЕ бакеты модель+года (bucket
   `unknown` у lalafo ~43% и сам по себе не набирает `min_samples`).
 
+- **Админ-панель — есть в коде, но НЕ в проде** (ветка `dev-admin-panel`, в
+  `dev`/`main` не влита, на сервер не выкладывалась). Отдельный контур
+  `/api/v1/admin/*` (`api/admin/`, `services/admin_*.py`) со **строго
+  read-only** ручками: пишут только вход и выход самого админа, менять данные
+  из панели нечем. Вход: `/admin` в боте → одноразовая ссылка (5 мин, sha256 в
+  `admin_login_tokens`) → сессия в httpOnly-куке на 12 ч (`admin_sessions`).
+  Не JWT: сессию надо уметь отзывать, а секрет в окружении не нужен. Роль —
+  `bot_users.is_superuser`, выдаётся **только SQL** (`docs/ADMIN.md`).
+  **Выключатель — пустой `ADMIN_PANEL_URL`**: роутеры не подключаются вовсе
+  (404, а не 401), `/admin` в боте молчит даже админу. На проде он пустой и
+  таким остаётся: решение владельца от 15.08.2026 — панель не должна никак
+  задевать пользователей, публичного адреса у неё нет, смотрят через
+  SSH-туннель. Детали — `docs/ADMIN_PANEL_PLAN.md`, runbook — `DEPLOY.md`.
+
 ## Раскладка кода (`app/`)
 
 - `main.py` — FastAPI-приложение, CORS, роутеры. `cli.py` — все ручные команды.
 - `worker.py` — планировщик full-scan/rebuild. `core/config.py` — все настройки (env).
 - `api/` — роутеры: `routes.py` (estimate/price-trend), `dashboard.py`,
-  `catalog.py`, `market.py`, `payments.py` (webhook Finik — см. выше).
+  `catalog.py`, `market.py` (vehicle-summary, принимает `mileage_km`),
+  `payments.py` (webhook Finik — см. выше). `api/admin/` — панель:
+  `deps.py::current_admin` (единая точка гейта; объявляется на роутере, чтобы
+  ручку нельзя было завести незащищённой), `auth.py`, `users.py`,
+  `listings.py`, `overview.py`.
 - `services/` — логика: `blocklist.py` (чёрный список), `sync.py` (обход источника), `normalizer.py` +
   `catalog_service.py` + `catalog.py` (нормализация моделей/алиасы),
-  `analytics.py`, `stats.py` (агрегаты), `dashboard.py`, `finik.py` +
+  `analytics.py` (в т.ч. `select_by_mileage` — общая оценка с поправкой на
+  пробег для `/estimate` и `/market/vehicle-summary`), `stats.py` (агрегаты),
+  `dashboard.py` (медианы считает Postgres, не Python), `funnel.py` (воронка;
+  общая для `cli.py funnel` и панели), `admin_auth.py` + `admin_users.py` +
+  `admin_listings.py` + `admin_overview.py` (панель), `finik.py` +
   `subscription.py` (подписка), `trial.py` + `referral.py` + `events.py`
   (триал, рефералка, журнал воронки), `telegram.py` (sync sendMessage из
   worker/api).
 - `bot/` — aiogram: `poller.py` (fresh-циклы), `handlers.py`, `notifier.py`,
   `db.py` (прямой доступ к БД), `access.py` (проверка членства в группе).
 - `models/entities.py` — ORM-модели (в т.ч. `UserEvent` — журнал воронки,
-  `UserBlock` — чёрный список).
+  `UserBlock` — чёрный список, `AdminLoginToken` + `AdminSession` — вход в
+  панель, оба хранят sha256, а не сам токен).
   `parsers/mashina.py` — адаптер источника.
 
 ## Запуск и команды
@@ -260,7 +285,7 @@ AWS Lightsail, проект в `/home/ubuntu/car-analytics`, docker без sudo.
 | `docs/DB_SCHEMA_FOR_GPT.md` | Схема БД (таблицы/связи) для генерации запросов |
 | `docs/DB_QUERIES.md` | Готовые SQL-запросы |
 | `docs/FRONTEND_TZ.md` | Тех.задание фронта (`../analytics-front`) |
-| `docs/ADMIN_PANEL_PLAN.md` | **План:** фронт → mobile-first админка (вход через бота, админ-API, Caddy, дизайн) |
+| `docs/ADMIN_PANEL_PLAN.md` | Админ-панель: что сделано и как работает (§0), аудит, решения, что осталось. **Итерация 1 готова, в проде её нет** |
 | `docs/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `docs/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `web-sdk-flow.png`, что нужно завести |
