@@ -325,49 +325,35 @@ def command_funnel(args: argparse.Namespace) -> None:
     from app.models import BotUser, UserEvent
     from app.services.events import (
         EVENT_PAID,
-        EVENT_PAYMENT_CREATED,
         EVENT_START,
         EVENT_TRIAL_EXPIRED,
         EVENT_TRIAL_STARTED,
         FUNNEL_EVENTS,
     )
+    from app.services.funnel import funnel_steps
     from app.services.subscription import is_subscription_active
     from app.services.trial import is_trial_active
 
     since = utcnow() - timedelta(days=args.days)
-    titles = {
-        EVENT_START: "Стартовали бота",
-        EVENT_TRIAL_STARTED: "Активировали триал",
-        EVENT_TRIAL_EXPIRED: "Дошли до пейвола",
-        EVENT_PAYMENT_CREATED: "Начали оплату",
-        EVENT_PAID: "Оплатили",
-    }
 
     with SessionLocal() as session:
-        # Уникальные пользователи на каждом шаге: человек, нажавший «оплатить»
-        # трижды, — это один человек, а не три.
-        counts = {
-            event: session.scalar(
-                select(func.count(func.distinct(UserEvent.user_id))).where(
-                    UserEvent.event == event, UserEvent.created_at >= since
-                )
-            )
-            or 0
-            for event in FUNNEL_EVENTS
-        }
+        # Считает services/funnel.py — тем же кодом, что и админ-панель.
+        steps = funnel_steps(session, days=args.days)
 
         print(f"Воронка за последние {args.days} дн. (с {since:%Y-%m-%d %H:%M} UTC)")
         print("-" * 52)
-        base = counts[EVENT_START]
-        previous = None
-        for event in FUNNEL_EVENTS:
-            value = counts[event]
-            of_start = f"{value / base * 100:5.1f}% от стартов" if base else "     —"
-            step = ""
-            if previous is not None and previous > 0:
-                step = f", {value / previous * 100:5.1f}% от пред."
-            print(f"{titles[event]:<22} {value:>6}   {of_start}{step}")
-            previous = value
+        for step in steps:
+            of_start = (
+                f"{step['of_start_percent']:5.1f}% от стартов"
+                if step["of_start_percent"] is not None
+                else "     —"
+            )
+            of_prev = (
+                f", {step['of_previous_percent']:5.1f}% от пред."
+                if step["of_previous_percent"] is not None
+                else ""
+            )
+            print(f"{step['title']:<22} {step['users']:>6}   {of_start}{of_prev}")
 
         by_day = session.execute(
             select(

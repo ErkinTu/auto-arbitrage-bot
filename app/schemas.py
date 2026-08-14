@@ -214,6 +214,71 @@ class AdminUserDetail(BaseModel):
     notifications: AdminUserNotifications
 
 
+class AdminFunnelStep(BaseModel):
+    event: str
+    title: str
+    users: int
+    of_start_percent: float | None
+    of_previous_percent: float | None
+
+
+class AdminFunnel(BaseModel):
+    days: int
+    steps: list[AdminFunnelStep]
+
+
+class AdminOverviewListings(BaseModel):
+    total: int
+    active: int
+    analytics_eligible: int
+    new_last_day: int
+    average_price_usd: float | None
+    median_price_usd: float | None
+    last_seen_at: datetime | None
+
+
+class AdminOverviewUsers(BaseModel):
+    total: int
+    member: int
+    subscriber: int
+    trial: int
+    revoked: int
+
+
+class AdminSourceRun(BaseModel):
+    source: str
+    mode: str
+    status: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    new_count: int
+    updated_count: int
+    error_count: int
+    error_message: str | None
+
+
+class AdminOverview(BaseModel):
+    listings: AdminOverviewListings
+    users: AdminOverviewUsers
+    sources: list[AdminSourceRun]
+    funnel: AdminFunnel
+
+
+class AdminParserRun(BaseModel):
+    id: int
+    source: str
+    mode: str
+    status: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    new_count: int
+    updated_count: int
+    price_changed_count: int
+    deactivated_count: int
+    error_count: int
+    error_message: str | None
+
+
 class AdminListingItem(BaseModel):
     id: int
     title: str

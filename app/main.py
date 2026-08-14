@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin.auth import router as admin_auth_router
 from app.api.admin.listings import router as admin_listings_router
+from app.api.admin.overview import router as admin_overview_router
 from app.api.admin.users import router as admin_users_router
 from app.api.catalog import router as catalog_router
 from app.api.dashboard import router as dashboard_router
@@ -51,6 +52,7 @@ if settings.admin_panel_enabled:
     app.include_router(admin_auth_router)
     app.include_router(admin_users_router)
     app.include_router(admin_listings_router)
+    app.include_router(admin_overview_router)
 
 
 @app.get("/health", tags=["system"])
