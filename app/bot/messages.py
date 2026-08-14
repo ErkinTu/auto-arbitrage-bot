@@ -108,12 +108,48 @@ SUBSCRIPTION_SOON_TEXT = (
 )
 
 
-def subscribe_prompt(price_kgs: int, period_days: int) -> str:
-    return (
+SUBSCRIPTION_MEMBER_TEXT = (
+    "✅ У вас доступ участника закрытой группы — платить не нужно, всё уже открыто."
+)
+
+
+def subscribe_prompt(price_kgs: int, period_days: int, *, trial_expires_at=None) -> str:
+    text = (
         f"💳 Подписка на {period_days} дней — {_fmt_int(price_kgs)} сом.\n"
         "Нажмите кнопку ниже — откроется страница оплаты Finik с QR. На телефоне "
         "она сама предложит ваше банковское приложение; вводить номер карты не нужно.\n"
         "Доступ откроется автоматически сразу после оплаты."
+    )
+    if trial_expires_at is not None:
+        # Честно предупреждаем: оплата во время триала «съедает» его остаток —
+        # платные дни считаются от сегодня (`next_expiry` смотрит только на
+        # subscription_expires_at, бесплатные дни лежат отдельно и не плюсуются).
+        text += (
+            f"\n\n🎁 Бесплатный период идёт до {trial_expires_at.strftime('%d.%m.%Y')}. "
+            f"Если оплатить сейчас, {period_days} дней пойдут с сегодняшнего дня — "
+            "оставшиеся бесплатные дни не приплюсуются."
+        )
+    return text
+
+
+def subscribe_renew_prompt(price_kgs: int, period_days: int, expires_at, *, now=None) -> str:
+    """Оффер продления тому, у кого подписка ещё активна.
+
+    Отдельный текст, а не общий: человек с активной подпиской, увидев обычное
+    «оформите подписку», решает, что оплата не прошла, и платит второй раз.
+    Главное здесь — снять тревогу («всё в порядке») и сказать, что дни
+    складываются, а не сгорают (`next_expiry` продлевает от текущего срока).
+    """
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+    days_left = max((expires_at - now).days, 0)
+    left = "меньше суток" if days_left == 0 else f"осталось {days_left} дн."
+    return (
+        f"✅ <b>Подписка уже активна</b> — до {expires_at.strftime('%d.%m.%Y')} ({left}).\n\n"
+        "Платить прямо сейчас не нужно. Но можно продлить заранее — "
+        f"<b>{period_days} дней приплюсуются к текущему сроку</b>, ничего не сгорит.\n"
+        f"Продление — {_fmt_int(price_kgs)} сом."
     )
 
 

@@ -8,7 +8,12 @@ from sqlalchemy.pool import StaticPool
 
 import app.bot.db as botdb
 from app.db.base import Base
-from app.bot.messages import access_denied_text, trial_already_used_text
+from app.bot.messages import (
+    access_denied_text,
+    subscribe_prompt,
+    subscribe_renew_prompt,
+    trial_already_used_text,
+)
 from app.models import BotUser, Payment
 
 
@@ -214,3 +219,38 @@ def test_insert_race_retried_only_once(sessions) -> None:
     with pytest.raises(IntegrityError):
         botdb._retry_on_user_insert_race(always_conflicting)
     assert len(calls) == 2
+
+
+def test_subscribe_renew_prompt_says_days_stack() -> None:
+    """У активной подписки /subscribe обязан звучать иначе.
+
+    Обычное «оформите подписку» человек с активным доступом читает как «оплата
+    не прошла» и платит второй раз. Проверяем главное: срок назван, сказано что
+    дни складываются, и нет слова «неактивна».
+    """
+    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    expires = now + timedelta(days=29)
+    text = subscribe_renew_prompt(2000, 30, expires, now=now)
+    assert "13.09.2026" in text
+    assert "осталось 29 дн." in text
+    assert "приплюсуются" in text
+    assert "2 000 сом" in text
+    assert "неактивна" not in text
+
+
+def test_subscribe_renew_prompt_last_day() -> None:
+    """Меньше суток — не «осталось 0 дн.», а человеческое «меньше суток»."""
+    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    text = subscribe_renew_prompt(2000, 30, now + timedelta(hours=5), now=now)
+    assert "меньше суток" in text
+    assert "осталось 0" not in text
+
+
+def test_subscribe_prompt_warns_about_trial_days_burning() -> None:
+    """Оплата во время триала обнуляет его остаток — предупреждаем заранее."""
+    trial_until = datetime(2026, 8, 18, tzinfo=timezone.utc)
+    text = subscribe_prompt(2000, 30, trial_expires_at=trial_until)
+    assert "18.08.2026" in text
+    assert "не приплюсуются" in text
+    # Без триала лишнего абзаца быть не должно.
+    assert "Бесплатный период" not in subscribe_prompt(2000, 30)

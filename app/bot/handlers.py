@@ -44,6 +44,7 @@ from app.bot.messages import (
     DEMO_INTRO_TEXT,
     DEMO_UNAVAILABLE_TEXT,
     HELP_TEXT,
+    SUBSCRIPTION_MEMBER_TEXT,
     SUBSCRIPTION_REQUIRED_TEXT,
     SUBSCRIPTION_SOON_TEXT,
     SUBSCRIPTION_UNAVAILABLE_TEXT,
@@ -63,6 +64,7 @@ from app.bot.messages import (
     status_text,
     subscribe_error_text,
     subscribe_prompt,
+    subscribe_renew_prompt,
     trial_already_used_text,
     trial_started_text,
 )
@@ -228,6 +230,13 @@ async def cmd_help(message: Message) -> None:
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: Message) -> None:
     settings = get_settings()
+    info = await asyncio.to_thread(db.get_subscription_info, message.from_user.id)
+    if info is not None and info.access_status == "member":
+        # Участнику группы платить нечем и незачем — до вайтлиста оплаты не
+        # доходим, иначе он получил бы «оплата скоро», хотя доступ у него есть.
+        await message.answer(SUBSCRIPTION_MEMBER_TEXT)
+        return
+
     if not settings.subscription_allowed_for(message.from_user.id):
         # Обкатка платежей на проде: контур включён и проверяется тестировщиком,
         # остальным честно говорим «скоро», а не «сломалось».
@@ -261,10 +270,15 @@ async def cmd_subscribe(message: Message) -> None:
         return
 
     price = int(settings.subscription_price_kgs)
-    await message.answer(
-        subscribe_prompt(price, settings.subscription_period_days),
-        reply_markup=pay_kb(result.redirect_url, f"💳 Оплатить {price} сом"),
-    )
+    period = settings.subscription_period_days
+    if info is not None and info.active and info.expires_at is not None:
+        text = subscribe_renew_prompt(price, period, info.expires_at)
+        label = f"🔁 Продлить на {period} дней — {price} сом"
+    else:
+        trial_until = info.trial_expires_at if info is not None and info.trial_active else None
+        text = subscribe_prompt(price, period, trial_expires_at=trial_until)
+        label = f"💳 Оплатить {price} сом"
+    await message.answer(text, reply_markup=pay_kb(result.redirect_url, label))
 
 
 @router.message(Command("status"))
