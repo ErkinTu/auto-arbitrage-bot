@@ -7,15 +7,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import secrets
 import time
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Callable, TypeVar
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.bot.matching import PendingNotification, market_average
@@ -23,6 +25,7 @@ from app.bot.matching import preview_for_filter as _preview_for_filter
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models import (
+    AdminLoginToken,
     BotUser,
     Brand,
     CarModel,
@@ -802,6 +805,45 @@ def delete_block(telegram_id: int, block_id: int) -> bool:
         session.delete(block)
         session.commit()
         return True
+
+
+def issue_admin_login_token(telegram_id: int) -> str | None:
+    """Выдаёт одноразовый токен входа в панель; None — если человек не админ.
+
+    None означает «отказано» для любой причины (нет строки, нет флага) — вызов
+    не должен различать «не админ» и «не пользователь»: и то и другое отвечает
+    молчанием, иначе перебором можно узнать, кто админ.
+
+    Ранее выданные неиспользованные токены гасим: запрос новой ссылки — это
+    почти всегда «предыдущая куда-то делась», и оставлять её живой незачем.
+    Сам токен возвращаем ЕДИНСТВЕННЫЙ раз, в базе только его sha256.
+    """
+    settings = get_settings()
+    if not settings.admin_panel_enabled:
+        return None
+
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None or not user.is_superuser:
+            return None
+
+        now = datetime.now(timezone.utc)
+        session.execute(
+            update(AdminLoginToken)
+            .where(AdminLoginToken.user_id == user.id, AdminLoginToken.used_at.is_(None))
+            .values(used_at=now)
+        )
+        token = secrets.token_urlsafe(32)
+        session.add(
+            AdminLoginToken(
+                user_id=user.id,
+                token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                expires_at=now + timedelta(minutes=settings.admin_login_token_ttl_minutes),
+            )
+        )
+        session.commit()
+        logger.info("Админ-вход: выдана ссылка пользователю %s", telegram_id)
+        return token
 
 
 def mark_user_blocked(telegram_id: int) -> None:

@@ -15,7 +15,9 @@ from app.bot.commands import BOT_COMMANDS, setup_bot_commands
 HANDLERS_SOURCE = Path(__file__).resolve().parents[1] / "app" / "bot" / "handlers.py"
 
 # Команды, которые в меню не показываем осознанно (см. docstring commands.py).
-INTENTIONALLY_HIDDEN = {"subscribe"}
+# `admin` — привилегия: в автодополнении у всех она раскрывала бы сам факт
+# существования панели (`docs/ADMIN_PANEL_PLAN.md`).
+INTENTIONALLY_HIDDEN = {"subscribe", "admin"}
 
 
 def _registered_commands() -> set[str]:

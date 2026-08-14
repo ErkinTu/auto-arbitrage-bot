@@ -47,6 +47,7 @@ from app.bot.messages import (
     SUBSCRIPTION_REQUIRED_TEXT,
     SUBSCRIPTION_SOON_TEXT,
     SUBSCRIPTION_UNAVAILABLE_TEXT,
+    admin_login_text,
     block_added_text,
     block_limit_text,
     blocks_text,
@@ -740,4 +741,28 @@ async def wizard_price_fallback(message: Message) -> None:
     await message.answer(
         "Отправьте число в долларах, например `20000`, или нажмите «Пропустить».",
         reply_markup=skip_kb("price"),
+    )
+
+
+# --- /admin ------------------------------------------------------------------
+# Регистрируется ПОСЛЕДНИМ, уже после фолбэков визарда, и это не стилистика.
+# Не-админу команда обязана быть неотличима от несуществующей, иначе сам факт
+# наличия панели становится публичным. Вне визарда неизвестная команда остаётся
+# без ответа — и мы отвечаем тем же молчанием. Внутри визарда неизвестная
+# команда получает подсказку «выберите вариант кнопкой»: чтобы не выбиваться из
+# этого, хендлер стоит ниже, и в состоянии визарда до него дело не доходит —
+# отвечает тот же фолбэк, что и любой другой команде. Цена: админу внутри
+# визарда сначала нужен /cancel. Это дешевле утечки.
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message) -> None:
+    token = await asyncio.to_thread(db.issue_admin_login_token, message.from_user.id)
+    if token is None:
+        return  # не админ, либо панель выключена (ADMIN_PANEL_URL пуст)
+
+    settings = get_settings()
+    await message.answer(
+        admin_login_text(settings.admin_login_token_ttl_minutes),
+        reply_markup=pay_kb(settings.admin_login_url(token), "🔐 Открыть панель"),
     )

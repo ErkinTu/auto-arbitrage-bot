@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     # гасим сами: pending старше этого срока -> expired.
     payment_pending_ttl_hours: int = 6
 
+    # --- Админ-панель ---------------------------------------------------------
+    # Публичный адрес панели, напр. https://admin.example.kg (без хвостового /).
+    # Пусто = вход выключен целиком: /admin в боте молчит даже для админа. Это
+    # выключатель по умолчанию — забытый на чужом стенде код ничего не открывает.
+    admin_panel_url: str = ""
+    # Срок жизни ссылки входа. Пять минут — компромисс: ссылка живёт в истории
+    # чата вечно, но за это время её успевает открыть только тот, кто её и
+    # запросил. Одноразовость (used_at) страхует отдельно.
+    admin_login_token_ttl_minutes: int = 5
+
     # --- Триал и рефералка ----------------------------------------------------
     # Бесплатный период по кнопке в /start — выдаётся один раз на telegram_id.
     # 0 = триал выключен (кнопки нет, доступ как раньше: группа ИЛИ подписка).
@@ -240,6 +250,14 @@ class Settings(BaseSettings):
             return False
         testers = self.subscription_tester_id_set
         return not testers or telegram_id in testers
+
+    @property
+    def admin_panel_enabled(self) -> bool:
+        """Панель включена, только когда известен её публичный адрес."""
+        return bool(self.admin_panel_url)
+
+    def admin_login_url(self, token: str) -> str:
+        return f"{self.admin_panel_url.rstrip('/')}/login?t={token}"
 
     @property
     def trial_enabled(self) -> bool:
