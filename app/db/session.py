@@ -50,6 +50,11 @@ def _upgrade_postgres_schema() -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_bot_users_invite_code ON bot_users (invite_code)",
         "CREATE INDEX IF NOT EXISTS ix_bot_users_referrer_id ON bot_users (referrer_id)",
         # Чёрный список — новая таблица, её создаёт create_all; ALTER не нужен.
+        # Админ-панель: is_superuser — колонка на существующей bot_users, поэтому
+        # ALTER обязателен. Значения не задаём: DEFAULT FALSE — единственно
+        # безопасный старт, а права выдаются вручную (`docs/ADMIN.md`). Таблицу
+        # admin_login_tokens create_all создаёт сам.
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_superuser BOOLEAN NOT NULL DEFAULT FALSE",
     )
     with engine.begin() as connection:
         for statement in statements:

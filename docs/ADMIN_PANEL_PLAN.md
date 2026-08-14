@@ -86,22 +86,31 @@ Telegram у владельца в телефоне — вход в один та
 
 ## 3. Этап A. Контур доступа
 
-### A1. Роль
+### A1. Роль — СДЕЛАНО 14.08.2026
+
+Поле `is_superuser` на `BotUser` (`models/entities.py`). Назначение — **только
+SQL**, как зафиксировано в `docs/ADMIN.md`: ни команды, ни кнопки. Этот же флаг
+потом бесплатно закрывает обе идеи из `ADMIN.md` (ранняя доставка, повторный
+пуш) — делаем один раз здесь.
+
+**Ручной ALTER на проде не нужен** (уточнение к первой редакции плана): в
+проекте есть идемпотентный авто-апгрейд `db/session.py::_upgrade_postgres_schema`,
+который выполняется при каждом `init-db`, то есть на старте контейнера. Новая
+колонка добавлена туда; новые таблицы `create_all` создаёт сам. Alembic
+по-прежнему нет, но и ручного шага в деплое не появляется.
 
 ```sql
-ALTER TABLE bot_users
-  ADD COLUMN IF NOT EXISTS is_superuser boolean NOT NULL DEFAULT false;
-UPDATE bot_users SET is_superuser = true WHERE telegram_id = <TG_ID>;
+-- назначить админа (единственный способ)
+UPDATE bot_users SET is_superuser = true  WHERE telegram_id = <TG_ID>;
+-- снять
+UPDATE bot_users SET is_superuser = false WHERE telegram_id = <TG_ID>;
+-- список
+SELECT telegram_id, username, first_name FROM bot_users WHERE is_superuser;
 ```
 
-Ручной ALTER на проде (alembic нет) + поле в `models/entities.py`. Назначение —
-**только SQL**, как зафиксировано в `docs/ADMIN.md`: ни команды, ни кнопки.
-Этот же флаг потом бесплатно закрывает обе идеи из `ADMIN.md` (ранняя доставка,
-повторный пуш) — делаем один раз здесь.
+### A2. Одноразовые токены входа — СДЕЛАНО 14.08.2026
 
-### A2. Одноразовые токены входа
-
-Новая таблица `admin_login_tokens`:
+Таблица `admin_login_tokens` (`models/entities.py`), создаётся `create_all`:
 
 | Колонка | Смысл |
 |---|---|
@@ -382,20 +391,21 @@ ECharts уже подключён (`UiChart`). Правила: высота фи
 
 ## 8. Порядок работ
 
-| # | Шаг | Зависит от |
-|---|---|---|
-| 0 | Локальный контур: `docker compose up`, восстановить свежий дамп из `backups/`, убедиться, что старые ручки и фронт живы | — |
-| 1 | `is_superuser` + `admin_login_tokens` в моделях, SQL для прода | 0 |
-| 2 | `/admin` в боте + выдача токена | 1 |
-| 3 | `/admin/auth/*` + `current_admin` + `ADMIN_JWT_SECRET` + тесты гейта | 1 |
-| 4 | `AppShell` (таб-бар/сайдбар), токены статусов, `UiListRow`/`UiSheet`/`UiBadge` | — |
-| 5 | `/login` и guard на фронте | 3, 4 |
-| 6 | `/admin/users` + `/admin/users/{id}` + экраны | 3, 5 |
-| 7 | `/admin/listings` + `/admin/listings/{id}` + экраны | 3, 5 |
-| 8 | `/admin/overview`, `/admin/stats/funnel`, `/admin/ops/parser-runs` + главная | 3, 5 |
-| 9 | `mileage_km` в `/market/vehicle-summary`, шаг пробега в FSM, перенос `/market`, полировка на реальном телефоне | 5 |
-| 10 | Caddy: `ADMIN_DOMAIN`, DNS, деплой статики, разделы в `DEPLOY.md` | 3 |
-| 11 | Починка N+1 в `services/dashboard.py` | 8 |
+| # | Шаг | Зависит от | Статус |
+|---|---|---|---|
+| 0 | Локальный контур: поднять `postgres`+`api`, убедиться, что старые ручки и фронт живы | — | **сделано** 14.08 |
+| 1 | `is_superuser` + `admin_login_tokens` в моделях и авто-апгрейде схемы | 0 | **сделано** 14.08 |
+| 2 | `/admin` в боте + выдача токена | 1 | |
+| 3 | `/admin/auth/*` + `current_admin` + `ADMIN_JWT_SECRET` + тесты гейта | 1 | |
+| 4 | `AppShell` (таб-бар/сайдбар), токены статусов, `UiListRow`/`UiSheet`/`UiBadge` | — | |
+| 5 | `/login` и guard на фронте | 3, 4 | |
+| 6 | `/admin/users` + `/admin/users/{id}` + экраны | 3, 5 | |
+| 7 | `/admin/listings` + `/admin/listings/{id}` + экраны | 3, 5 | |
+| 8 | `/admin/overview`, `/admin/stats/funnel`, `/admin/ops/parser-runs` + главная | 3, 5 | |
+| 9а | `mileage_km` в `/market/vehicle-summary` (общий код с `/estimate`) | 0 | **сделано** 14.08 |
+| 9б | Шаг пробега в FSM, перенос `/market`, полировка на реальном телефоне | 5, 9а | |
+| 10 | Caddy: `ADMIN_DOMAIN`, DNS, деплой статики, разделы в `DEPLOY.md` | 3 | |
+| 11 | Починка N+1 в `services/dashboard.py` | 8 | |
 
 Шаги 1–5 — фундамент; до них ни одна страница с данными не пишется. Шаг 4
 (оболочка и примитивы) не зависит от бэкенда и делается параллельно 1–3. Шаг 10
@@ -412,9 +422,11 @@ ECharts уже подключён (`UiChart`). Правила: высота фи
   `/api/v1/admin/*`, роль выдаётся только SQL.
 - **Утечка ссылки входа.** TTL 5 минут + одноразовость + protect_content.
   Украденная ссылка после первого входа мертва.
-- **Схема без alembic.** Два ручных изменения на проде (колонка + таблица) —
-  оба в `DEPLOY.md` и `docs/DB_SCHEMA_FOR_GPT.md`, иначе через месяц никто не
-  вспомнит, почему на новом стенде админка падает.
+- **Схема без alembic.** Оказалось не проблемой: колонка `is_superuser` лежит в
+  идемпотентном `_upgrade_postgres_schema`, таблицу `admin_login_tokens` создаёт
+  `create_all` — оба применяются сами при рестарте, ручного шага в деплое нет.
+  Цена: порядок применения нигде не записан, и откат схемы делается только
+  вручную. Пока изменений единицы — терпимо.
 - **Память сервера.** 2 ГБ на 4 сервиса; тяжёлые списки без потолка и без
   индексов могут задеть бот. Отсюда `limit ≤ 200` и запрет на «выгрузить всё».
 - **Фронт без репозитория.** До первого коммита кода — единственная копия

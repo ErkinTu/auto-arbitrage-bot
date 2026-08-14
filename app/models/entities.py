@@ -314,6 +314,15 @@ class BotUser(Base, TimestampMixin):
     first_name: Mapped[str | None] = mapped_column(String(120))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     access_status: Mapped[str] = mapped_column(String(20), default="member", nullable=False)  # member | subscriber | trial | revoked
+
+    # --- Привилегии -----------------------------------------------------------
+    # Админ бота и единственный, кого пускает админ-панель. Выдаётся ТОЛЬКО
+    # прямым SQL (`docs/ADMIN.md`): ни команды, ни кнопки, ни приглашения —
+    # список админов меняется так же контролируемо, как схема БД. Флаг на
+    # bot_users, а не отдельной таблицей: telegram_id уже здесь, и матчинг
+    # всё равно джойнит BotUser, так что проверка не стоит лишнего запроса.
+    # Fail-safe: отсутствующий или false — обычный пользователь.
+    is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     subscription_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_access_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Когда юзеру ушло напоминание о продлении текущей подписки (чтобы не слать
@@ -343,6 +352,36 @@ class BotUser(Base, TimestampMixin):
     # REFERRAL_FRIENDS_PER_BONUS засчитанных друзей). Счётчик, а не флаг:
     # начисление идемпотентно — сравниваем с числом заслуженных бонусов.
     referral_bonuses_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class AdminLoginToken(Base):
+    """Одноразовый вход в админ-панель по ссылке из бота.
+
+    Хранится ХЭШ токена, а не сам токен: ссылка уезжает в мессенджер, а дамп
+    базы не должен давать вход в панель. Подписанный stateless-токен здесь не
+    годится — его нельзя ни отозвать, ни погасить после первого обмена, а
+    ссылка живёт в истории чата вечно.
+
+    Пишет строку бот (`bot/db.py`), читает и гасит API (`api/admin/auth.py`) —
+    оба ходят в БД напрямую, HTTP между ботом и API не появляется.
+    """
+
+    __tablename__ = "admin_login_tokens"
+    __table_args__ = (Index("ix_admin_login_token_user_created", "user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False
+    )
+    # sha256 в hex — ровно 64 символа.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # NULL = ещё не использован. Гасим отметкой, а не удалением: попытка войти
+    # по сгоревшей ссылке должна отвечать «уже использована», а не «неизвестна».
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
 
 
 class UserEvent(Base):

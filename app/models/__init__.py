@@ -1,4 +1,5 @@
 from app.models.entities import (
+    AdminLoginToken,
     BotUser,
     Brand,
     CarModel,
@@ -23,6 +24,7 @@ from app.models.entities import (
 )
 
 __all__ = [
+    "AdminLoginToken",
     "BotUser",
     "Brand",
     "CarModel",

@@ -33,16 +33,20 @@
 | (A) флаг `is_superuser bool` на `bot_users` | одна проверка, джойн не нужен, tg_id уже там | смешивает роль с профилем |
 | (B) отдельная таблица `bot_admins(telegram_id, note, granted_at)` | чистое разделение, аудит-поля | +таблица, +джойн в матчинге |
 
-**Рекомендация — (A):** флаг `is_superuser boolean not null default false` на
-`bot_users`. Проще всего: `bot_users` уже хранит `telegram_id`, а матчинг уже
-джойнит `BotUser`, так что флаг доступен без лишнего запроса. Аудит (кто/когда
-назначил) на текущем масштабе избыточен — при желании добавить `superuser_note`/
-`superuser_granted_at` позже.
+**Выбран (A) — СДЕЛАНО 14.08.2026:** флаг `is_superuser boolean not null default
+false` на `bot_users` (`models/entities.py`). Проще всего: `bot_users` уже хранит
+`telegram_id`, а матчинг уже джойнит `BotUser`, так что флаг доступен без лишнего
+запроса. Аудит (кто/когда назначил) на текущем масштабе избыточен — при желании
+добавить `superuser_note`/`superuser_granted_at` позже.
 
-**Прод — ручной ALTER** (как с колонкой `region`, см. память
-`skip_foreign-filter`):
+Флаг завели под админ-панель (`docs/ADMIN_PANEL_PLAN.md`), но он ровно тот же,
+что нужен идеям 1 и 2 ниже, — второй раз его вводить не придётся.
+
+**Прода это не касается руками:** ALTER лежит в `db/session.py::_upgrade_postgres_schema`
+и применяется сам при рестарте контейнера. Отдельно накатывать ничего не нужно.
 
 ```sql
+-- то, что выполнится автоматически:
 ALTER TABLE bot_users
   ADD COLUMN IF NOT EXISTS is_superuser boolean NOT NULL DEFAULT false;
 ```
