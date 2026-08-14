@@ -14,6 +14,9 @@ def vehicle_summary(
     model_id: int = Query(ge=1),
     year: int = Query(ge=1900, le=2100),
     generation_id: int | None = Query(default=None, ge=1),
+    # Пробег необязателен: у lalafo он не указан примерно у 43% объявлений,
+    # и «не знаю» — обычный ответ пользователя, а не отказ заполнить форму.
+    mileage_km: int | None = Query(default=None, ge=0, le=1_000_000),
     session: Session = Depends(get_session),
 ) -> dict:
     try:
@@ -23,6 +26,7 @@ def vehicle_summary(
             model_id=model_id,
             year=year,
             generation_id=generation_id,
+            mileage_km=mileage_km,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

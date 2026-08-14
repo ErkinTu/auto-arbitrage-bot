@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Brand, CarModel, DailyMarketStat, Generation, Listing, RawPayload
+from app.services.analytics import select_by_mileage
 from app.services.sources import listing_public_url
 
 
@@ -185,6 +186,7 @@ def get_vehicle_summary(
     model_id: int,
     year: int,
     generation_id: int | None = None,
+    mileage_km: int | None = None,
 ) -> dict:
     brand = session.get(Brand, brand_id)
     car_model = session.get(CarModel, model_id)
@@ -207,9 +209,18 @@ def get_vehicle_summary(
     if not listings:
         raise LookupError("Недостаточно похожих активных объявлений")
 
-    prices = [float(item.current_price_usd) for item in listings if item.current_price_usd is not None]
-    market_average = mean(prices)
-    market_median = float(median(prices))
+    cohort_prices = [
+        float(item.current_price_usd) for item in listings if item.current_price_usd is not None
+    ]
+    # Рынок описывает когорта «модель+год» целиком — пробег её не сужает:
+    # средняя, аномалии и представитель отвечают на вопрос «что происходит с
+    # этой машиной на рынке», а не «сколько стоит именно моя».
+    market_average = mean(cohort_prices)
+    market_median = float(median(cohort_prices))
+
+    # Оценка — наоборот, про конкретный экземпляр: тем же кодом, что и /estimate.
+    window = select_by_mileage(list(listings), mileage_km)
+    prices = window.prices or cohort_prices
     q1 = _percentile(prices, 0.25)
     q3 = _percentile(prices, 0.75)
 
@@ -234,12 +245,18 @@ def get_vehicle_summary(
             "year": year,
         },
         "currency": "USD",
-        "estimated_price": round(market_median, 2),
+        "estimated_price": round(window.estimated_price, 2),
         "estimated_range": {"min": round(q1, 2), "max": round(q3, 2)},
         "market_average": round(market_average, 2),
         "market_median": round(market_median, 2),
         "samples": samples,
         "confidence": confidence,
+        "mileage": {
+            "requested_km": mileage_km,
+            "window": window.window,
+            "samples_in_window": samples,
+            "adjustment_usd": round(window.adjustment_usd, 2),
+        },
         "representative_listing": representative,
         "anomalies": anomalies,
         "trend": trend,

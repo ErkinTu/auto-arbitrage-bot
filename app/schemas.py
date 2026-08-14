@@ -101,6 +101,15 @@ class VehicleHeader(BaseModel):
     year: int
 
 
+class MileageInfo(BaseModel):
+    """Что сделали с пробегом: без него честнее показать «поправки не было»."""
+
+    requested_km: int | None
+    window: str
+    samples_in_window: int
+    adjustment_usd: float
+
+
 class VehicleSummary(BaseModel):
     vehicle: VehicleHeader
     currency: str
@@ -110,6 +119,7 @@ class VehicleSummary(BaseModel):
     market_median: float
     samples: int
     confidence: str
+    mileage: MileageInfo
     representative_listing: RepresentativeListing | None
     anomalies: AnomalySummary
     trend: list[VehicleSummaryTrendPoint]

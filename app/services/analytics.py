@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 from statistics import mean, median
+from typing import Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -39,6 +41,66 @@ def _linear_estimate(samples: list[Listing], requested_mileage: int, fallback: f
     # Keep an early MVP estimate inside a robust market range.
     prices = [y for _, y in points]
     return max(_percentile(prices, 0.1), min(estimate, _percentile(prices, 0.9)))
+
+
+MILEAGE_WINDOW_KM = 50_000
+MIN_WINDOW_SAMPLES = 3
+WINDOW_NEARBY = "±50,000 km"
+WINDOW_ALL = "all matching listings"
+
+
+@dataclass(frozen=True)
+class MileageWindow:
+    """Какие объявления взяты под оценку и что дала поправка на пробег."""
+
+    prices: list[float]
+    window: str
+    estimated_price: float
+    adjustment_usd: float
+
+
+def select_by_mileage(samples: Sequence[Listing], mileage_km: int | None) -> MileageWindow:
+    """Сужает выборку до похожего пробега и правит оценку регрессией.
+
+    Общий код для `/estimate` и `/market/vehicle-summary`: пока он был только в
+    первом, второй отдавал во фронт медиану когорты без поправки — на реальных
+    данных расхождение по одной машине доходило до полутора тысяч долларов.
+    Дублировать логику нельзя: две оценки одного и того же авто разъезжаются
+    молча.
+
+    `mileage_km=None` — не ошибка, а обычный случай: у lalafo пробег не указан
+    примерно у 43% объявлений. Тогда берём когорту целиком и поправку не делаем.
+    """
+    all_prices = [float(item.current_price_usd) for item in samples if item.current_price_usd is not None]
+    cohort_median = float(median(all_prices)) if all_prices else 0.0
+
+    if mileage_km is None:
+        return MileageWindow(
+            prices=all_prices,
+            window=WINDOW_ALL,
+            estimated_price=cohort_median,
+            adjustment_usd=0.0,
+        )
+
+    nearby = [
+        item
+        for item in samples
+        if item.mileage_km is not None and abs(item.mileage_km - mileage_km) <= MILEAGE_WINDOW_KM
+    ]
+    # Окно уже когорты, но по трём объявлениям медиану считать бессмысленно —
+    # тогда возвращаемся ко всей выборке и честно говорим об этом в `window`.
+    use_nearby = len(nearby) >= MIN_WINDOW_SAMPLES
+    selected = nearby if use_nearby else list(samples)
+    prices = [float(item.current_price_usd) for item in selected if item.current_price_usd is not None]
+    base_median = float(median(prices)) if prices else cohort_median
+    estimated = _linear_estimate(list(samples), mileage_km, base_median)
+
+    return MileageWindow(
+        prices=prices,
+        window=WINDOW_NEARBY if use_nearby else WINDOW_ALL,
+        estimated_price=estimated,
+        adjustment_usd=estimated - cohort_median,
+    )
 
 
 def resolve_vehicle_ids(
@@ -93,24 +155,21 @@ def estimate_price(
     if not all_samples:
         raise LookupError("Недостаточно похожих активных объявлений")
 
-    nearby = [item for item in all_samples if item.mileage_km is not None and abs(item.mileage_km - mileage_km) <= 50_000]
-    selected = nearby if len(nearby) >= 3 else all_samples
-    prices = [float(item.current_price_usd) for item in selected if item.current_price_usd is not None]
-    base_median = float(median(prices))
-    estimated = _linear_estimate(all_samples, mileage_km, base_median)
+    window = select_by_mileage(all_samples, mileage_km)
+    prices = window.prices
     q1, q3 = _percentile(prices, 0.25), _percentile(prices, 0.75)
-    sample_count = len(selected)
+    sample_count = len(prices)
     confidence = "high" if sample_count >= 20 else "medium" if sample_count >= 8 else "low"
 
     return {
         "currency": "USD",
-        "estimated_price": round(estimated, 2),
+        "estimated_price": round(window.estimated_price, 2),
         "estimated_range": {"min": round(q1, 2), "max": round(q3, 2)},
         "market_average": round(mean(prices), 2),
-        "market_median": round(base_median, 2),
+        "market_median": round(float(median(prices)), 2),
         "samples": sample_count,
         "confidence": confidence,
-        "used_mileage_window": "±50,000 km" if selected is nearby else "all matching listings",
+        "used_mileage_window": window.window,
         "criteria": {
             "brand": brand.name,
             "model": car_model.name,
