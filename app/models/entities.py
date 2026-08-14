@@ -384,6 +384,37 @@ class AdminLoginToken(Base):
     )
 
 
+class AdminSession(Base):
+    """Сессия админ-панели: непрозрачный токен в httpOnly-куке.
+
+    Не JWT. Подписанный токен здесь дал бы ровно один плюс — не ходить в БД, —
+    но у API сессия и так открыта на каждый запрос, а платой были бы новая
+    зависимость, секрет в окружении и невозможность выйти: JWT живёт до
+    `exp`, отозвать его нечем. Строка в таблице отзывается удалением.
+
+    Как и у ссылки входа, в базе лежит sha256 — кража дампа не должна давать
+    готовую сессию.
+    """
+
+    __tablename__ = "admin_sessions"
+    __table_args__ = (Index("ix_admin_session_user", "user_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # Обновляем не чаще раза в минуту: иначе каждый GET списка превращался бы в
+    # запись, а знание «заходил сегодня» такой точности не требует.
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class UserEvent(Base):
     """Лог событий воронки: старт → триал → оплата.
 

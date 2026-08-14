@@ -101,6 +101,17 @@ class VehicleHeader(BaseModel):
     year: int
 
 
+class AdminLoginRequest(BaseModel):
+    token: str
+
+
+class AdminMe(BaseModel):
+    telegram_id: int
+    username: str | None
+    first_name: str | None
+    session_expires_at: datetime
+
+
 class MileageInfo(BaseModel):
     """Что сделали с пробегом: без него честнее показать «поправки не было»."""
 

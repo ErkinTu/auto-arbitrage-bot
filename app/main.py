@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin.auth import router as admin_auth_router
 from app.api.catalog import router as catalog_router
 from app.api.dashboard import router as dashboard_router
 from app.api.market import router as market_router
@@ -40,6 +41,12 @@ app.include_router(dashboard_router)
 app.include_router(catalog_router)
 app.include_router(market_router)
 app.include_router(payments_router)
+
+# Админ-панель подключается, только когда задан её публичный адрес. Выключатель
+# по умолчанию: на стенде без ADMIN_PANEL_URL ручек admin/* просто не существует
+# — 404, а не «есть, но с гейтом». Меньше поверхности там, где она не нужна.
+if settings.admin_panel_enabled:
+    app.include_router(admin_auth_router)
 
 
 @app.get("/health", tags=["system"])

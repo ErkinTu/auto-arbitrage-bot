@@ -1,5 +1,6 @@
 from app.models.entities import (
     AdminLoginToken,
+    AdminSession,
     BotUser,
     Brand,
     CarModel,
@@ -25,6 +26,7 @@ from app.models.entities import (
 
 __all__ = [
     "AdminLoginToken",
+    "AdminSession",
     "BotUser",
     "Brand",
     "CarModel",
