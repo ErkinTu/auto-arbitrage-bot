@@ -89,8 +89,13 @@ services:
       - "443:443"
     environment:
       PAYMENTS_DOMAIN: ${PAYMENTS_DOMAIN}
+      # Домен админ-панели. Пусто — блок в Caddyfile просто не поднимется.
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Собранный фронт (pnpm build → dist/), залитый в admin-dist/. Каталога
+      # может не быть — тогда панель отдаст 404, но платежи не пострадают.
+      - ./admin-dist:/srv/admin:ro
       - caddy_data:/data
       - caddy_config:/config
 
