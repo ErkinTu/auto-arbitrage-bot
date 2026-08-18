@@ -1,7 +1,7 @@
 import logging
-from decimal import Decimal
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -118,8 +118,23 @@ class Settings(BaseSettings):
     # не заводится (иначе в payments копились бы pending, а воронка врала бы).
     # Пусто = оплата открыта всем (боевой режим).
     subscription_tester_ids: str = ""
-    subscription_price_kgs: Decimal = Decimal("2000")
-    subscription_period_days: int = 30
+    # Цена и срок живут не здесь, а в реестре планов (`app/services/plans.py`):
+    # у плана есть ещё и скорость с текстами, а два источника правды о цене
+    # дают расхождение вида «в кнопке 990, а списали 1990».
+    #
+    # Отставание «дешёвых» тарифов: пуш уходит, когда с квалифицирующего события
+    # (`listing_status_history.observed_at`) прошло столько минут. Отсчёт от
+    # события в НАШЕЙ базе, а не от даты публикации: иначе задержка зависела бы
+    # от того, как быстро мы сами добрались до объявления, и первый цикл после
+    # ночной паузы превратил бы «отставание» в мгновенную рассылку.
+    # 0 = АВАРИЙНЫЙ ВЫКЛЮЧАТЕЛЬ: фильтрация не применяется вовсе, все платные
+    # едут как полные (нужен без релиза, если отставание начнёт съедать пуши).
+    delayed_tier_lag_minutes: int = 60
+    # Насколько вперёд разрешено оплачивать доступ. Возвратов у нас нет (Finik —
+    # разовые платежи, возврат только руками через их поддержку), а чем дальше
+    # горизонт, тем вероятнее просьба вернуть деньги. Два месяца при месячном
+    # максимальном плане = продлить заранее можно ровно один раз. 0 = без лимита.
+    subscription_max_horizon_days: int = 60
     # За сколько дней до истечения слать напоминание о продлении.
     subscription_reminder_days_before: int = 1
     # Finik сообщает ТОЛЬКО об успешных оплатах, поэтому неоплаченные платежи
@@ -186,6 +201,26 @@ class Settings(BaseSettings):
     # раньше 30-дневного фолбэка). Раз в сутки, не больше max_per_run карточек.
     lalafo_validate_after_days: int = 3
     lalafo_validate_max_per_run: int = 500
+
+    @model_validator(mode="after")
+    def _warn_if_lag_eats_the_lookback_window(self) -> "Settings":
+        """Отставание обязано быть заметно меньше окна кандидатов на пуш.
+
+        Окно `bot_new_lookback_minutes` — единственный шанс объявления попасть в
+        рассылку: дозревшее позже уже выпало из выборки. При lag > lookback/2 у
+        отстающего почти не остаётся циклов (а часть пушей ещё и откладывает
+        потолок на цикл), и он перестаёт получать что-либо — без единой ошибки
+        в логах. Поэтому ругаемся на старте, а не выясняем это по жалобам.
+        """
+        if 0 < self.bot_new_lookback_minutes < self.delayed_tier_lag_minutes * 2:
+            logger.warning(
+                "DELAYED_TIER_LAG_MINUTES=%s слишком велико при "
+                "BOT_NEW_LOOKBACK_MINUTES=%s: отстающие тарифы будут терять "
+                "уведомления (нужно lag <= lookback/2)",
+                self.delayed_tier_lag_minutes,
+                self.bot_new_lookback_minutes,
+            )
+        return self
 
     @property
     def allowed_brand_list(self) -> list[str]:

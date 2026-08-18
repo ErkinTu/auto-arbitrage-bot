@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -24,10 +23,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.bot.messages import paid_text
 from app.core.config import get_settings
 from app.db.session import get_session
 from app.models import Payment
+from app.services.access_schedule import full_speed_starts_at, schedule_for_user
 from app.services.finik import verify_webhook
+from app.services.plans import plan_for_code
 from app.services.subscription import apply_paid_payment
 
 logger = logging.getLogger(__name__)
@@ -100,19 +102,22 @@ async def finik_webhook(
         )
         return _ok("ignored non-success status")
 
-    # Защита: сумма из подписанного webhook должна совпасть с суммой платежа.
+    # Сумму сверяем, но доступ по расхождению НЕ отменяем: тариф известен из
+    # `payment.plan_code`, а отказ = «деньги списаны, доступа нет» — ровно баг
+    # 14.08.2026. Подпись Finik уже доказала, что тело не подделано, так что
+    # расхождение суммы означает нашу же рассинхронизацию с их кабинетом, и
+    # разбирать её нужно по логу, а не молчанием в чате у оплатившего.
     try:
         callback_amount = Decimal(str(payload.get("amount")))
     except (InvalidOperation, ValueError):
         callback_amount = None
     if callback_amount is None or callback_amount != payment.amount:
-        logger.error(
-            "finik webhook: amount mismatch order=%s expected=%s got=%s",
+        logger.warning(
+            "finik webhook: amount mismatch order=%s expected=%s got=%s (access granted by plan)",
             order_id,
             payment.amount,
             payload.get("amount"),
         )
-        return JSONResponse({"error": "amount mismatch"}, status_code=400)
 
     transaction_id = payload.get("transactionId")
     user = apply_paid_payment(
@@ -123,14 +128,21 @@ async def finik_webhook(
     )
     telegram_id = user.telegram_id
     expires = user.subscription_expires_at
+    plan = plan_for_code(payment.plan_code)
     session.commit()
 
+    # Расписание читаем ПОСЛЕ коммита: блок уже в базе, и «полная скорость с …»
+    # считается тем же кодом, что покажет /status — двух ответов на один вопрос
+    # быть не должно.
+    schedule = schedule_for_user(session, user.id)
+    text = paid_text(plan, expires, full_speed_starts_at(schedule))
+
     # Ответ Finik не должен ждать Telegram: залипший Bot API растянул бы webhook.
-    background.add_task(_notify_paid, telegram_id, expires)
+    background.add_task(_notify_paid, telegram_id, text)
     return _ok("subscription activated")
 
 
-async def _notify_paid(telegram_id: int, expires_at: datetime | None) -> None:
+async def _notify_paid(telegram_id: int, text: str) -> None:
     """Сообщает пользователю об активации подписки прямым вызовом Bot API.
 
     Отдельный процесс от бота; sendMessage по HTTP не конфликтует с long-polling
@@ -140,9 +152,7 @@ async def _notify_paid(telegram_id: int, expires_at: datetime | None) -> None:
     token = settings.telegram_bot_token
     if not token:
         return
-    when = expires_at.strftime("%d.%m.%Y") if expires_at else "—"
-    text = f"✅ Оплата получена. Подписка активна до {when}.\nДоступ открыт — /add_filter"
-    payload: dict[str, object] = {"chat_id": telegram_id, "text": text}
+    payload: dict[str, object] = {"chat_id": telegram_id, "text": text, "parse_mode": "HTML"}
     # Этот путь минует aiogram (и его session-middleware) — защиту ставим сами.
     if settings.protect_content_for(telegram_id):
         payload["protect_content"] = True

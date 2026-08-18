@@ -26,6 +26,9 @@ from app.services.referral import (
     parse_deep_link,
     referral_stats,
 )
+from app.services.access_schedule import schedule_for_user, tail_tier
+from app.services.plans import ORIGIN_PAYMENT, TIER_DELAYED, TIER_FULL
+from app.services.subscription import extend_paid_access
 from app.services.trial import is_trial_active, paywall_candidates, start_trial, trial_used
 
 TRIAL_DAYS = 3
@@ -45,8 +48,6 @@ def _settings(**overrides) -> SimpleNamespace:
         referral_bonus_days=BONUS_DAYS,
         referral_friends_per_bonus=FRIENDS_PER_BONUS,
         referral_max_bonuses=0,  # без потолка: тесты про сам механизм начисления
-        subscription_price_kgs=2000,
-        subscription_period_days=30,
         subscription_enabled=True,
         subscription_testing=False,
     )
@@ -615,3 +616,46 @@ def test_demo_listing_is_a_real_below_market_car(demo_db) -> None:
 
 def test_demo_listing_absent_on_empty_base(demo_db) -> None:
     assert botdb.get_demo_listing(chat_id=1) is None
+
+
+# --- бонусные дни и тариф ----------------------------------------------------
+
+
+def test_bonus_days_without_subscription_are_delayed(sessions) -> None:
+    """Подарок не должен быть дороже покупки: три друга ≠ месяц полной скорости."""
+    with sessions() as s:
+        inviter = _add_user(s, 1)
+        s.flush()
+        for tid in range(2, 5):
+            _add_user(s, tid, referrer_id=inviter.id, trial_started_at=_now())
+        s.commit()
+        assert grant_due_bonuses(
+            s, inviter, friends_per_bonus=FRIENDS_PER_BONUS, bonus_days=BONUS_DAYS
+        ) == 1
+        s.commit()
+        entries = schedule_for_user(s, inviter.id)
+        assert [entry.tier for entry in entries] == [TIER_DELAYED]
+
+
+def test_bonus_days_inherit_the_tail_tier(sessions) -> None:
+    """Дни дописываются в хвост — значит и скорость логично брать оттуда."""
+    now = _now()
+    with sessions() as s:
+        inviter = _add_user(s, 1)
+        s.flush()
+        extend_paid_access(
+            s, inviter, 30, tier=TIER_FULL, origin=ORIGIN_PAYMENT, now=now
+        )
+        for tid in range(2, 5):
+            _add_user(s, tid, referrer_id=inviter.id, trial_started_at=now)
+        s.commit()
+
+        assert grant_due_bonuses(
+            s, inviter, friends_per_bonus=FRIENDS_PER_BONUS, bonus_days=BONUS_DAYS, now=now
+        ) == 1
+        s.commit()
+        # Один непрерывный полный отрезок: 30 оплаченных + 7 бонусных дней.
+        entries = schedule_for_user(s, inviter.id, now)
+        assert [entry.tier for entry in entries] == [TIER_FULL]
+        assert entries[0].ends_at == now + timedelta(days=37)
+        assert tail_tier(s, inviter.id, now) == TIER_FULL

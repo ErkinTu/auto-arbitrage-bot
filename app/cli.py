@@ -296,6 +296,7 @@ def command_grant_subscription(args: argparse.Namespace) -> None:
     from sqlalchemy import select
 
     from app.models import BotUser
+    from app.services.plans import ORIGIN_MANUAL
     from app.services.subscription import extend_paid_access
 
     with SessionLocal() as session:
@@ -303,11 +304,21 @@ def command_grant_subscription(args: argparse.Namespace) -> None:
         if user is None:
             print(f"Bot user with telegram_id={args.telegram_id} not found.")
             return
-        extend_paid_access(user, args.days, utcnow())
+        # По умолчанию `full`: ручное продление — это компенсация или потерянный
+        # webhook, то есть извинение, и выдавать за него медленный тариф странно.
+        # Настоящий план оплаченного платежа сверяется по `payments.plan_code`.
+        extend_paid_access(
+            session,
+            user,
+            args.days,
+            tier=args.tier,
+            origin=ORIGIN_MANUAL,
+            now=utcnow(),
+        )
         session.commit()
         note = f" ({args.note})" if args.note else ""
         print(
-            f"telegram_id={args.telegram_id}: +{args.days} days, "
+            f"telegram_id={args.telegram_id}: +{args.days} days ({args.tier}), "
             f"subscription until {user.subscription_expires_at:%Y-%m-%d %H:%M} UTC{note}"
         )
 
@@ -469,6 +480,12 @@ def parser() -> argparse.ArgumentParser:
     )
     grant.add_argument("--telegram-id", type=int, required=True)
     grant.add_argument("--days", type=int, required=True)
+    grant.add_argument(
+        "--tier",
+        choices=("full", "delayed"),
+        default="full",
+        help="Notification speed for the granted days (default: full)",
+    )
     grant.add_argument("--note", default="", help="Free-text reason, printed to the log only")
     grant.set_defaults(func=command_grant_subscription)
 

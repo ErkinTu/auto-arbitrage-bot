@@ -142,6 +142,10 @@ class AdminUserPage(BaseModel):
 class AdminUserAccess(BaseModel):
     status: str
     in_group: bool
+    # Скорость уведомлений прямо сейчас (`plans.effective_tier`): панель должна
+    # отвечать «почему человек получает медленно», а не только «пускает ли».
+    tier: str
+    full_speed_from: datetime | None
     checked_at: datetime | None
     subscription_active: bool
     subscription_expires_at: datetime | None
@@ -182,8 +186,24 @@ class AdminUserPayment(BaseModel):
     currency: str
     status: str
     period_days: int
+    # Код тарифа (`services/plans.py`); NULL = платёж до тарифной сетки.
+    plan_code: str | None
     created_at: datetime | None
     paid_at: datetime | None
+
+
+class AdminAccessBlock(BaseModel):
+    """Отрезок оплаченного доступа: с какой скоростью и за что.
+
+    Панель показывает расписание как есть (без склейки смежных): админу нужно
+    видеть, какой блок каким платежом создан, а не красивую сводку.
+    """
+
+    tier: str  # full | delayed
+    starts_at: datetime | None
+    ends_at: datetime | None
+    origin: str  # payment | referral | manual | backfill
+    payment_id: int | None
 
 
 class AdminUserEvent(BaseModel):
@@ -210,6 +230,7 @@ class AdminUserDetail(BaseModel):
     filters: list[AdminUserFilter]
     blocks: list[AdminUserBlock]
     payments: list[AdminUserPayment]
+    access_blocks: list[AdminAccessBlock]
     events: list[AdminUserEvent]
     notifications: AdminUserNotifications
 

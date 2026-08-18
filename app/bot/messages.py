@@ -6,6 +6,8 @@ import html
 
 from app.bot.matching import PendingNotification, is_foreign
 from app.core.config import get_settings
+from app.services.access_schedule import ScheduleEntry
+from app.services.plans import PLANS, TIER_DELAYED, Plan
 from app.services.regions import REGION_LABELS
 
 
@@ -113,43 +115,119 @@ SUBSCRIPTION_MEMBER_TEXT = (
 )
 
 
-def subscribe_prompt(price_kgs: int, period_days: int, *, trial_expires_at=None) -> str:
-    text = (
-        f"💳 Подписка на {period_days} дней — {_fmt_int(price_kgs)} сом.\n"
-        "Нажмите кнопку ниже — откроется страница оплаты Finik с QR. На телефоне "
-        "она сама предложит ваше банковское приложение; вводить номер карты не нужно.\n"
-        "Доступ откроется автоматически сразу после оплаты."
+def _d(value) -> str:
+    """Дата для человека: 17.09.2026."""
+    return value.strftime("%d.%m.%Y") if value is not None else "—"
+
+
+def _speed_label(delayed: bool) -> str:
+    return "с отставанием ~1 ч" if delayed else "полная скорость"
+
+
+def plan_line(plan: Plan) -> str:
+    speed = (
+        "уведомления примерно на час позже" if plan.delayed else "уведомления сразу, без задержки"
     )
-    if trial_expires_at is not None:
+    return f"• <b>{plan.period_label.lower()} — {_fmt_int(plan.price)} сом</b> ({speed})"
+
+
+# Что такое «отставание» — объясняем словами и с честным минусом. Это
+# единственное отличие тарифов, поэтому сноской обойтись нельзя.
+DELAY_EXPLAINER = (
+    "Что значит «с отставанием»: объявления приходят примерно на час позже. "
+    "Всё остальное одинаково — те же фильтры, та же аналитика, тот же чёрный "
+    "список. Минус один и честный: машину, которую продали в этот час, вы не "
+    "увидите."
+)
+
+# Снимает вопрос «почему вчера в 23:20 пришло сразу» — иначе он выглядит как сбой.
+NIGHT_NOTE = (
+    "Ночью бот не присылает ничего никому; поздним вечером уведомления приходят "
+    "без задержки, чтобы к утру ссылка не оказалась на снятое объявление."
+)
+
+
+def subscribe_menu_text() -> str:
+    """Меню /subscribe: вся сетка сразу, условия — до оплаты, а не после."""
+    grid = "\n".join(plan_line(plan) for plan in PLANS)
+    return (
+        "💳 <b>Тарифы</b>\n\n"
+        f"{grid}\n\n"
+        f"{DELAY_EXPLAINER}\n\n"
+        f"{NIGHT_NOTE}\n\n"
+        "Выберите тариф — покажу точные даты до оплаты."
+    )
+
+
+def plan_confirm_text(plan: Plan, draft) -> str:
+    """Экран подтверждения: цена, период и ТОЧНЫЕ даты по расписанию доступа.
+
+    Даты обязательны: купивший полный тариф поверх отстающего иначе первый же
+    тихий час прочтёт как обман, а не как «полная скорость начнётся 30.08».
+    """
+    current = draft.schedule_before[0] if draft.schedule_before else None
+    head = (
+        f"💳 <b>{plan.title.capitalize()}</b> — {_fmt_int(plan.price)} сом "
+        f"за {plan.days} дней.\n\n"
+    )
+
+    if draft.starts_now:
+        speed = (
+            "уведомления всё это время приходят примерно на час позже"
+            if plan.delayed
+            else "полная скорость всё время"
+        )
+        body = f"Доступ до <b>{_d(draft.access_until)}</b>, {speed}."
+    elif current is not None and current.delayed and not plan.delayed:
+        # Апгрейд поверх отстающего: главное сказать, что доплаты разницы нет и
+        # ничего не сгорает — иначе это читается как «заплатил дважды».
+        body = (
+            f"У вас оплачено с отставанием до {_d(current.ends_at)}. "
+            "Доплаты разницы нет: "
+            f"{plan.days} полных дней встанут следом — <b>полная скорость с "
+            f"{_d(draft.starts_at)} по {_d(draft.access_until)}</b>. Ничего не сгорает."
+        )
+    elif current is not None and not current.delayed and plan.delayed:
+        body = (
+            f"Полная скорость сохраняется до {_d(current.ends_at)} — понижения "
+            f"сейчас не будет. Дальше {plan.days} дней с отставанием, "
+            f"до {_d(draft.access_until)}."
+        )
+    else:
+        body = (
+            f"Дни приплюсуются к текущему сроку: доступ до "
+            f"<b>{_d(draft.access_until)}</b>, ничего не сгорает."
+        )
+
+    text = head + body
+    if draft.trial_expires_at is not None:
         # Честно предупреждаем: оплата во время триала «съедает» его остаток —
         # платные дни считаются от сегодня (`next_expiry` смотрит только на
         # subscription_expires_at, бесплатные дни лежат отдельно и не плюсуются).
         text += (
-            f"\n\n🎁 Бесплатный период идёт до {trial_expires_at.strftime('%d.%m.%Y')}. "
-            f"Если оплатить сейчас, {period_days} дней пойдут с сегодняшнего дня — "
+            f"\n\n🎁 Бесплатный период идёт до {_d(draft.trial_expires_at)}. "
+            f"Если оплатить сейчас, {plan.days} дней пойдут с сегодняшнего дня — "
             "оставшиеся бесплатные дни не приплюсуются."
         )
+    text += (
+        "\n\nНажмите кнопку ниже — откроется страница оплаты Finik с QR. На телефоне "
+        "она сама предложит ваше банковское приложение; вводить номер карты не нужно.\n"
+        "Доступ откроется автоматически сразу после оплаты."
+    )
     return text
 
 
-def subscribe_renew_prompt(price_kgs: int, period_days: int, expires_at, *, now=None) -> str:
-    """Оффер продления тому, у кого подписка ещё активна.
+def subscribe_horizon_text(horizon_until, max_horizon_days: int) -> str:
+    """Отказ по горизонту — ДО создания платежа.
 
-    Отдельный текст, а не общий: человек с активной подпиской, увидев обычное
-    «оформите подписку», решает, что оплата не прошла, и платит второй раз.
-    Главное здесь — снять тревогу («всё в порядке») и сказать, что дни
-    складываются, а не сгорают (`next_expiry` продлевает от текущего срока).
+    Иначе получилось бы «деньги взяли, дни не встали»: дальше горизонта доступ
+    мы всё равно не сдвинем, а возвратов у нас нет.
     """
-    from datetime import datetime, timezone
-
-    now = now or datetime.now(timezone.utc)
-    days_left = max((expires_at - now).days, 0)
-    left = "меньше суток" if days_left == 0 else f"осталось {days_left} дн."
+    months = max(max_horizon_days // 30, 1)
     return (
-        f"✅ <b>Подписка уже активна</b> — до {expires_at.strftime('%d.%m.%Y')} ({left}).\n\n"
-        "Платить прямо сейчас не нужно. Но можно продлить заранее — "
-        f"<b>{period_days} дней приплюсуются к текущему сроку</b>, ничего не сгорит.\n"
-        f"Продление — {_fmt_int(price_kgs)} сом."
+        f"✅ У вас уже оплачено до <b>{_d(horizon_until)}</b> — это максимум "
+        f"на {months} мес. вперёд.\n"
+        "Продлить можно ближе к сроку: напомню сам за день до окончания."
     )
 
 
@@ -161,7 +239,9 @@ def onboarding_text(trial_days: int) -> str:
         "Как это работает: вы задаёте фильтр (марка, модель, год, пробег, цена, "
         "регион), а я каждые ~10 минут проверяю свежие объявления и сравниваю цену "
         "со средней по таким же машинам. Ниже рынка — сразу пишу вам.\n\n"
-        f"🎁 Первые {trial_days} дня — бесплатно, без карты."
+        f"🎁 Первые {trial_days} дня — бесплатно, без карты и на полной скорости.\n"
+        f"Дальше — от {_fmt_int(min(plan.price for plan in PLANS))} сом; тарифы и "
+        "условия в /subscribe."
     )
 
 
@@ -202,7 +282,7 @@ def trial_already_used_text(payments_open: bool = True) -> str:
     )
 
 
-def trial_paywall_text(price_kgs: int, period_days: int, payments_open: bool = True) -> str:
+def trial_paywall_text(payments_open: bool = True) -> str:
     """Разовое сообщение после окончания триала (уходит из worker).
 
     `payments_open=False` — оплата ещё обкатывается (или выключена): звать в
@@ -217,10 +297,11 @@ def trial_paywall_text(price_kgs: int, period_days: int, payments_open: bool = T
             "включим доступ вручную, как только всё заработает.\n"
             "А пока можно получить дни за приглашённых друзей: /invite"
         )
+    grid = "\n".join(plan_line(plan) for plan in PLANS)
     return (
         "⏳ Бесплатный период закончился — новые объявления я больше не присылаю.\n\n"
-        f"Подписка — {_fmt_int(price_kgs)} сом за {period_days} дней: оплата по QR "
-        "из банковского приложения, без ввода карты.\n"
+        f"{grid}\n\n"
+        "Оплата по QR из банковского приложения, без ввода карты.\n"
         "Оформить: /subscribe\n"
         "Или получите дни бесплатно за приглашённых друзей: /invite"
     )
@@ -328,6 +409,13 @@ def subscribe_error_text() -> str:
     )
 
 
+def schedule_line(entries: tuple[ScheduleEntry, ...] | list[ScheduleEntry]) -> str:
+    """Расписание скорости в одну строку: «с отставанием до 30.08 → полная до 29.09»."""
+    return " → ".join(
+        f"{_speed_label(entry.delayed)} до {_d(entry.ends_at)}" for entry in entries
+    )
+
+
 def status_text(
     *,
     access_status: str,
@@ -335,17 +423,63 @@ def status_text(
     active: bool,
     trial_active: bool = False,
     trial_expires_at=None,
+    schedule: tuple[ScheduleEntry, ...] | list[ScheduleEntry] = (),
+    tier: str | None = None,
 ) -> str:
+    """Мой доступ. Подписчику показываем РАСПИСАНИЕ, а не только дату.
+
+    Иначе купивший полный тариф не отличит его от отстающего — а отличие в
+    скорости и есть то, за что он доплатил. `tier` — фолбэк для доступа без
+    блоков (бонусные дни на базе, где бэкфилл не проходил): скорость назвать
+    надо всё равно, иначе строка просто исчезает и выглядит как «неизвестно».
+    """
     if access_status == "member":
         return "✅ У вас доступ участника закрытой группы — подписка не требуется."
     if active and expires_at is not None:
-        return f"✅ Подписка активна до {expires_at.strftime('%d.%m.%Y')}.\nПродлить: /subscribe"
+        text = f"✅ Подписка активна до {_d(expires_at)}."
+        if schedule:
+            text += f"\nСкорость: {schedule_line(schedule)}"
+        elif tier is not None:
+            text += f"\nСкорость: {_speed_label(tier == TIER_DELAYED)}"
+        return text + "\nПродлить: /subscribe"
     if trial_active and trial_expires_at is not None:
         return (
-            f"🎁 Бесплатный период активен до {trial_expires_at.strftime('%d.%m.%Y')}.\n"
+            f"🎁 Бесплатный период активен до {_d(trial_expires_at)} — на полной скорости.\n"
             "Оформить подписку заранее: /subscribe · Продлить бесплатно: /invite"
         )
     return "❌ Подписка неактивна. Оформить: /subscribe"
+
+
+def renewal_reminder_text(expires_at, tier: str) -> str:
+    """Напоминание перед истечением: что именно истекает и сколько стоит продлить.
+
+    Обе цены месячных планов рядом: человек продлевает не «подписку вообще», а
+    конкретную скорость, и должен видеть, что дешевле есть.
+    """
+    expiring = _speed_label(tier == TIER_DELAYED)
+    prices = " или ".join(
+        f"{_fmt_int(plan.price)} сом ({_speed_label(plan.delayed)})"
+        for plan in PLANS
+        if plan.days >= 30
+    )
+    return (
+        f"⏳ Ваш доступ ({expiring}) истекает {_d(expires_at)}.\n"
+        f"Продление на месяц — {prices}.\n"
+        "Продлить: /subscribe — чтобы не пропускать выгодные объявления."
+    )
+
+
+def paid_text(plan: Plan, expires_at, full_speed_from=None) -> str:
+    """Сообщение после оплаты (шлёт webhook): тариф, срок и дата полной скорости."""
+    text = (
+        f"✅ Оплата получена: <b>{plan.title}</b>.\n"
+        f"Доступ активен до {_d(expires_at)}."
+    )
+    if full_speed_from is not None:
+        # Полная скорость начинается не сегодня (купили поверх отстающего) —
+        # молчать об этом нельзя, иначе тишина читается как «оплата не сработала».
+        text += f"\nПолная скорость — с {_d(full_speed_from)}."
+    return text + "\nДоступ открыт — /add_filter"
 
 
 def _fmt_int(value: int) -> str:

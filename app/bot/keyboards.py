@@ -7,6 +7,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.db import BrandDTO, FilterDTO, ModelDTO
+from app.services.plans import PLANS
 from app.services.regions import ALL_CARS_CODE, ALL_CARS_LABEL, REGION_CHOICES
 
 # Telegram ограничивает inline-клавиатуру ~100 кнопками.
@@ -17,6 +18,23 @@ def pay_kb(url: str, label: str) -> InlineKeyboardMarkup:
     """Одна кнопка-ссылка на страницу оплаты Finik (QR / банковское приложение)."""
     builder = InlineKeyboardBuilder()
     builder.button(text=label, url=url)
+    return builder.as_markup()
+
+
+class PlanCB(CallbackData, prefix="plan"):
+    code: str  # код тарифа из services/plans.py
+
+
+def plans_kb() -> InlineKeyboardMarkup:
+    """Меню тарифов: по кнопке на план, в порядке реестра (рекомендуемый первым).
+
+    По одной кнопке в строку: в подписи и срок, и скорость, и цена — в два
+    столбца это не читается на телефоне.
+    """
+    builder = InlineKeyboardBuilder()
+    for plan in PLANS:
+        builder.button(text=plan.button_label, callback_data=PlanCB(code=plan.code))
+    builder.adjust(1)
     return builder.as_markup()
 
 

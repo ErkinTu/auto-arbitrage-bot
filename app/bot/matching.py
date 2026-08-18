@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -22,12 +22,19 @@ from app.models import (
     Source,
     UserFilter,
 )
+from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
+from app.services.plans import TIER_DELAYED, effective_tier
 from app.services.regions import FOREIGN_LOCATIONS, region_matches
 from app.services.stats import mileage_bucket
 from app.services.sync import utcnow
 from app.services.vehicle_summary import _build_source_url as build_source_url
+
+
+def _as_aware(dt: datetime) -> datetime:
+    """Наивную дату из БД трактуем как UTC (SQLite теряет tz, Postgres — нет)."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
 def is_foreign(city: str | None) -> bool:
@@ -274,6 +281,8 @@ def match_new_listings(
     min_samples: int,
     max_age_hours: int = 12,
     max_per_user: int = 0,
+    delayed_lag_minutes: int = 0,
+    flush_deadline: datetime | None = None,
 ) -> list[PendingNotification]:
     """Подбирает пары (пользователь, новое объявление), фиксирует отправку, возвращает DTO.
 
@@ -284,10 +293,22 @@ def match_new_listings(
     max_per_user (>0) — потолок пушей одному пользователю за цикл: сверх лимита
     объявление НЕ фиксируется в sent_notifications и придёт в следующем цикле,
     защищая последовательную рассылку от блокировки одним чатом (per-chat delay).
+
+    delayed_lag_minutes (>0) — выдержка «дешёвых» тарифов: их объявление уходит
+    только когда с квалифицирующего события прошло столько минут. 0 = выдержка
+    не применяется вовсе (аварийный выключатель тарифов). Частота циклов при этом
+    не меняется — сдвинуто только окно кандидатов.
+
+    flush_deadline — момент последнего цикла на сегодня (см. `window_end_utc`).
+    Всё, что не дозреет до него, отдаём отстающему сразу: до утра объявление
+    успевают снять или продать, а уведомление на мёртвую страницу читается как
+    сломанный бот, а не как дешёвый тариф. Один час из шестнадцати активных —
+    осознанная цена за живые ссылки.
     """
     listings = find_new_listings(session, since, max_age_hours=max_age_hours)
     if not listings:
         return []
+    now = utcnow()
     event_times = qualifying_event_times(session, since)
 
     filter_user_pairs = session.execute(
@@ -309,12 +330,12 @@ def match_new_listings(
                 and_(
                     BotUser.access_status == "subscriber",
                     BotUser.subscription_expires_at.is_not(None),
-                    BotUser.subscription_expires_at > utcnow(),
+                    BotUser.subscription_expires_at > now,
                 ),
                 and_(
                     BotUser.access_status == "trial",
                     BotUser.trial_expires_at.is_not(None),
-                    BotUser.trial_expires_at > utcnow(),
+                    BotUser.trial_expires_at > now,
                 ),
             ),
         )
@@ -341,6 +362,17 @@ def match_new_listings(
     }
     # Чёрные списки — одним запросом на цикл: дальше проверка идёт в памяти.
     block_sets = load_block_sets(session, {user.id for _, user in filter_user_pairs})
+    # Скорость тарифа — тоже одним запросом на цикл (как чёрные списки), а не
+    # по юзеру: строк в access_blocks столько же, сколько платежей.
+    lag = timedelta(minutes=delayed_lag_minutes) if delayed_lag_minutes > 0 else None
+    tier_by_user: dict[int, str] = {}
+    if lag is not None:
+        user_ids = {user.id for _, user in filter_user_pairs}
+        active_tiers = load_active_tiers(session, user_ids, now)
+        tier_by_user = {
+            user.id: effective_tier(user, active_tiers.get(user.id), now)
+            for _, user in filter_user_pairs
+        }
     # Индекс фильтров по марке: у объявления марка ровно одна, и прогонять по
     # нему фильтры чужих марок незачем. Ключ None — фильтры «все марки», их
     # проверяем всегда. Порядок внутри группы фиксируем по id фильтра, чтобы
@@ -377,6 +409,13 @@ def match_new_listings(
             event_at = event_times.get(listing.id)
             if event_at is not None and event_at < user_filter.created_at:
                 continue
+            # Отставание дешёвого тарифа. `event_at is None` не задерживаем:
+            # случай недостижим (объявления отобраны по событиям в окне), а
+            # «задержать навсегда» хуже, чем «отдать сразу» — окно конечно.
+            if lag is not None and event_at is not None and tier_by_user.get(user.id) == TIER_DELAYED:
+                ripe_at = _as_aware(event_at) + lag
+                if ripe_at > now and (flush_deadline is None or ripe_at <= flush_deadline):
+                    continue  # дозреет сегодня — придёт одним из следующих циклов
             # Потолок на цикл: не фиксируем и не шлём — объявление всплывёт
             # снова в следующем цикле (в пределах bot_new_lookback_minutes).
             if max_per_user and sent_counts.get(user.id, 0) >= max_per_user:
@@ -447,6 +486,7 @@ def preview_for_filter(
     max_age_hours: int = 24,
     factor: float = 0.95,
     min_samples: int = 5,
+    delayed_lag_minutes: int = 0,
 ) -> list[PendingNotification]:
     """Разовая подборка сразу после создания фильтра.
 
@@ -458,6 +498,10 @@ def preview_for_filter(
     Отобранное пишем в sent_notifications: иначе те же машины придут ещё раз
     обычной рассылкой. Сортировка — по величине отставания от рынка, чтобы в
     ограниченный лимит попало лучшее, а не случайное.
+
+    Тариф с отставанием получает здесь верхнюю границу свежести: без неё обход
+    тарифа сводился бы к «удалить фильтр и создать заново» — превью отдало бы
+    свежак мгновенно (лимит фильтров и запрет дубликатов пересозданию не мешают).
     """
     user_filter = session.get(UserFilter, filter_id)
     if user_filter is None:
@@ -466,13 +510,20 @@ def preview_for_filter(
     if user is None:
         return []
 
-    published_after = utcnow() - timedelta(hours=max_age_hours)
+    now = utcnow()
+    published_after = now - timedelta(hours=max_age_hours)
     query = select(Listing).where(
         Listing.is_active.is_(True),
         Listing.current_price_usd.is_not(None),
         Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
         Listing.source_created_at >= published_after,
     )
+    if delayed_lag_minutes > 0 and effective_tier(
+        user, active_tier(session, user.id, now), now
+    ) == TIER_DELAYED:
+        query = query.where(
+            Listing.source_created_at <= now - timedelta(minutes=delayed_lag_minutes)
+        )
     if user_filter.brand_id is not None:
         query = query.where(Listing.brand_id == user_filter.brand_id)
     candidates = list(session.scalars(query).all())

@@ -10,10 +10,11 @@ import app.bot.db as botdb
 from app.db.base import Base
 from app.bot.messages import (
     access_denied_text,
-    subscribe_prompt,
-    subscribe_renew_prompt,
+    plan_confirm_text,
     trial_already_used_text,
 )
+from app.services.access_schedule import ScheduleEntry
+from app.services.plans import find_plan
 from app.models import BotUser, Payment
 
 
@@ -110,19 +111,23 @@ def test_resolve_access_expired_subscriber_revoked(sessions) -> None:
         assert user.access_status == "revoked"
 
 
-def test_create_pending_payment_persists_row(sessions) -> None:
-    from decimal import Decimal
+def test_create_pending_payment_takes_price_from_the_registry(sessions) -> None:
+    """Сумма и срок — из реестра планов, а не из данных клиента.
 
+    Кнопку в чате можно нажать через неделю; подменяемой цены в этом пути быть
+    не должно, поэтому наружу торчит только код плана.
+    """
     botdb.resolve_access(555, None, None, is_member=True)
-    order_id = botdb.create_pending_payment(
-        555, amount=Decimal("500"), currency="KGS", period_days=30
-    )
-    assert order_id
+    plan = find_plan("week_delayed")
+    draft = botdb.create_pending_payment(555, plan_code=plan.code)
+    assert draft.ok and draft.order_id
+    assert draft.starts_now is True  # доступа не было — дни идут с сегодня
     with sessions() as s:
-        payment = s.scalar(select(Payment).where(Payment.order_id == order_id))
+        payment = s.scalar(select(Payment).where(Payment.order_id == draft.order_id))
         assert payment.status == "pending"
-        assert payment.amount == Decimal("500")
-        assert payment.period_days == 30
+        assert payment.amount == plan.price_kgs
+        assert payment.period_days == plan.days
+        assert payment.plan_code == plan.code
 
 
 # --- текст отказа -----------------------------------------------------------
@@ -221,36 +226,82 @@ def test_insert_race_retried_only_once(sessions) -> None:
     assert len(calls) == 2
 
 
-def test_subscribe_renew_prompt_says_days_stack() -> None:
-    """У активной подписки /subscribe обязан звучать иначе.
+def _draft(plan_code: str, **overrides) -> botdb.PaymentDraft:
+    return botdb.PaymentDraft(ok=True, plan_code=plan_code, order_id="o", **overrides)
 
-    Обычное «оформите подписку» человек с активным доступом читает как «оплата
-    не прошла» и платит второй раз. Проверяем главное: срок назван, сказано что
-    дни складываются, и нет слова «неактивна».
+
+def test_plan_confirm_names_both_dates_for_upgrade_over_delayed() -> None:
+    """Апгрейд поверх отстающего обязан назвать дату начала полной скорости.
+
+    Без даты оплативший 1990 прочтёт первый тихий час как обман — он ждёт
+    мгновенного ускорения, а получает его после конца уже оплаченного блока.
     """
     now = datetime(2026, 8, 15, tzinfo=timezone.utc)
-    expires = now + timedelta(days=29)
-    text = subscribe_renew_prompt(2000, 30, expires, now=now)
-    assert "13.09.2026" in text
-    assert "осталось 29 дн." in text
-    assert "приплюсуются" in text
-    assert "2 000 сом" in text
+    current_end = now + timedelta(days=15)
+    plan = find_plan("month_full")
+    text = plan_confirm_text(
+        plan,
+        _draft(
+            plan.code,
+            starts_at=current_end,
+            starts_now=False,
+            access_until=current_end + timedelta(days=30),
+            schedule_before=(
+                ScheduleEntry(tier="delayed", starts_at=now, ends_at=current_end),
+            ),
+        ),
+    )
+    assert "30.08.2026" in text  # начало полной скорости
+    assert "29.09.2026" in text  # конец доступа
+    assert "Доплаты разницы нет" in text
+    assert "Ничего не сгорает" in text
     assert "неактивна" not in text
 
 
-def test_subscribe_renew_prompt_last_day() -> None:
-    """Меньше суток — не «осталось 0 дн.», а человеческое «меньше суток»."""
+def test_plan_confirm_promises_no_downgrade_right_now() -> None:
+    """Дешёвый тариф поверх полного не понижает скорость сейчас — так и говорим."""
     now = datetime(2026, 8, 15, tzinfo=timezone.utc)
-    text = subscribe_renew_prompt(2000, 30, now + timedelta(hours=5), now=now)
-    assert "меньше суток" in text
-    assert "осталось 0" not in text
+    current_end = now + timedelta(days=20)
+    plan = find_plan("week_delayed")
+    text = plan_confirm_text(
+        plan,
+        _draft(
+            plan.code,
+            starts_at=current_end,
+            starts_now=False,
+            access_until=current_end + timedelta(days=7),
+            schedule_before=(ScheduleEntry(tier="full", starts_at=now, ends_at=current_end),),
+        ),
+    )
+    assert "Полная скорость сохраняется до 04.09.2026" in text
+    assert "понижения" in text
 
 
-def test_subscribe_prompt_warns_about_trial_days_burning() -> None:
+def test_plan_confirm_for_fresh_purchase_names_only_the_end() -> None:
+    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    plan = find_plan("month_full")
+    text = plan_confirm_text(
+        plan,
+        _draft(plan.code, starts_at=now, starts_now=True, access_until=now + timedelta(days=30)),
+    )
+    assert "14.09.2026" in text
+    assert "полная скорость всё время" in text
+    assert "Бесплатный период" not in text  # без триала лишнего абзаца нет
+
+
+def test_plan_confirm_warns_about_trial_days_burning() -> None:
     """Оплата во время триала обнуляет его остаток — предупреждаем заранее."""
-    trial_until = datetime(2026, 8, 18, tzinfo=timezone.utc)
-    text = subscribe_prompt(2000, 30, trial_expires_at=trial_until)
+    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    plan = find_plan("month_full")
+    text = plan_confirm_text(
+        plan,
+        _draft(
+            plan.code,
+            starts_at=now,
+            starts_now=True,
+            access_until=now + timedelta(days=30),
+            trial_expires_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
+        ),
+    )
     assert "18.08.2026" in text
     assert "не приплюсуются" in text
-    # Без триала лишнего абзаца быть не должно.
-    assert "Бесплатный период" not in subscribe_prompt(2000, 30)

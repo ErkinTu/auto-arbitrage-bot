@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -538,8 +539,59 @@ class Payment(Base, TimestampMixin):
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(10), default="KGS", nullable=False)
     period_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Код тарифа из `services/plans.py`. Нужен именно здесь: webhook приходит
+    # через минуты и знает о заказе только эту строку, а без плана он не сможет
+    # решить, какой блок доступа создавать (полный или с отставанием).
+    # NULL = исторические платежи до тарифов, читаются как `month_full`.
+    plan_code: Mapped[str | None] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(
         String(20), default="pending", nullable=False, index=True
     )  # pending | paid | expired
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     raw_callback: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class AccessBlock(Base):
+    """Оплаченный отрезок доступа с известной скоростью уведомлений.
+
+    Почему таблица, а не колонка `full_tier_until` на юзере: купленный «быстрый»
+    тариф встаёт В ХВОСТ уже оплаченному «медленному» (доплаты разницы нет),
+    поэтому доступ — это расписание, а не состояние. Пара колонок не выражает
+    последовательность `full → delayed → full` и не даёт назвать человеку точную
+    дату «полная скорость с 30.08», а назвать её обязательно: иначе оплативший
+    дорогой тариф прочтёт первый же тихий час как обман.
+
+    `subscription_expires_at` остаётся горизонтом доступа (кэш `MAX(ends_at)`) —
+    эта таблица отвечает только на вопрос «с какой скоростью», а не «есть ли
+    доступ». Арифметика хвоста — `services/access_schedule.py`.
+    """
+
+    __tablename__ = "access_blocks"
+    __table_args__ = (
+        Index("ix_access_blocks_user_ends", "user_id", "ends_at"),
+        # Идемпотентность webhook на уровне схемы: повторная доставка по тому же
+        # платежу физически не может создать второй блок.
+        Index(
+            "ux_access_blocks_payment",
+            "payment_id",
+            unique=True,
+            postgresql_where=text("payment_id IS NOT NULL"),
+            sqlite_where=text("payment_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tier: Mapped[str] = mapped_column(String(10), nullable=False)  # full | delayed
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # payment | referral | manual | backfill — «за что дни», см. plans.ORIGIN_*.
+    origin: Mapped[str] = mapped_column(String(20), nullable=False)
+    payment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("payments.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

@@ -23,7 +23,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import BotUser
+from app.services.access_schedule import tail_tier
 from app.services.events import EVENT_REFERRAL_BONUS, log_event
+from app.services.plans import ORIGIN_REFERRAL, TIER_DELAYED
 from app.services.subscription import extend_paid_access
 
 INVITE_CODE_LENGTH = 7
@@ -130,8 +132,20 @@ def grant_due_bonuses(
         return 0
     referrer.referral_bonuses_granted = earned
     days = pending * bonus_days
-    extend_paid_access(referrer, days, now)
-    log_event(session, referrer.id, EVENT_REFERRAL_BONUS, {"bonuses": pending, "days": days})
+    # Скорость бонусных дней = скорость ХВОСТА расписания: дни дописываются в
+    # хвост, значит и тариф логично брать оттуда. Нет блоков вовсе → `delayed`:
+    # подарок не должен быть дороже покупки, иначе приглашения обесценивают
+    # полный тариф (три друга — и месяц полной скорости бесплатно).
+    tier = tail_tier(session, referrer.id, now) or TIER_DELAYED
+    extend_paid_access(
+        session, referrer, days, tier=tier, origin=ORIGIN_REFERRAL, now=now
+    )
+    log_event(
+        session,
+        referrer.id,
+        EVENT_REFERRAL_BONUS,
+        {"bonuses": pending, "days": days, "tier": tier},
+    )
     return pending
 
 

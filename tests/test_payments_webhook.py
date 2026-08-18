@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.db.session import get_session
 from app.main import app
-from app.models import BotUser, Payment
+from app.models import AccessBlock, BotUser, Payment
 from app.services import finik
 from app.services.finik import WEBHOOK_PATH, canonical, sign
 from app.services.subscription import is_subscription_active, next_expiry
@@ -53,7 +53,13 @@ def _client() -> tuple[TestClient, sessionmaker]:
     return TestClient(app), TestingSession
 
 
-def _seed_pending_payment(SessionMaker: sessionmaker, amount: str = PRICE) -> tuple[int, str]:
+def _seed_pending_payment(
+    SessionMaker: sessionmaker,
+    amount: str = PRICE,
+    *,
+    plan_code: str | None = "month_full",
+    period_days: int = 30,
+) -> tuple[int, str]:
     with SessionMaker() as session:
         user = BotUser(telegram_id=111, access_status="member")
         session.add(user)
@@ -63,7 +69,8 @@ def _seed_pending_payment(SessionMaker: sessionmaker, amount: str = PRICE) -> tu
             order_id="8e1f6a4c-0000-4000-8000-000000000001",
             amount=Decimal(amount),
             currency="KGS",
-            period_days=30,
+            period_days=period_days,
+            plan_code=plan_code,
             status="pending",
         )
         session.add(payment)
@@ -247,17 +254,27 @@ def test_webhook_tampered_body_rejected() -> None:
         app.dependency_overrides.clear()
 
 
-def test_webhook_amount_mismatch_rejected() -> None:
-    """Подписанный webhook на другую сумму подписку не открывает."""
+def test_webhook_amount_mismatch_still_grants_access(caplog) -> None:
+    """Расхождение суммы — наша рассинхронизация, а не причина отобрать доступ.
+
+    Подпись Finik уже доказала, что тело не подделано, поэтому доступ выдаём по
+    `plan_code` и ругаемся в лог. Отказ означал бы «деньги списаны, доступа
+    нет» — ровно баг 14.08.2026, повторять его из-за арифметики нельзя.
+    """
     client, SessionMaker = _client()
     try:
         _, order_id = _seed_pending_payment(SessionMaker)
         raw, headers = _signed_webhook(order_id, amount=1)
-        resp = client.post(WEBHOOK_URL, content=raw, headers=headers)
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "amount mismatch"
+        with caplog.at_level("WARNING"):
+            resp = client.post(WEBHOOK_URL, content=raw, headers=headers)
+        assert resp.status_code == 200
+        assert "amount mismatch" in caplog.text
         with SessionMaker() as session:
-            assert session.get(Payment, 1).status == "pending"
+            payment = session.get(Payment, 1)
+            assert payment.status == "paid"
+            assert is_subscription_active(session.scalar(select(BotUser)))
+            # Дни и скорость взяты из плана/платежа, а не из суммы в webhook.
+            assert session.scalar(select(AccessBlock.tier)) == "full"
     finally:
         app.dependency_overrides.clear()
 
@@ -311,5 +328,117 @@ def test_webhook_rejects_non_json_body() -> None:
             headers={"content-type": "application/json", "signature": "x"},
         )
         assert resp.status_code == 400
+    finally:
+        app.dependency_overrides.clear()
+
+
+# --- тарифы: блок доступа по плану платежа -----------------------------------
+# Webhook приходит через минуты и знает о заказе только строку `payments`,
+# поэтому именно `plan_code` решает, какой блок создавать. Ошибка здесь = человек
+# заплатил за полную скорость и получил отставание (или наоборот).
+
+
+@pytest.mark.parametrize(
+    ("plan_code", "price", "days", "tier"),
+    [
+        ("month_full", "1990.00", 30, "full"),
+        ("month_delayed", "990.00", 30, "delayed"),
+        ("week_full", "600.00", 7, "full"),
+        ("week_delayed", "300.00", 7, "delayed"),
+    ],
+)
+def test_webhook_creates_the_block_of_the_paid_plan(
+    plan_code: str, price: str, days: int, tier: str
+) -> None:
+    client, SessionMaker = _client()
+    try:
+        _, order_id = _seed_pending_payment(
+            SessionMaker, price, plan_code=plan_code, period_days=days
+        )
+        raw, headers = _signed_webhook(order_id, amount=float(price))
+        assert client.post(WEBHOOK_URL, content=raw, headers=headers).status_code == 200
+        with SessionMaker() as session:
+            block = session.scalar(select(AccessBlock))
+            user = session.scalar(select(BotUser))
+            assert block.tier == tier
+            assert block.origin == "payment"
+            assert block.payment_id == 1
+            assert (block.ends_at - block.starts_at).days == days
+            # Горизонт доступа = конец последнего блока, иначе доступ и тариф
+            # разъедутся: один есть, другого нет.
+            assert user.subscription_expires_at == block.ends_at
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_webhook_reads_missing_plan_code_as_the_historical_month() -> None:
+    """Платежи до тарифной сетки: NULL = месяц полной скорости (было 2000 сом)."""
+    client, SessionMaker = _client()
+    try:
+        _, order_id = _seed_pending_payment(SessionMaker, plan_code=None)
+        raw, headers = _signed_webhook(order_id)
+        assert client.post(WEBHOOK_URL, content=raw, headers=headers).status_code == 200
+        with SessionMaker() as session:
+            block = session.scalar(select(AccessBlock))
+            assert block.tier == "full"
+            assert (block.ends_at - block.starts_at).days == 30
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_webhook_retry_does_not_create_a_second_block() -> None:
+    """Ровно то, ради чего в схеме UNIQUE(payment_id): ретраи Finik идут сутки."""
+    client, SessionMaker = _client()
+    try:
+        _, order_id = _seed_pending_payment(SessionMaker, "1990.00")
+        raw, headers = _signed_webhook(order_id, amount=1990.0)
+        client.post(WEBHOOK_URL, content=raw, headers=headers)
+        client.post(WEBHOOK_URL, content=raw, headers=headers)
+        with SessionMaker() as session:
+            blocks = session.scalars(select(AccessBlock)).all()
+            assert len(blocks) == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_second_payment_queues_after_the_first() -> None:
+    """Апгрейд поверх отстающего: полный блок встаёт следом, а не «прямо сейчас».
+
+    Это и есть решение «доплаты разницы нет»: скорость сейчас не меняется, но
+    оплаченные дни не сгорают.
+    """
+    client, SessionMaker = _client()
+    try:
+        _, first_order = _seed_pending_payment(
+            SessionMaker, "300.00", plan_code="week_delayed", period_days=7
+        )
+        raw, headers = _signed_webhook(first_order, amount=300.0)
+        assert client.post(WEBHOOK_URL, content=raw, headers=headers).status_code == 200
+
+        with SessionMaker() as session:
+            user = session.scalar(select(BotUser))
+            session.add(
+                Payment(
+                    user_id=user.id,
+                    order_id="8e1f6a4c-0000-4000-8000-000000000002",
+                    amount=Decimal("1990.00"),
+                    currency="KGS",
+                    period_days=30,
+                    plan_code="month_full",
+                    status="pending",
+                )
+            )
+            session.commit()
+        raw, headers = _signed_webhook(
+            "8e1f6a4c-0000-4000-8000-000000000002", amount=1990.0
+        )
+        assert client.post(WEBHOOK_URL, content=raw, headers=headers).status_code == 200
+
+        with SessionMaker() as session:
+            blocks = session.scalars(select(AccessBlock).order_by(AccessBlock.starts_at)).all()
+            assert [block.tier for block in blocks] == ["delayed", "full"]
+            assert blocks[1].starts_at == blocks[0].ends_at  # смежно, без дыры
+            user = session.scalar(select(BotUser))
+            assert user.subscription_expires_at == blocks[1].ends_at
     finally:
         app.dependency_overrides.clear()

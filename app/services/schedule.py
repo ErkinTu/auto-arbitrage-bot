@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -32,6 +32,26 @@ def seconds_until_window(now: datetime, start_hour: int, end_hour: int) -> float
     if next_start <= now:
         next_start += timedelta(days=1)
     return (next_start - now).total_seconds()
+
+
+def window_end_utc(now: datetime, end_hour: int, tz_name: str) -> datetime:
+    """Ближайшая граница конца активного окна бота — в UTC.
+
+    Нужна отстающим тарифам: перед ночной паузой выдержку приходится сбрасывать
+    (объявление, дозревающее в 00:10, пришлось бы отдать утром — а за ночь его
+    успевают снять, и уведомление на мёртвую страницу читается как сломанный
+    бот). Значит матчингу нужно знать, когда сегодняшние циклы кончатся.
+
+    `end_hour=24` = местная полночь (то есть 00:00 следующего дня). Считаем в
+    локальной зоне и переводим в UTC: окно задано бишкекскими часами, а `now`
+    и события в БД — в UTC.
+    """
+    tz = ZoneInfo(tz_name)
+    local = now.astimezone(tz)
+    boundary = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=end_hour)
+    if boundary <= local:
+        boundary += timedelta(days=1)
+    return boundary.astimezone(timezone.utc)
 
 
 def last_slot_start(now: datetime, start_hour: int, interval_hours: int) -> datetime:

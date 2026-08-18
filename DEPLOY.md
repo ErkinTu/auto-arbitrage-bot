@@ -411,14 +411,23 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
    PUBLIC_BASE_URL=https://63-182-28-250.sslip.io
    BOT_USERNAME=sk_hunterbot         # возврат из оплаты прямо в бота
    SUBSCRIPTION_TESTER_IDS=...       # ОБКАТКА: платить могут только эти id
-   SUBSCRIPTION_PRICE_KGS=2000
-   SUBSCRIPTION_PERIOD_DAYS=30
+   DELAYED_TIER_LAG_MINUTES=60        # отставание дешёвых тарифов; 0 = выключить
+   SUBSCRIPTION_MAX_HORIZON_DAYS=60   # дальше вперёд доступ не продаём
    SUBSCRIPTION_REMINDER_DAYS_BEFORE=1
    TRIAL_DAYS=3                      # 0 = выключить триал и рефералку
    REFERRAL_FRIENDS_PER_BONUS=3
    REFERRAL_BONUS_DAYS=7
    REFERRAL_MAX_BONUSES=1            # бонус за друзей — один раз на человека
    ```
+   > **Цен и сроков в `.env` больше нет.** Тарифная сетка (4 плана: месяц
+   > 1990/990, неделя 600/300) живёт в `app/services/plans.py`, потому что у
+   > плана есть ещё и тексты, а образ всё равно пересобирается на каждом
+   > деплое. Менять прайс = правка одного файла + `up -d --build`.
+   > `DELAYED_TIER_LAG_MINUTES` обязан быть ≤ `BOT_NEW_LOOKBACK_MINUTES / 2`
+   > (сейчас 60 против 180): иначе у отстающих не остаётся циклов, чтобы
+   > объявление подхватилось, и они перестают получать что-либо без единой
+   > ошибки в логах. На старте про это ругается warning — читать его в
+   > `docker compose logs bot | head`.
    > `FINIK_ENV` выбирает и хост acquiring, и публичный ключ, которым мы
    > проверяем подпись webhook. Кабинет боевой → должно быть `prod`, иначе
    > запросы уйдут на beta-хост, а входящие webhook не пройдут проверку.
@@ -479,19 +488,31 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
     echo | openssl s_client -connect 63-182-28-250.sslip.io:443 \
       -servername 63-182-28-250.sslip.io 2>/dev/null | openssl x509 -noout -subject -issuer -dates
     ```
-11. **Боевая проверка на 1 сом, пока оплата закрыта вайтлистом.** Временно
-    `SUBSCRIPTION_PRICE_KGS=1` (+ пересоздать `bot`), тестировщик платит
-    по-настоящему и сверяет всю цепочку:
+11. **Боевая проверка под вайтлистом.** Тестировщик платит по-настоящему и
+    сверяет всю цепочку. Прогонять надо **все четыре плана** (минимум 300 сом) и
+    отдельно сценарий «апгрейд поверх отстающего».
+    > Прежнего трюка «поставить цену 1 сом» больше нет: прайс переехал в
+    > `app/services/plans.py`. Если совсем нужно — правка файла и пересборка
+    > образа, но нормальный путь теперь — недельный план за 300 сом.
+    
     ```bash
     docker compose exec -T postgres psql -U car_user -d car_analytics -c \
       "SELECT order_id, status, amount, finik_transaction_id, paid_at FROM payments ORDER BY id DESC LIMIT 3;"
     docker compose exec -T postgres psql -U car_user -d car_analytics -c \
       "SELECT telegram_id, access_status, subscription_expires_at FROM bot_users
        WHERE telegram_id = <TESTER_ID>;"
+    docker compose exec -T postgres psql -U car_user -d car_analytics -c \
+      "SELECT b.tier, b.starts_at, b.ends_at, b.origin, p.plan_code
+         FROM access_blocks b LEFT JOIN payments p ON p.id = b.payment_id
+        WHERE b.user_id = (SELECT id FROM bot_users WHERE telegram_id = <TESTER_ID>)
+        ORDER BY b.starts_at;"
     docker compose logs api --since 30m | grep -i "webhook\|payments"
     ```
     Ожидаем: `status='paid'`, `paid_at` заполнен, `access_status='subscriber'`,
-    срок продлён, в бот пришло «✅ Оплата получена». Повторная доставка того же
+    срок продлён, в бот пришло «✅ Оплата получена». По тарифам отдельно:
+    `plan_code` доехал в платёж, блок создан РОВНО ОДИН, его `tier` совпал с
+    планом, `ends_at` последнего блока = `subscription_expires_at`, а даты в
+    сообщении бота совпали с расписанием. Повторная доставка того же
     webhook должна отвечать `200 already processed` (Finik ретраит сутки).
     > **Логи `api` смотреть обязательно, а не только базу.** Именно так поймали
     > `succeeded` вместо `success` (§10.10 анализа): webhook дошёл, подпись
@@ -504,12 +525,49 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
     сумма у Finik 0.01 сома, так что боевой тест дешевле переписки. Если beta всё
     же есть, порядок обычный: `FINIK_ENV=beta` → прогон → `prod` → пересоздать
     контейнеры.
-13. **Открыть всем**: вернуть `SUBSCRIPTION_PRICE_KGS=2000`, очистить
-    `SUBSCRIPTION_TESTER_IDS`, `docker compose up -d bot api worker`.
+13. **Открыть всем**: очистить `SUBSCRIPTION_TESTER_IDS`,
+    `docker compose up -d bot api worker`.
     > Помните про тех, у кого триал кончился ДО открытия оплаты: пейвольное
     > сообщение уходит ровно один раз за всю жизнь пользователя, второй раз бот
     > его не пришлёт. Этих людей надо добирать отдельной разовой рассылкой —
     > см. `docs/TODO.md § Открытые хвосты`.
+
+### Тарифы: 4 плана вместо одного
+
+Сетка (реестр — `app/services/plans.py`): месяц 1990 (полная скорость) / 990
+(отставание ~1 ч), неделя 600 / 300. Модель данных — `access_blocks`: очередь
+оплаченных отрезков доступа, потому что купленный «быстрый» тариф встаёт **в
+хвост** уже оплаченному «медленному» (доплаты разницы нет), и доступ становится
+расписанием, а не одной датой. Подробности и решения — `docs/PRICING_PLAN.md`.
+
+1. **DDL приезжает сам** (`init_db()` + `create_all`), alembic в проекте нет:
+   новая таблица `access_blocks` с partial unique index по `payment_id` и колонка
+   `payments.plan_code`.
+2. **Бэкфилл идёт в том же релизе и идемпотентен** (`MIGRATION_STATEMENTS`):
+   `plan_code` NULL → `'month_full'`, а всем, у кого доступ ещё активен,
+   создаётся блок `full` до `subscription_expires_at`. Без него заплатившие
+   2000 сом за полную скорость наутро получили бы отставание: без блока
+   `effective_tier` честно отвечает `delayed` (fail-safe по умолчанию).
+   Побочный эффект осознанный: реферальные и CLI-дни, выданные до тарифов, тоже
+   станут полными — отбирать выданное задним числом хуже.
+3. Прод-DDL лёгкий (`payments` мал, `access_blocks` новая), но порядок деплоя
+   прежний — помнить про затор DDL при `up -d --build` (см. § «Затор DDL»).
+4. **Проверка после деплоя** — блоки появились у всех, у кого есть доступ:
+   ```bash
+   docker compose exec -T postgres psql -U car_user -d car_analytics -c \
+     "SELECT count(*) FILTER (WHERE subscription_expires_at > now()) AS with_access,
+             (SELECT count(*) FROM access_blocks WHERE ends_at > now()) AS with_block
+        FROM bot_users;"
+   ```
+   Числа должны сойтись. Если `with_block` меньше — часть людей поедет на
+   `delayed`, и это надо чинить `grant-subscription --tier full` или SQL.
+5. **Выключатели.** Подписка целиком — пустые `FINIK_*` (как раньше). Отставание
+   отдельно — `DELAYED_TIER_LAG_MINUTES=0`: при нуле фильтрация не применяется
+   вовсе, все платные едут как полные. Нужен именно аварийно: если отставание
+   начнёт съедать уведомления, чинить надо мгновенно и без релиза.
+6. **Ручное продление знает про скорость**:
+   `cli.py grant-subscription --telegram-id N --days 7 [--tier full|delayed]`
+   (дефолт `full`: ручное продление — это компенсация, то есть извинение).
 
 ### Триал, пейвол и рефералка (выкатывается вместе с подпиской)
 

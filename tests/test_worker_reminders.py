@@ -8,7 +8,8 @@ from sqlalchemy.pool import StaticPool
 
 import app.worker as worker
 from app.db.base import Base
-from app.models import BotUser, Payment
+from app.models import AccessBlock, BotUser, Payment
+from app.services.plans import PLANS
 
 
 def _setup(monkeypatch):
@@ -139,3 +140,48 @@ def test_expire_stale_payments_only_touches_old_pending(monkeypatch) -> None:
     assert statuses == {"old": "expired", "fresh": "pending", "paid": "paid"}
     # Повторный прогон уже нечего гасить.
     assert worker.expire_stale_payments() == 0
+
+
+def test_reminder_names_the_expiring_tier_and_both_month_prices(monkeypatch) -> None:
+    """Продлевают конкретную скорость, а не «подписку вообще».
+
+    Заодно регрессия на удаление SUBSCRIPTION_PRICE_KGS: цены собираются из
+    реестра планов, и текст не должен падать после переезда прайса в код.
+    """
+    SessionMaker, sent = _setup(monkeypatch)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=2)
+    with SessionMaker() as s:
+        user = BotUser(
+            telegram_id=1, access_status="subscriber", subscription_expires_at=expires
+        )
+        s.add(user)
+        s.flush()
+        s.add(
+            AccessBlock(
+                user_id=user.id,
+                tier="delayed",
+                starts_at=now - timedelta(days=5),
+                ends_at=expires,
+                origin="payment",
+            )
+        )
+        s.commit()
+
+    worker.send_renewal_reminders_if_due(None)
+    assert len(sent) == 1
+    text = sent[0][1]
+    assert "с отставанием" in text  # что именно истекает
+    for plan in PLANS:
+        if plan.days >= 30:
+            assert str(plan.price) in text.replace("\u00a0", " ").replace(" ", "")
+
+
+def test_paywall_text_lists_the_whole_grid(monkeypatch) -> None:
+    """Пейвол-сообщение одно на всю жизнь юзера — в нём должна быть вся сетка."""
+    from app.bot.messages import trial_paywall_text
+
+    text = trial_paywall_text(payments_open=True)
+    for plan in PLANS:
+        assert str(plan.price) in text.replace("\u00a0", " ").replace(" ", "")
+    assert "/subscribe" in text

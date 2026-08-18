@@ -44,7 +44,15 @@ from app.services.blocklist import (
     MAX_BLOCKS_PER_USER,
     block_value,
 )
+from app.services.access_schedule import (
+    ScheduleEntry,
+    exceeds_horizon,
+    full_speed_starts_at,
+    schedule_for_user,
+    tail_end,
+)
 from app.services.events import EVENT_PAYMENT_CREATED, EVENT_START, log_event
+from app.services.plans import TIER_FULL, effective_tier, find_plan
 from app.services.referral import (
     ReferralStats,
     attach_referrer,
@@ -235,6 +243,13 @@ class SubscriptionInfo:
     trial_active: bool = False
     trial_expires_at: datetime | None = None
     trial_used: bool = False
+    # Скорость уведомлений прямо сейчас и расписание её изменений: у человека
+    # может быть оплачено `[с отставанием до 30.08][полная до 29.09]`, и одной
+    # датой это не рассказать — а рассказать обязательно, иначе купивший дорогой
+    # тариф прочтёт первый тихий час как обман.
+    tier: str = TIER_FULL
+    schedule: tuple[ScheduleEntry, ...] = ()
+    full_speed_from: datetime | None = None
 
 
 def get_subscription_info(telegram_id: int) -> SubscriptionInfo | None:
@@ -242,38 +257,114 @@ def get_subscription_info(telegram_id: int) -> SubscriptionInfo | None:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
         if user is None:
             return None
+        now = _utcnow()
+        entries = schedule_for_user(session, user.id, now)
+        active_block_tier = next(
+            (entry.tier for entry in entries if entry.starts_at <= now < entry.ends_at), None
+        )
         return SubscriptionInfo(
             access_status=user.access_status,
             expires_at=user.subscription_expires_at,
-            active=is_subscription_active(user),
-            trial_active=is_trial_active(user),
+            active=is_subscription_active(user, now),
+            trial_active=is_trial_active(user, now),
             trial_expires_at=user.trial_expires_at,
             trial_used=trial_used(user),
+            tier=effective_tier(user, active_block_tier, now),
+            schedule=tuple(entries),
+            full_speed_from=full_speed_starts_at(entries),
         )
 
 
-def create_pending_payment(
-    telegram_id: int, *, amount: Decimal, currency: str, period_days: int
-) -> str:
-    """Создаёт pending-платёж, возвращает order_id (уходит в Finik как PaymentId)."""
+@dataclass(slots=True)
+class PaymentDraft:
+    """Итог выбора плана: либо заведённый платёж с датами, либо отказ.
+
+    Даты считаются ДО оплаты и одним расчётом с расписанием: человек должен
+    увидеть «полная скорость с 30.08» на экране подтверждения, а не выяснять
+    после списания, почему уведомления идут медленно.
+    """
+
+    ok: bool
+    plan_code: str
+    order_id: str | None = None
+    # Когда начнутся купленные дни: now, если доступа нет, иначе — конец уже
+    # оплаченного (блоки строго в хвост, понижения «прямо сейчас» не бывает).
+    starts_at: datetime | None = None
+    # Купленные дни начинаются прямо сейчас (доступа не было) — от этого зависит
+    # весь текст подтверждения: «доступ до …» против «встанет следом с …».
+    starts_now: bool = False
+    access_until: datetime | None = None
+    # Что оплачено сейчас — чтобы сказать «ничего не сгорает» предметно.
+    schedule_before: tuple[ScheduleEntry, ...] = ()
+    trial_expires_at: datetime | None = None
+    # Заполнено ТОЛЬКО при отказе: доступ уже оплачен дальше горизонта.
+    horizon_until: datetime | None = None
+
+
+def create_pending_payment(telegram_id: int, *, plan_code: str) -> PaymentDraft:
+    """Заводит pending-платёж по коду плана и возвращает даты для подтверждения.
+
+    Сумма, срок и код плана берутся ИЗ РЕЕСТРА (`services/plans.py`), никогда из
+    данных клиента: callback приходит из чата, где кнопку можно нажать и через
+    неделю, и подменить в ней цену не должно быть возможности.
+
+    Отказ по горизонту (`ok=False`) выдаётся ДО создания платежа — иначе вышло бы
+    «деньги взяли, дни не встали»: горизонт мы всё равно не сдвинем дальше
+    разрешённого, а возвратов у нас нет.
+    """
+    plan = find_plan(plan_code)
+    if plan is None:  # защита: хендлер уже проверил код кнопки
+        raise LookupError(f"unknown plan code {plan_code!r}")
+    settings = get_settings()
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
         if user is None:
             raise LookupError(f"bot user {telegram_id} is not registered")
+        now = _utcnow()
+        if exceeds_horizon(
+            user,
+            plan.days,
+            max_horizon_days=settings.subscription_max_horizon_days,
+            now=now,
+        ):
+            return PaymentDraft(
+                ok=False,
+                plan_code=plan.code,
+                horizon_until=user.subscription_expires_at,
+                schedule_before=tuple(schedule_for_user(session, user.id, now)),
+            )
+
+        starts_at = tail_end(user, now)
         order_id = str(uuid.uuid4())  # Finik ждёт UUID (с дефисами), не hex
         session.add(
             Payment(
                 user_id=user.id,
                 order_id=order_id,
-                amount=amount,
-                currency=currency,
-                period_days=period_days,
+                amount=plan.price_kgs,
+                currency="KGS",
+                period_days=plan.days,
+                plan_code=plan.code,
                 status="pending",
             )
         )
-        log_event(session, user.id, EVENT_PAYMENT_CREATED, {"order_id": order_id})
+        log_event(
+            session,
+            user.id,
+            EVENT_PAYMENT_CREATED,
+            {"order_id": order_id, "plan_code": plan.code, "tier": plan.tier},
+        )
+        draft = PaymentDraft(
+            ok=True,
+            plan_code=plan.code,
+            order_id=order_id,
+            starts_at=starts_at,
+            starts_now=starts_at <= now,
+            access_until=starts_at + timedelta(days=plan.days),
+            schedule_before=tuple(schedule_for_user(session, user.id, now)),
+            trial_expires_at=user.trial_expires_at if is_trial_active(user, now) else None,
+        )
         session.commit()
-        return order_id
+        return draft
 
 
 # --------------------------------------------------------------------------
@@ -865,4 +956,5 @@ def preview_for_filter(filter_id: int) -> list[PendingNotification]:
             max_age_hours=settings.bot_filter_preview_max_age_hours,
             factor=settings.bot_below_avg_factor,
             min_samples=settings.bot_below_avg_min_samples,
+            delayed_lag_minutes=settings.delayed_tier_lag_minutes,
         )

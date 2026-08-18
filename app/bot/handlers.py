@@ -23,6 +23,7 @@ from app.bot.keyboards import (
     FilterDeleteCB,
     ModelCB,
     PercentCB,
+    PlanCB,
     RegionCB,
     SkipCB,
     TrialCB,
@@ -33,6 +34,7 @@ from app.bot.keyboards import (
     models_kb,
     pay_kb,
     percent_kb,
+    plans_kb,
     region_kb,
     share_kb,
     skip_kb,
@@ -60,11 +62,12 @@ from app.bot.messages import (
     onboarding_text,
     preview_intro_text,
     referral_bonus_text,
+    plan_confirm_text,
     start_text,
     status_text,
     subscribe_error_text,
-    subscribe_prompt,
-    subscribe_renew_prompt,
+    subscribe_horizon_text,
+    subscribe_menu_text,
     trial_already_used_text,
     trial_started_text,
 )
@@ -73,6 +76,7 @@ from app.bot.states import AddFilter
 from app.core.config import get_settings
 from app.services.blocklist import MAX_BLOCKS_PER_USER
 from app.services.finik import init_payment
+from app.services.plans import find_plan
 from app.services.regions import ALL_CARS_CODE, is_valid_region
 
 logger = logging.getLogger(__name__)
@@ -247,38 +251,62 @@ async def cmd_subscribe(message: Message) -> None:
         )
         return
 
+    # Первый шаг — сетка тарифов: условия человек узнаёт ДО оплаты, а точные
+    # даты — на экране подтверждения (второй шаг, cb_plan_selected).
+    await message.answer(subscribe_menu_text(), reply_markup=plans_kb())
+
+
+@router.callback_query(PlanCB.filter())
+async def cb_plan_selected(callback: CallbackQuery, callback_data: PlanCB) -> None:
+    """Второй шаг /subscribe: выбранный тариф → даты по расписанию → ссылка Finik."""
+    settings = get_settings()
+    plan = find_plan(callback_data.code)
+    if plan is None:
+        # Кнопка из истории чата после смены сетки: молча вести на оплату не того
+        # тарифа нельзя, поэтому честный отказ и свежее меню.
+        await callback.answer("Такого тарифа больше нет", show_alert=True)
+        await callback.message.answer(subscribe_menu_text(), reply_markup=plans_kb())
+        return
+    if not settings.subscription_allowed_for(callback.from_user.id):
+        await callback.answer()
+        await callback.message.answer(
+            SUBSCRIPTION_SOON_TEXT
+            if settings.subscription_testing
+            else SUBSCRIPTION_UNAVAILABLE_TEXT
+        )
+        return
+
+    await callback.answer()
     try:
-        order_id = await asyncio.to_thread(
-            db.create_pending_payment,
-            message.from_user.id,
-            amount=settings.subscription_price_kgs,
-            currency="KGS",
-            period_days=settings.subscription_period_days,
+        draft = await asyncio.to_thread(
+            db.create_pending_payment, callback.from_user.id, plan_code=plan.code
         )
     except LookupError:
-        await message.answer(subscribe_error_text())
+        await callback.message.answer(subscribe_error_text())
+        return
+
+    if not draft.ok:
+        # Отказ по горизонту: доступ уже оплачен слишком далеко вперёд. Говорим
+        # это ДО платежа — «деньги взяли, дни не встали» повторять нельзя.
+        await callback.message.answer(
+            subscribe_horizon_text(draft.horizon_until, settings.subscription_max_horizon_days)
+        )
         return
 
     result = await asyncio.to_thread(
         init_payment,
-        order_id=order_id,
-        amount=settings.subscription_price_kgs,
-        description=f"Подписка на {settings.subscription_period_days} дней",
+        order_id=draft.order_id,
+        amount=plan.price_kgs,
+        description=f"Доступ: {plan.title}",
     )
     if not result.ok or not result.redirect_url:
-        await message.answer(subscribe_error_text())
+        await callback.message.answer(subscribe_error_text())
         return
 
-    price = int(settings.subscription_price_kgs)
-    period = settings.subscription_period_days
-    if info is not None and info.active and info.expires_at is not None:
-        text = subscribe_renew_prompt(price, period, info.expires_at)
-        label = f"🔁 Продлить на {period} дней — {price} сом"
-    else:
-        trial_until = info.trial_expires_at if info is not None and info.trial_active else None
-        text = subscribe_prompt(price, period, trial_expires_at=trial_until)
-        label = f"💳 Оплатить {price} сом"
-    await message.answer(text, reply_markup=pay_kb(result.redirect_url, label))
+    await callback.message.answer(
+        plan_confirm_text(plan, draft),
+        reply_markup=pay_kb(result.redirect_url, f"💳 Оплатить {plan.price} сом"),
+    )
 
 
 @router.message(Command("status"))
@@ -294,6 +322,8 @@ async def cmd_status(message: Message) -> None:
             active=info.active,
             trial_active=info.trial_active,
             trial_expires_at=info.trial_expires_at,
+            schedule=info.schedule,
+            tier=info.tier,
         )
     )
 

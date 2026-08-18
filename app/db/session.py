@@ -55,6 +55,26 @@ def _upgrade_postgres_schema() -> None:
         # безопасный старт, а права выдаются вручную (`docs/ADMIN.md`). Таблицу
         # admin_login_tokens create_all создаёт сам.
         "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_superuser BOOLEAN NOT NULL DEFAULT FALSE",
+        # Тарифная сетка (4 плана): payments.plan_code — колонка на существующей
+        # таблице, поэтому ALTER обязателен. Таблицу access_blocks (вместе с её
+        # partial unique index по payment_id) создаёт create_all.
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS plan_code VARCHAR(20)",
+        # Бэкфилл ОБЯЗАТЕЛЕН в том же релизе: NULL читается как 'month_full', но
+        # доступ, выданный ДО тарифов, никакого блока не имеет — а без блока
+        # `effective_tier` честно отвечает 'delayed' (fail-safe по умолчанию), и
+        # заплатившие 2000 сом за полную скорость наутро получили бы отставание.
+        "UPDATE payments SET plan_code = 'month_full' WHERE plan_code IS NULL",
+        # Идемпотентно по NOT EXISTS, поэтому живёт здесь, а не ручным шагом на
+        # сервере. Побочный эффект осознанный: реферальные и CLI-дни, выданные до
+        # тарифов, тоже станут полными — их немного, а отбирать выданное задним
+        # числом хуже.
+        """
+        INSERT INTO access_blocks (user_id, tier, starts_at, ends_at, origin)
+        SELECT u.id, 'full', now(), u.subscription_expires_at, 'backfill'
+          FROM bot_users u
+         WHERE u.subscription_expires_at > now()
+           AND NOT EXISTS (SELECT 1 FROM access_blocks b WHERE b.user_id = u.id)
+        """,
     )
     with engine.begin() as connection:
         for statement in statements:

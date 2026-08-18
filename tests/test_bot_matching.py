@@ -14,6 +14,7 @@ from app.bot.matching import (
 )
 from app.db.base import Base
 from app.models import (
+    AccessBlock,
     BotUser,
     Brand,
     CarModel,
@@ -110,6 +111,49 @@ def _add_user_with_filter(session: Session, *, telegram_id: int = 111, **filter_
     session.add(user)
     session.flush()
     user_filter = UserFilter(user_id=user.id, brand_id=brand_id, **filter_kwargs)
+    session.add(user_filter)
+    session.commit()
+    return user_filter
+
+
+def _add_paid_user_with_filter(
+    session: Session,
+    *,
+    telegram_id: int,
+    tier: str,
+    days: int = 30,
+    filter_age_hours: int = 3,
+    **filter_kwargs,
+) -> UserFilter:
+    """Платный подписчик с блоком доступа известной скорости.
+
+    Фильтр намеренно «старый»: точка отсчёта фильтра отсекает всё, что случилось
+    до его создания, и без этого тесты про выдержку проверяли бы не выдержку.
+    """
+    now = _now()
+    _, brand_id, _ = _ids(session)
+    user = BotUser(
+        telegram_id=telegram_id,
+        access_status="subscriber",
+        subscription_expires_at=now + timedelta(days=days),
+    )
+    session.add(user)
+    session.flush()
+    session.add(
+        AccessBlock(
+            user_id=user.id,
+            tier=tier,
+            starts_at=now - timedelta(days=1),
+            ends_at=now + timedelta(days=days),
+            origin="payment",
+        )
+    )
+    user_filter = UserFilter(
+        user_id=user.id,
+        brand_id=brand_id,
+        created_at=now - timedelta(hours=filter_age_hours),
+        **filter_kwargs,
+    )
     session.add(user_filter)
     session.commit()
     return user_filter
@@ -591,3 +635,171 @@ def test_preview_respects_the_limit() -> None:
 
     preview = preview_for_filter(session, user_filter.id, limit=10, min_samples=5)
     assert len(preview) == 10
+
+
+# --- тарифы: отставание дешёвых планов ---------------------------------------
+# Отставание — единственное отличие тарифов, то есть буквально товар. Если оно
+# не работает, полный тариф не за что продавать; если работает слишком строго,
+# отстающий не получает ничего и уходит.
+
+
+def test_delayed_tier_waits_for_the_lag() -> None:
+    session = _session()
+    since = _now() - timedelta(minutes=180)
+    _add_paid_user_with_filter(session, telegram_id=42, tier="delayed")
+    _add_listing(session, external_id="1", observed_at=_now() - timedelta(minutes=10))
+
+    # 10 минут — рано: объявление дозреет и придёт следующими циклами.
+    assert (
+        match_new_listings(
+            session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60
+        )
+        == []
+    )
+    # То же объявление с событием 70 минут назад — уже можно.
+    session.query(ListingStatusHistory).update(
+        {ListingStatusHistory.observed_at: _now() - timedelta(minutes=70)}
+    )
+    session.commit()
+    pending = match_new_listings(
+        session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60
+    )
+    assert [note.chat_id for note in pending] == [42]
+
+
+def test_full_tier_member_and_trial_get_it_immediately() -> None:
+    """Полный тариф, участник группы и триал ждать не должны — это и есть разница."""
+    session = _session()
+    since = _now() - timedelta(minutes=180)
+    _, brand_id, _ = _ids(session)
+    now = _now()
+
+    _add_paid_user_with_filter(session, telegram_id=1, tier="full")
+    member = BotUser(telegram_id=2, access_status="member")
+    trial = BotUser(
+        telegram_id=3,
+        access_status="trial",
+        trial_started_at=now - timedelta(days=1),
+        trial_expires_at=now + timedelta(days=2),
+    )
+    session.add_all([member, trial])
+    session.flush()
+    session.add_all(
+        [
+            UserFilter(user_id=member.id, brand_id=brand_id, created_at=now - timedelta(hours=3)),
+            UserFilter(user_id=trial.id, brand_id=brand_id, created_at=now - timedelta(hours=3)),
+        ]
+    )
+    session.commit()
+
+    _add_listing(session, external_id="1", observed_at=now - timedelta(minutes=10))
+    pending = match_new_listings(
+        session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60
+    )
+    assert sorted(note.chat_id for note in pending) == [1, 2, 3]
+
+
+def test_paid_user_without_a_block_falls_back_to_delayed() -> None:
+    """Fail-safe: нет блока — медленный, но рабочий доступ, а не бесплатный полный."""
+    session = _session()
+    since = _now() - timedelta(minutes=180)
+    now = _now()
+    _, brand_id, _ = _ids(session)
+    user = BotUser(
+        telegram_id=42,
+        access_status="subscriber",
+        subscription_expires_at=now + timedelta(days=10),
+    )
+    session.add(user)
+    session.flush()
+    session.add(
+        UserFilter(user_id=user.id, brand_id=brand_id, created_at=now - timedelta(hours=3))
+    )
+    session.commit()
+    _add_listing(session, external_id="1", observed_at=now - timedelta(minutes=10))
+
+    assert (
+        match_new_listings(
+            session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60
+        )
+        == []
+    )
+
+
+def test_zero_lag_switches_the_delay_off_entirely() -> None:
+    """Аварийный выключатель DELAYED_TIER_LAG_MINUTES=0: все платные едут полными."""
+    session = _session()
+    since = _now() - timedelta(minutes=180)
+    _add_paid_user_with_filter(session, telegram_id=42, tier="delayed")
+    _add_listing(session, external_id="1", observed_at=_now() - timedelta(minutes=1))
+
+    pending = match_new_listings(
+        session, since, factor=0.95, min_samples=5, delayed_lag_minutes=0
+    )
+    assert [note.chat_id for note in pending] == [42]
+
+
+def test_delayed_tier_is_flushed_before_the_night_pause() -> None:
+    """Не дозревающее до последнего цикла отдаём сразу.
+
+    Иначе уведомление уедет утром — а за ночь объявление успевают снять, и
+    ссылка на удалённую страницу читается как сломанный бот, а не как дешёвый
+    тариф (решение владельца 18.08.2026).
+    """
+    session = _session()
+    since = _now() - timedelta(minutes=180)
+    _add_paid_user_with_filter(session, telegram_id=42, tier="delayed")
+    _add_listing(session, external_id="1", observed_at=_now() - timedelta(minutes=10))
+
+    # Успевает дозреть сегодня (дедлайн через 2 часа) — держим.
+    assert (
+        match_new_listings(
+            session,
+            since,
+            factor=0.95,
+            min_samples=5,
+            delayed_lag_minutes=60,
+            flush_deadline=_now() + timedelta(hours=2),
+        )
+        == []
+    )
+    # Последний цикл дня уже через 30 минут, дозреет только к 00:10 — отдаём.
+    pending = match_new_listings(
+        session,
+        since,
+        factor=0.95,
+        min_samples=5,
+        delayed_lag_minutes=60,
+        flush_deadline=_now() + timedelta(minutes=30),
+    )
+    assert [note.chat_id for note in pending] == [42]
+
+
+def test_preview_for_delayed_tier_has_an_upper_freshness_bound() -> None:
+    """Иначе обход тарифа — «удалить фильтр и создать заново»: превью отдаёт свежак."""
+    session = _session()
+    user_filter = _add_paid_user_with_filter(session, telegram_id=42, tier="delayed")
+    fresh = _add_listing(
+        session, external_id="fresh", source_created_at=_now() - timedelta(minutes=10)
+    )
+    old = _add_listing(
+        session, external_id="old", source_created_at=_now() - timedelta(hours=3)
+    )
+
+    preview = preview_for_filter(
+        session, user_filter.id, limit=10, min_samples=5, delayed_lag_minutes=60
+    )
+    assert [note.listing_id for note in preview] == [old.id]
+    assert fresh.id not in {note.listing_id for note in preview}
+
+
+def test_preview_for_full_tier_shows_everything() -> None:
+    session = _session()
+    user_filter = _add_paid_user_with_filter(session, telegram_id=42, tier="full")
+    _add_listing(session, external_id="fresh", source_created_at=_now() - timedelta(minutes=10))
+    _add_listing(session, external_id="old", source_created_at=_now() - timedelta(hours=3))
+
+    preview = preview_for_filter(
+        session, user_filter.id, limit=10, min_samples=5, delayed_lag_minutes=60
+    )
+    assert len(preview) == 2

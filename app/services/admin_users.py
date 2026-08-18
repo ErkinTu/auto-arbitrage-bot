@@ -27,12 +27,15 @@ from app.models import (
     BotUser,
     Brand,
     CarModel,
+    AccessBlock,
     Payment,
     SentNotification,
     UserBlock,
     UserEvent,
     UserFilter,
 )
+from app.services.access_schedule import full_speed_starts_at, schedule_for_user
+from app.services.plans import effective_tier
 from app.services.subscription import is_subscription_active
 from app.services.trial import is_trial_active, trial_used
 
@@ -191,6 +194,20 @@ def get_user(session: Session, user_id: int) -> dict:
     payments = session.scalars(
         select(Payment).where(Payment.user_id == user.id).order_by(Payment.created_at.desc())
     ).all()
+    access_blocks = session.scalars(
+        select(AccessBlock)
+        .where(AccessBlock.user_id == user.id)
+        .order_by(AccessBlock.starts_at.desc(), AccessBlock.id.desc())
+        .limit(50)
+    ).all()
+    # Скорость «сейчас» и дата полной — тем же кодом, что отвечает боту, иначе
+    # панель и /status разошлись бы в ответе на один вопрос.
+    schedule = schedule_for_user(session, user.id, now)
+    tier = effective_tier(
+        user,
+        next((e.tier for e in schedule if e.starts_at <= now < e.ends_at), None),
+        now,
+    )
     events = session.scalars(
         select(UserEvent)
         .where(UserEvent.user_id == user.id)
@@ -226,6 +243,8 @@ def get_user(session: Session, user_id: int) -> dict:
         "access": {
             "status": user.access_status,
             "in_group": user.access_status == "member",
+            "tier": tier,
+            "full_speed_from": full_speed_starts_at(schedule),
             "checked_at": _aware(user.last_access_check_at),
             "subscription_active": is_subscription_active(user, now),
             "subscription_expires_at": _aware(user.subscription_expires_at),
@@ -272,10 +291,21 @@ def get_user(session: Session, user_id: int) -> dict:
                 "currency": item.currency,
                 "status": item.status,
                 "period_days": item.period_days,
+                "plan_code": item.plan_code,
                 "created_at": _aware(item.created_at),
                 "paid_at": _aware(item.paid_at),
             }
             for item in payments
+        ],
+        "access_blocks": [
+            {
+                "tier": item.tier,
+                "starts_at": _aware(item.starts_at),
+                "ends_at": _aware(item.ends_at),
+                "origin": item.origin,
+                "payment_id": item.payment_id,
+            }
+            for item in access_blocks
         ],
         "events": [
             {"event": item.event, "created_at": _aware(item.created_at)} for item in events

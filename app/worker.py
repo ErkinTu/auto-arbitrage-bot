@@ -29,10 +29,12 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
-from app.bot.messages import trial_paywall_text
+from app.bot.messages import renewal_reminder_text, trial_paywall_text
 from app.models import BotUser, ParserRun, Payment
 from app.services.events import EVENT_TRIAL_EXPIRED, log_event
 from app.services.telegram import SendOutcome, send_message
+from app.services.access_schedule import tail_tier
+from app.services.plans import TIER_FULL
 from app.services.trial import paywall_candidates
 from app.parsers.mashina import MashinaParser
 from app.services.catalog_service import seed_default_catalog
@@ -192,13 +194,6 @@ def lalafo_maintenance_if_due(last_run_date: date | None) -> date | None:
     return today
 
 
-def _reminder_text(expires_at: datetime) -> str:
-    return (
-        f"⏳ Ваша подписка истекает {expires_at.strftime('%d.%m.%Y')}.\n"
-        "Продлите её командой /subscribe, чтобы не пропускать выгодные объявления."
-    )
-
-
 def send_renewal_reminders_if_due(last_run_date: date | None) -> date | None:
     """Раз в локальные сутки: напоминает подписчикам об истечении.
 
@@ -228,7 +223,13 @@ def send_renewal_reminders_if_due(last_run_date: date | None) -> date | None:
             )
         ).all()
         for user in users:
-            outcome = send_message(user.telegram_id, _reminder_text(user.subscription_expires_at))
+            # Тариф истекающего хвоста: продлевают конкретную скорость, и человек
+            # должен видеть, что именно кончается (и что дешевле есть).
+            tier = tail_tier(session, user.id, now) or TIER_FULL
+            outcome = send_message(
+                user.telegram_id,
+                renewal_reminder_text(user.subscription_expires_at, tier),
+            )
             # UNDELIVERABLE тоже закрываем флагом: адресата больше нет, и без
             # этого мы бы дёргали заблокировавшего бота каждый день до конца
             # его подписки. Повторяем только то, что реально стоит повторить.
@@ -261,11 +262,10 @@ def send_trial_paywall_notices() -> int:
     settings = get_settings()
     if not settings.trial_enabled:
         return 0
-    price = int(settings.subscription_price_kgs)
     # Пока оплата закрыта или обкатывается на тестировщиках, зовём не в
     # /subscribe (там «скоро»), а к ручному продлению — см. trial_paywall_text.
     payments_open = settings.subscription_enabled and not settings.subscription_testing
-    text = trial_paywall_text(price, settings.subscription_period_days, payments_open)
+    text = trial_paywall_text(payments_open)
     now = utcnow()
     sent = 0
     deferred = 0

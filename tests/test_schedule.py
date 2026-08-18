@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.services.schedule import (
     last_slot_start,
     seconds_until_window,
     split_brands_for_weekend,
+    window_end_utc,
 )
 
 
@@ -42,3 +43,30 @@ def test_last_slot_start() -> None:
     assert last_slot_start(_dt(1, 0, day=12), 10, 8) == _dt(18, 0, day=11)
     assert last_slot_start(_dt(2, 0, day=12), 10, 8) == _dt(2, 0, day=12)
     assert last_slot_start(_dt(9, 59, day=12), 10, 8) == _dt(2, 0, day=12)
+
+
+def test_window_end_utc_midnight() -> None:
+    """end_hour=24 = местная полночь. Нужно отстающим тарифам: до неё они ждут,
+    после — уже некому забирать, поэтому выдержка сбрасывается."""
+    # 10:00 UTC = 16:00 в Бишкеке (UTC+6) -> ближайшая граница 00:00 20.08 местных.
+    now = datetime(2026, 8, 19, 10, 0, tzinfo=timezone.utc)
+    assert window_end_utc(now, 24, "Asia/Bishkek") == datetime(
+        2026, 8, 19, 18, 0, tzinfo=timezone.utc
+    )
+    # 18:30 UTC = 00:30 20.08 местных: сегодняшняя полночь уже прошла.
+    now = datetime(2026, 8, 19, 18, 30, tzinfo=timezone.utc)
+    assert window_end_utc(now, 24, "Asia/Bishkek") == datetime(
+        2026, 8, 20, 18, 0, tzinfo=timezone.utc
+    )
+
+
+def test_window_end_utc_non_midnight_hour() -> None:
+    now = datetime(2026, 8, 19, 10, 0, tzinfo=timezone.utc)  # 16:00 местных
+    assert window_end_utc(now, 23, "Asia/Bishkek") == datetime(
+        2026, 8, 19, 17, 0, tzinfo=timezone.utc
+    )
+    # Граница уже прошла (23:30 местных) -> ждём завтрашнюю.
+    now = datetime(2026, 8, 19, 17, 30, tzinfo=timezone.utc)
+    assert window_end_utc(now, 23, "Asia/Bishkek") == datetime(
+        2026, 8, 20, 17, 0, tzinfo=timezone.utc
+    )

@@ -18,7 +18,7 @@ from app.bot.notifier import BotLike, send_notifications
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.services.lookup import ensure_brand_targets, get_or_create_source
-from app.services.schedule import local_now, seconds_until_window
+from app.services.schedule import local_now, seconds_until_window, window_end_utc
 from app.services.sources import LALAFO, SOURCE_NAMES, build_parser, source_base_url
 from app.services.sync import run_sync, utcnow
 
@@ -80,7 +80,15 @@ def run_cycle() -> list[PendingNotification]:
             finally:
                 parser.close()
 
-        since = utcnow() - timedelta(minutes=settings.bot_new_lookback_minutes)
+        now = utcnow()
+        since = now - timedelta(minutes=settings.bot_new_lookback_minutes)
+        # Перед ночной паузой выдержка отстающих тарифов сходит к нулю: вычитаем
+        # один интервал, потому что последний цикл дня идёт около 23:50, и
+        # объявление с дозреванием в 23:55 «формально успевает», но забрать его
+        # уже некому — а утреннее уведомление ведёт на снятое объявление.
+        flush_deadline = window_end_utc(
+            now, settings.bot_active_end_hour, settings.scheduler_timezone
+        ) - timedelta(minutes=settings.bot_fresh_interval_minutes)
         return match_new_listings(
             session,
             since,
@@ -88,6 +96,8 @@ def run_cycle() -> list[PendingNotification]:
             min_samples=settings.bot_below_avg_min_samples,
             max_age_hours=settings.bot_max_listing_age_hours,
             max_per_user=settings.bot_max_notifications_per_user_per_cycle,
+            delayed_lag_minutes=settings.delayed_tier_lag_minutes,
+            flush_deadline=flush_deadline,
         )
 
 
