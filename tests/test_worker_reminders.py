@@ -177,6 +177,25 @@ def test_reminder_names_the_expiring_tier_and_both_month_prices(monkeypatch) -> 
             assert str(plan.price) in text.replace("\u00a0", " ").replace(" ", "")
 
 
+def test_worker_texts_carry_no_markup() -> None:
+    """Регрессия: worker шлёт БЕЗ parse_mode, теги прилетели бы текстом.
+
+    `services/telegram.py::send_message` не ставит parse_mode (в отличие от бота
+    с DefaultBotProperties(HTML)), поэтому <b> в пейволе или напоминании человек
+    увидел бы как есть. Пейвол — одно сообщение на всю жизнь юзера.
+    """
+    from app.bot.messages import renewal_reminder_text, trial_paywall_text
+
+    texts = [
+        trial_paywall_text(payments_open=True),
+        trial_paywall_text(payments_open=False),
+        renewal_reminder_text(datetime(2026, 9, 1, tzinfo=timezone.utc), "full"),
+        renewal_reminder_text(datetime(2026, 9, 1, tzinfo=timezone.utc), "delayed"),
+    ]
+    for text in texts:
+        assert "<" not in text and "&" not in text, text
+
+
 def test_paywall_text_lists_the_whole_grid(monkeypatch) -> None:
     """Пейвол-сообщение одно на всю жизнь юзера — в нём должна быть вся сетка."""
     from app.bot.messages import trial_paywall_text

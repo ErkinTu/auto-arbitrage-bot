@@ -124,11 +124,21 @@ def _speed_label(delayed: bool) -> str:
     return "с отставанием ~1 ч" if delayed else "полная скорость"
 
 
-def plan_line(plan: Plan) -> str:
+def plan_line(plan: Plan, *, bold: bool = True) -> str:
+    """Строка тарифа в сетке.
+
+    `bold=False` — для сообщений, которые уходят из worker-а: `services/telegram.py`
+    шлёт БЕЗ `parse_mode` (в отличие от бота с DefaultBotProperties(HTML)), и
+    теги там прилетели бы человеку текстом. Пейвол — сообщение одно на всю
+    жизнь юзера, испортить его разметкой нельзя.
+    """
     speed = (
         "уведомления примерно на час позже" if plan.delayed else "уведомления сразу, без задержки"
     )
-    return f"• <b>{plan.period_label.lower()} — {_fmt_int(plan.price)} сом</b> ({speed})"
+    price = f"{plan.period_label.lower()} — {_fmt_int(plan.price)} сом"
+    if bold:
+        price = f"<b>{price}</b>"
+    return f"• {price} ({speed})"
 
 
 # Что такое «отставание» — объясняем словами и с честным минусом. Это
@@ -297,7 +307,7 @@ def trial_paywall_text(payments_open: bool = True) -> str:
             "включим доступ вручную, как только всё заработает.\n"
             "А пока можно получить дни за приглашённых друзей: /invite"
         )
-    grid = "\n".join(plan_line(plan) for plan in PLANS)
+    grid = "\n".join(plan_line(plan, bold=False) for plan in PLANS)
     return (
         "⏳ Бесплатный период закончился — новые объявления я больше не присылаю.\n\n"
         f"{grid}\n\n"
