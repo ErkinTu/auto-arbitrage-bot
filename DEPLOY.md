@@ -246,6 +246,52 @@ rsync -avn -e "ssh -i $KEY" --exclude '.env' --exclude '.venv' --exclude '.git' 
 - На будущее чище — приватный git-репозиторий и `git pull` на сервере вместо
   rsync (тогда `.env` держат отдельно, а не заливают из локали).
 
+### Затор DDL при `up -d --build` (случается регулярно, лечится одной командой)
+
+`up -d --build` пересоздаёт `api`, `worker` и `bot` одновременно, и **все три
+выполняют `init-db`** (плюс `api` делает это ещё раз в своём lifespan). Отсюда
+два наблюдаемых сбоя — оба видны только в логах, наружу выглядят как «сервис не
+поднялся».
+
+1. **Лок на `listings`.** `ALTER TABLE listings ADD COLUMN IF NOT EXISTS …`
+   берёт ACCESS EXCLUSIVE ДО проверки `IF EXISTS`, поэтому даже no-op ALTER
+   встаёт в очередь за любой открытой транзакцией по `listings`. Бот и воркер
+   уже стартовали и держат сессию `idle in transaction` (у них
+   `autoflush=False`, соединение остаётся в транзакции между запросами) →
+   `init_db` висит, `api` замирает на `Waiting for application startup.`,
+   `/health` не отвечает.
+2. **Гонка `CREATE TABLE`.** Когда в релизе есть НОВАЯ таблица, три `create_all`
+   стартуют одновременно и двое проигрывают:
+   `UniqueViolation: duplicate key value violates unique constraint
+   "pg_type_typname_nsp_index"`. Таблица при этом создаётся (победителем), данные
+   целы, но в логах остаётся traceback — не пугаться, а проверить, что таблица и
+   её индексы на месте.
+
+**Диагностика и лечение** (в 08/2026 понадобилось при выкатке тарифов):
+
+```bash
+docker compose exec -T postgres psql -U car_user -d car_analytics -c "
+SELECT pid, state, wait_event_type, age(clock_timestamp(), xact_start) AS xact_age,
+       pg_blocking_pids(pid) AS blocked_by, left(query, 60) AS q
+  FROM pg_stat_activity
+ WHERE datname = current_database() AND pid <> pg_backend_pid()
+ ORDER BY xact_start NULLS LAST;"
+```
+
+Корень — та строка, у которой `state = idle in transaction` и пустой
+`blocked_by`; за ней стоят ALTER-ы. Снять её (транзакция читающая, пул
+переподключится сам благодаря `pool_pre_ping`):
+
+```bash
+docker compose exec -T postgres psql -U car_user -d car_analytics -c \
+  "SELECT pg_terminate_backend(<PID>);"
+curl -s 127.0.0.1:8000/health      # через несколько секунд {"status":"ok"}
+```
+
+Проверять `pg_stat_activity` полезно и ДО деплоя: пустой список означает, что
+затора не будет. Настоящее лечение (advisory-lock вокруг `init_db`, чтобы
+миграцию выполнял ровно один контейнер) — в бэклоге, `docs/TODO.md`.
+
 ### Первая выкладка ветки `dev-admin-panel` (ещё не сделана)
 
 Ветка с админ-панелью на сервер **не заливалась** (статус — в
@@ -551,7 +597,9 @@ HTTPS-входа — webhook Finik. Даёт его контейнер **Caddy**
    Побочный эффект осознанный: реферальные и CLI-дни, выданные до тарифов, тоже
    станут полными — отбирать выданное задним числом хуже.
 3. Прод-DDL лёгкий (`payments` мал, `access_blocks` новая), но порядок деплоя
-   прежний — помнить про затор DDL при `up -d --build` (см. § «Затор DDL»).
+   прежний — помнить про затор DDL при `up -d --build` (см. § «Затор DDL при
+   `up -d --build`»): при выкатке тарифов он сработал оба раза — и гонкой
+   `CREATE TABLE access_blocks`, и локом на `listings`.
 4. **Проверка после деплоя** — блоки появились у всех, у кого есть доступ:
    ```bash
    docker compose exec -T postgres psql -U car_user -d car_analytics -c \
