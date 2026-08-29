@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from aiogram.types import CallbackQuery
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -8,13 +9,15 @@ from sqlalchemy.pool import StaticPool
 
 import app.bot.db as botdb
 from app.db.base import Base
+from app.bot.access import AccessMiddleware
+from app.bot.keyboards import BrandCB, PlanCB
 from app.bot.messages import (
     access_denied_text,
     plan_confirm_text,
     trial_already_used_text,
 )
 from app.services.access_schedule import ScheduleEntry
-from app.services.plans import find_plan
+from app.services.plans import PLANS, find_plan
 from app.models import BotUser, Payment
 
 
@@ -305,3 +308,29 @@ def test_plan_confirm_warns_about_trial_days_burning() -> None:
     )
     assert "18.08.2026" in text
     assert "не приплюсуются" in text
+
+
+# --- вход без доступа -------------------------------------------------------
+
+
+def _callback(data: str) -> CallbackQuery:
+    """Апдейт-кнопка без похода в Telegram: _is_entry смотрит только на data."""
+    return CallbackQuery.model_construct(data=data)
+
+
+def test_plan_button_is_an_entry_point_for_a_user_without_access() -> None:
+    """Нажатие на тариф не должно упираться в пейвол.
+
+    Поймано 29.08.2026: /subscribe — входная команда, поэтому меню тарифов
+    открывалось всем, а callback выбора плана middleware резал как обычный
+    апдейт → человек без доступа получал «Доступ закончился… Продлить:
+    /subscribe» ровно в ответ на попытку продлить. Оплатить не мог тот, кому
+    это нужнее всего; на тестовом аккаунте с доступом баг не воспроизводился.
+    """
+    for plan in PLANS:
+        assert AccessMiddleware._is_entry(_callback(PlanCB(code=plan.code).pack())) is True
+
+
+def test_ordinary_callback_still_requires_access() -> None:
+    """Расширение списка входных префиксов не должно открыть бота целиком."""
+    assert AccessMiddleware._is_entry(_callback(BrandCB(brand_id=7).pack())) is False
