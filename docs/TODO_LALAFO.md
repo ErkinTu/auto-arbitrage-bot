@@ -228,7 +228,7 @@ bucket `unknown` собирает NULL-пробеги машин с реальн
 ## Порядок выката
 
 1. Код: задачи A + B + C одним заходом (C без A/B опасна). D — отдельно, позже.
-2. `pytest` + `ruff` локально; прогнать `run_cycle` бота и `rebuild-stats`.
+2. `pytest` + `ruff` локально; прогнать цикл бота (`sync_source` + `collect_matches`) и `rebuild-stats`.
 3. Деплой (rsync + `docker compose up -d --build`, см. `../DEPLOY.md`).
 4. На проде: `reprocess-catalog` (бэкфиллит `price_implausibly_high`/`_low` из
    `current_price_usd` — задачи A + отсев mashina<$500) → `rebuild-stats`
@@ -239,7 +239,7 @@ bucket `unknown` собирает NULL-пробеги машин с реальн
 ## Не забыть после реализации
 
 - `pytest` + `ruff`, обновить `../CLAUDE.md` (новые настройки) и прод-чеклист в
-  `LALAFO.md`, прогнать локально цикл бота (`run_cycle`) и `rebuild-stats`.
+  `LALAFO.md`, прогнать локально цикл бота (`sync_source` + `collect_matches`) и `rebuild-stats`.
 - ~~Идеи на потом~~ — РЕАЛИЗОВАНЫ 2026-07-18 по решению Erkin: точечный
   валидатор карточек (`validate_stale_lalafo_listings`; факт: мёртвая карточка
   = HTTP 410 Gone, живая = 200 со `status_id: 2` — проверено живьём), warning

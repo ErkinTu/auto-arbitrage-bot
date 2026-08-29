@@ -1,15 +1,25 @@
 """Фоновый цикл бота: легкий fresh-парс + подбор уведомлений.
 
-run_cycle — полностью синхронный (вызывается через asyncio.to_thread),
-polling_loop — asyncio-обертка с расписанием и отправкой. Циклы идут каждые
-BOT_FRESH_INTERVAL_MINUTES, но только в окне активности
-[BOT_ACTIVE_START_HOUR, BOT_ACTIVE_END_HOUR) локального времени.
+Цикл идёт каждые BOT_FRESH_INTERVAL_MINUTES в окне активности
+[BOT_ACTIVE_START_HOUR, BOT_ACTIVE_END_HOUR) локального времени и состоит из
+двух НЕЗАВИСИМЫХ частей:
+
+- `sync_source` — обход одного источника, по потоку на источник (у каждого своя
+  сессия: объект Session потокобезопасным не является). Источники параллельны,
+  потому что они ничем друг с другом не связаны, а последовательно цикл стоил
+  сумму, а не максимум;
+- `collect_matches` — подбор уведомлений. Это ЗАПРОС К БАЗЕ по окну
+  `BOT_NEW_LOOKBACK_MINUTES` (на проде 180 мин при интервале 10), а не разбор
+  «что этот цикл только что скачал». Отсюда правило: **застрявший источник
+  рассылку не держит**. Что он докоммитит с опозданием, подберёт следующий цикл
+  — окно в 18 раз шире интервала, а `sent_notifications` не даст дубля.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 
 from app.bot.db import mark_user_blocked
@@ -24,62 +34,76 @@ from app.services.sync import run_sync, utcnow
 
 logger = logging.getLogger(__name__)
 
+# Минимальный зазор между циклами, даже если цикл сам съел весь интервал.
+MIN_PAUSE_SECONDS = 60
 
-def run_cycle() -> list[PendingNotification]:
-    """Один цикл: 1 страница x BOT_FRESH_PAGE_SIZE свежих объявлений на марку,
-    затем матчинг. Страница маленькая (20), а циклы частые — нагрузка на сайт
-    ниже, чем редкие тяжелые страницы.
 
-    Пауза между запросами марок обеспечивается парсером: он спит
-    REQUEST_DELAY_SECONDS после каждого HTTP-запроса.
+def sync_source(source_name: str) -> None:
+    """Обход ОДНОГО источника: 1 страница x page_size свежих объявлений на марку.
+
+    Страница маленькая (20), а циклы частые — нагрузка на сайт ниже, чем редкие
+    тяжелые страницы. Пауза между запросами марок обеспечивается парсером: он
+    спит REQUEST_DELAY_SECONDS после каждого HTTP-запроса.
+
+    Своя сессия на вызов — обязательна: функция крутится в отдельном потоке на
+    источник, а Session у SQLAlchemy не потокобезопасна.
     """
     settings = get_settings()
     with SessionLocal() as session:
-        for source_name in SOURCE_NAMES:
-            try:
-                source = get_or_create_source(session, source_name, source_base_url(source_name))
-                session.commit()
-                targets = ensure_brand_targets(session, source, settings.allowed_brand_list)
-                # Для lalafo здесь же подтягивается курс НБКР (лениво, раз в день).
-                parser = build_parser(source_name, session)
-            except Exception:
-                session.rollback()
-                logger.exception("bot fresh cycle: source %s is unavailable, skipping", source_name)
-                continue
-            page_size = (
-                settings.lalafo_fresh_page_size if source_name == LALAFO else settings.bot_fresh_page_size
-            )
-            try:
-                for target in targets:
-                    try:
-                        summary = run_sync(
-                            session,
-                            parser,
-                            source,
-                            target,
-                            mode="fresh",
-                            period_override=settings.bot_fresh_period,
-                            page_size_override=page_size,
-                            max_pages_override=1,
-                            max_items_override=page_size,
-                            update_target_bookkeeping=False,
-                            catchup_max_pages=settings.bot_catchup_max_pages,
-                        )
-                        logger.info(
-                            "bot fresh sync %s %s: new=%s processed=%s",
-                            source_name,
-                            target.brand_filter,
-                            summary.new,
-                            summary.processed,
-                        )
-                    except Exception:
-                        session.rollback()
-                        logger.exception(
-                            "bot fresh sync failed for %s %s", source_name, target.brand_filter
-                        )
-            finally:
-                parser.close()
+        try:
+            source = get_or_create_source(session, source_name, source_base_url(source_name))
+            session.commit()
+            targets = ensure_brand_targets(session, source, settings.allowed_brand_list)
+            # Для lalafo здесь же подтягивается курс НБКР (лениво, раз в день).
+            parser = build_parser(source_name, session)
+        except Exception:
+            session.rollback()
+            logger.exception("bot fresh cycle: source %s is unavailable, skipping", source_name)
+            return
+        page_size = (
+            settings.lalafo_fresh_page_size if source_name == LALAFO else settings.bot_fresh_page_size
+        )
+        try:
+            for target in targets:
+                try:
+                    summary = run_sync(
+                        session,
+                        parser,
+                        source,
+                        target,
+                        mode="fresh",
+                        period_override=settings.bot_fresh_period,
+                        page_size_override=page_size,
+                        max_pages_override=1,
+                        max_items_override=page_size,
+                        update_target_bookkeeping=False,
+                        catchup_max_pages=settings.bot_catchup_max_pages,
+                    )
+                    logger.info(
+                        "bot fresh sync %s %s: new=%s processed=%s",
+                        source_name,
+                        target.brand_filter,
+                        summary.new,
+                        summary.processed,
+                    )
+                except Exception:
+                    session.rollback()
+                    logger.exception(
+                        "bot fresh sync failed for %s %s", source_name, target.brand_filter
+                    )
+        finally:
+            parser.close()
 
+
+def collect_matches() -> list[PendingNotification]:
+    """Подбор уведомлений по тому, что УЖЕ лежит в базе.
+
+    Намеренно не принимает результат синка: окно `BOT_NEW_LOOKBACK_MINUTES`
+    шире интервала во много раз, поэтому отставший источник ничего не теряет —
+    его находки подберёт следующий цикл.
+    """
+    settings = get_settings()
+    with SessionLocal() as session:
         now = utcnow()
         since = now - timedelta(minutes=settings.bot_new_lookback_minutes)
         # Перед ночной паузой выдержка отстающих тарифов сходит к нулю: вычитаем
@@ -105,9 +129,70 @@ async def _on_blocked(chat_id: int) -> None:
     await asyncio.to_thread(mark_user_blocked, chat_id)
 
 
+def _log_task_error(task: asyncio.Task) -> None:
+    """Забирает исключение у завершённой задачи обхода.
+
+    `asyncio.wait` исключения не поднимает: не спросить — значит потерять
+    причину, по которой источник молчал весь цикл.
+    """
+    if task.cancelled() or not task.done():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("source sync task %s failed: %r", task.get_name(), error)
+
+
+async def _run_sources(inflight: dict[str, asyncio.Task], *, deadline_seconds: float) -> None:
+    """Запускает обход всех источников параллельно и ждёт их — но не бесконечно.
+
+    Два правила, оба выведены из замеров на проде:
+
+    1. **Один синк на источник одновременно.** Затор lalafo (таймауты прокси с
+       бэкоффом 10/20/30/40 с) растягивает её обход до 22 минут. Без этой
+       проверки к третьему циклу на уже отваливающийся прокси пришлось бы три
+       параллельных обхода — то есть мы бы добивали источник ровно тогда, когда
+       ему плохо.
+    2. **Застрявший источник не держит рассылку.** По истечении дедлайна цикл
+       идёт дальше, а отставший поток продолжает работать в фоне и коммитит в
+       свою сессию. Ничего не теряется: `collect_matches` смотрит в базу по
+       окну `BOT_NEW_LOOKBACK_MINUTES`, которое много шире интервала.
+    """
+    for source_name in SOURCE_NAMES:
+        task = inflight.get(source_name)
+        if task is not None and not task.done():
+            logger.warning(
+                "source %s is still syncing since the previous cycle, not starting another one",
+                source_name,
+            )
+            continue
+        if task is not None:
+            # Задача доехала уже после прошлого дедлайна — её результат никто не
+            # смотрел. Забираем исключение здесь, иначе asyncio напишет в лог
+            # «Task exception was never retrieved» без привязки к источнику.
+            _log_task_error(task)
+        inflight[source_name] = asyncio.create_task(
+            asyncio.to_thread(sync_source, source_name), name=f"sync:{source_name}"
+        )
+
+    running = {task for task in inflight.values() if not task.done()}
+    if not running:
+        return
+    done, still_running = await asyncio.wait(running, timeout=deadline_seconds)
+    for task in done:
+        _log_task_error(task)
+    if still_running:
+        logger.warning(
+            "still syncing after %.0f s: %s; sending what is already in the database",
+            deadline_seconds,
+            ", ".join(sorted(task.get_name() for task in still_running)),
+        )
+
+
 async def polling_loop(bot: BotLike) -> None:
     settings = get_settings()
     interval_seconds = settings.bot_fresh_interval_minutes * 60
+    # Живые (или только что завершившиеся) задачи обхода, по одной на источник.
+    inflight: dict[str, asyncio.Task] = {}
     logger.info(
         "bot poller started: every %s min within %02d:00-%02d:00 (%s)",
         settings.bot_fresh_interval_minutes,
@@ -125,8 +210,10 @@ async def polling_loop(bot: BotLike) -> None:
             logger.info("outside active window, sleeping %.0f min", wait_seconds / 60)
             await asyncio.sleep(wait_seconds)
 
+        started = time.monotonic()
         try:
-            pending = await asyncio.to_thread(run_cycle)
+            await _run_sources(inflight, deadline_seconds=interval_seconds)
+            pending = await asyncio.to_thread(collect_matches)
             if pending:
                 sent = await send_notifications(
                     bot,
@@ -139,4 +226,25 @@ async def polling_loop(bot: BotLike) -> None:
                 logger.info("cycle complete, no matching new listings")
         except Exception:
             logger.exception("bot poll cycle failed")
-        await asyncio.sleep(interval_seconds)
+
+        # Пауза — ОСТАТОК интервала, а не полный интервал: иначе период равен
+        # `interval + длительность цикла`, и «каждые 10 минут» на деле выходили
+        # 14.5 (замер за 7 дней, `docs/CHANGELOG.md § 2026-08-29`). Считаем по
+        # монотонным часам: перевод системного времени не должен ни удваивать
+        # паузу, ни съедать её.
+        elapsed = time.monotonic() - started
+        pause = max(interval_seconds - elapsed, MIN_PAUSE_SECONDS)
+        if elapsed >= interval_seconds:
+            # Овер — почти всегда таймауты прокси lalafo с бэкоффом 10/20/30/40 с.
+            # Вплотную такие циклы пускать нельзя: источник уже не отвечает, и
+            # долбить его без паузы — худшее, что можно сделать. Отсюда пол
+            # `MIN_PAUSE_SECONDS`.
+            logger.warning(
+                "cycle took %.0f s, longer than the %s min interval; pausing only %.0f s",
+                elapsed,
+                settings.bot_fresh_interval_minutes,
+                pause,
+            )
+        else:
+            logger.info("cycle took %.0f s, sleeping %.0f s", elapsed, pause)
+        await asyncio.sleep(pause)
