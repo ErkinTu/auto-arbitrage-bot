@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_session
 from app.schemas import VehicleSummary
-from app.services.vehicle_summary import get_vehicle_summary
+from app.services.vehicle_summary import Granularity, get_vehicle_summary
 
 router = APIRouter(prefix="/api/v1/market", tags=["market"])
 
@@ -17,6 +17,9 @@ def vehicle_summary(
     # Пробег необязателен: у lalafo он не указан примерно у 43% объявлений,
     # и «не знаю» — обычный ответ пользователя, а не отказ заполнить форму.
     mileage_km: int | None = Query(default=None, ge=0, le=1_000_000),
+    # Шаг графиков. По умолчанию неделя: месячная точка на полугодовом окне
+    # сглаживает ровно то, ради чего на график и смотрят.
+    granularity: Granularity = Query(default="week"),
     session: Session = Depends(get_session),
 ) -> dict:
     try:
@@ -27,6 +30,7 @@ def vehicle_summary(
             year=year,
             generation_id=generation_id,
             mileage_km=mileage_km,
+            granularity=granularity,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

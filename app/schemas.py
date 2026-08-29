@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel
 
@@ -89,9 +89,20 @@ class AnomalySummary(BaseModel):
 
 class VehicleSummaryTrendPoint(BaseModel):
     period: str
+    period_start: date
     average_price_usd: float
     median_price_usd: float
+    # Среднее число активных объявлений в сутки внутри периода, а не сумма
+    # суточных срезов: суммировать значило бы посчитать одну машину семь раз.
     sample_count: int
+
+
+class VehicleIntakePoint(BaseModel):
+    """Сколько объявлений появилось у нас за период (по `first_seen_at`)."""
+
+    period: str
+    period_start: date
+    count: int
 
 
 class VehicleHeader(BaseModel):
@@ -395,4 +406,6 @@ class VehicleSummary(BaseModel):
     mileage: MileageInfo
     representative_listing: RepresentativeListing | None
     anomalies: AnomalySummary
+    granularity: str
     trend: list[VehicleSummaryTrendPoint]
+    intake: list[VehicleIntakePoint]

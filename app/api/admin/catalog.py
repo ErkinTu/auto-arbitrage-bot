@@ -20,7 +20,7 @@ from app.api.admin.deps import current_admin
 from app.db.session import get_session
 from app.schemas import BrandItem, ModelItem, VehicleSummary, YearItem
 from app.services.catalog_browse import list_brands, list_models, list_years
-from app.services.vehicle_summary import get_vehicle_summary
+from app.services.vehicle_summary import Granularity, get_vehicle_summary
 
 router = APIRouter(
     prefix="/api/v1/admin",
@@ -58,6 +58,7 @@ def vehicle_summary(
     year: int = Query(ge=1900, le=2100),
     generation_id: int | None = Query(default=None, ge=1),
     mileage_km: int | None = Query(default=None, ge=0, le=1_000_000),
+    granularity: Granularity = Query(default="week"),
     session: Session = Depends(get_session),
 ) -> dict:
     try:
@@ -68,6 +69,7 @@ def vehicle_summary(
             year=year,
             generation_id=generation_id,
             mileage_km=mileage_km,
+            granularity=granularity,
         )
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
