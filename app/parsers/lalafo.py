@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 # Категория марки зашита в SSR-страницу марки (__NEXT_DATA__), API дерева марок нет.
 _CATEGORY_RE = re.compile(r'"searchRequestUrlFromServer":"[^"]*category_id=(\d+)')
 
+# Слаг lalafo выводится из имени марки, а имя у нас такое, каким его знает
+# mashina (строка из ALLOWED_BRANDS). Обычно это совпадает, но не всегда:
+# «ВАЗ (Lada)» даёт латиницей `lada`, а страница lalafo живёт под `vaz-lada`.
+# Общего правила перевода нет (у lalafo это просто их собственные слаги),
+# поэтому исключения держим явной картой — она проверяется ПЕРЕД догадками.
+SLUG_OVERRIDES: dict[str, tuple[str, ...]] = {
+    "ВАЗ (Lada)": ("vaz-lada",),
+}
+
 
 class LalafoBrandNotFoundError(RuntimeError):
     """Не удалось разрешить марку в category_id lalafo (нет такой страницы марки)."""
@@ -116,7 +125,8 @@ class LalafoParser(ParserAdapter):
     def _slug_candidates(brand: str) -> list[str]:
         slug = re.sub(r"[^a-z0-9]+", "-", brand.lower()).strip("-")
         # У части марок страница живёт под слагом с постфиксом (honda, mercedes-benz).
-        return [slug, f"{slug}-avtomobili-s-probegom"]
+        candidates = [slug, f"{slug}-avtomobili-s-probegom"]
+        return [*SLUG_OVERRIDES.get(brand, ()), *candidates]
 
     def _category_id_from_page(self, path: str) -> int | None:
         url = f"{self.settings.lalafo_base_url}{path}"
