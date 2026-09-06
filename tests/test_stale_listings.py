@@ -56,6 +56,7 @@ def _add_listing(
     source_name: str = "lalafo.kg",
     last_seen_days_ago: int = 0,
     price_usd: Decimal | None = Decimal("10000"),
+    city: str | None = "Бишкек",
 ) -> Listing:
     source_id = session.scalar(select(Source.id).where(Source.name == source_name))
     brand_id = session.scalar(select(Brand.id))
@@ -68,6 +69,7 @@ def _add_listing(
         title="Toyota Camry 2019",
         year=2019,
         mileage_km=90_000,
+        city=city,
         current_price_usd=price_usd,
         analytics_eligible=True,
         is_active=True,
@@ -225,9 +227,7 @@ def test_stats_excludes_cohort_price_outlier() -> None:
         _add_listing(session, external_id=f"ok{i}", last_seen_days_ago=1, price_usd=Decimal("7000"))
     _add_listing(session, external_id="junk", last_seen_days_ago=1, price_usd=Decimal("520000"))
 
-    rebuild_daily_market_stats(
-        session, outlier_min_cohort=5, outlier_price_median_multiple=4.0
-    )
+    rebuild_daily_market_stats(session, outlier_min_cohort=5, outlier_price_median_multiple=4.0)
 
     stat = session.scalar(select(DailyMarketStat))
     # Когорта модель+год из 6 нормальных + 1 выброс: $520k вне [median/4, median*4].
@@ -242,11 +242,44 @@ def test_stats_keeps_outlier_in_small_cohort() -> None:
         _add_listing(session, external_id=f"ok{i}", last_seen_days_ago=1, price_usd=Decimal("7000"))
     _add_listing(session, external_id="junk", last_seen_days_ago=1, price_usd=Decimal("520000"))
 
-    rebuild_daily_market_stats(
-        session, outlier_min_cohort=5, outlier_price_median_multiple=4.0
-    )
+    rebuild_daily_market_stats(session, outlier_min_cohort=5, outlier_price_median_multiple=4.0)
 
     stat = session.scalar(select(DailyMarketStat))
     # Когорта < 5 — граница неосмысленна, не трогаем (полагаемся на предохранитель A).
     assert stat.sample_count == 3
     assert stat.max_price_usd == Decimal("520000")
+
+
+def test_stats_exclude_foreign_listings() -> None:
+    """Машины «в Китае» — не местный рынок: ни в средней, ни в границах выбросов.
+
+    Шесть зарубежных по $6000 против пяти местных по $10000: без исключения
+    медиана когорты и средняя уехали бы вниз, а местные $10000 выглядели бы
+    «дорого». Город без значения (NULL) остаётся местным.
+    """
+    session = _session()
+    for i in range(5):
+        _add_listing(session, external_id=f"kg{i}", price_usd=Decimal("10000"))
+    for i in range(6):
+        _add_listing(session, external_id=f"cn{i}", price_usd=Decimal("6000"), city="Китай")
+    _add_listing(session, external_id="nocity", price_usd=Decimal("10000"), city=None)
+
+    written = rebuild_daily_market_stats(
+        session, outlier_min_cohort=5, outlier_price_median_multiple=4.0
+    )
+
+    assert written == 1
+    stat = session.scalar(select(DailyMarketStat))
+    assert stat.sample_count == 6
+    assert stat.avg_price_usd == Decimal("10000")
+    assert stat.min_price_usd == Decimal("10000")
+
+
+def test_stats_stay_silent_when_only_foreign_listings_remain() -> None:
+    """Когорта, державшаяся на зарубежном навесе, статистики не получает вовсе."""
+    session = _session()
+    for i in range(6):
+        _add_listing(session, external_id=f"cn{i}", price_usd=Decimal("6000"), city="Китай")
+
+    assert rebuild_daily_market_stats(session) == 0
+    assert session.scalar(select(DailyMarketStat)) is None

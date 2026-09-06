@@ -72,6 +72,7 @@ def _add_listing(
     customs_status: str = "unknown",
     with_model: bool = True,
     source_created_at: datetime | None | object = _PUBLISHED_NOW,
+    city: str | None = "Бишкек",
 ) -> Listing:
     source_id, brand_id, model_id = _ids(session)
     listing = Listing(
@@ -83,7 +84,7 @@ def _add_listing(
         source_slug=f"toyota-camry-{external_id}",
         year=year,
         mileage_km=mileage_km,
-        city="Бишкек",
+        city=city,
         customs_status=customs_status,
         current_price_usd=price_usd,
         is_active=is_active,
@@ -105,7 +106,9 @@ def _add_listing(
     return listing
 
 
-def _add_user_with_filter(session: Session, *, telegram_id: int = 111, **filter_kwargs) -> UserFilter:
+def _add_user_with_filter(
+    session: Session, *, telegram_id: int = 111, **filter_kwargs
+) -> UserFilter:
     _, brand_id, _ = _ids(session)
     user = BotUser(telegram_id=telegram_id)
     session.add(user)
@@ -341,6 +344,35 @@ def test_market_average_insufficient_data() -> None:
     assert market_average(session, no_year, min_samples=5) is None
 
 
+def test_market_average_is_none_for_foreign_listing() -> None:
+    """Машину «в Китае» не с чем сравнивать: агрегаты — только местный рынок.
+
+    Без этого почти любое зарубежное объявление выглядело бы «на 30% ниже
+    рынка» просто потому, что цена без растаможки и доставки — другой товар.
+    """
+    session = _session()
+    _add_stat(session, avg="12000", samples=10)
+
+    foreign = _add_listing(session, external_id="1", price_usd=Decimal("8000"), city="Китай")
+    assert market_average(session, foreign, min_samples=5) is None
+    # Та же машина в Бишкеке — статистики хватает.
+    local = _add_listing(session, external_id="2", price_usd=Decimal("8000"))
+    assert market_average(session, local, min_samples=5) == 12000.0
+
+
+def test_foreign_listing_is_not_pushed_as_below_market() -> None:
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _add_stat(session, avg="12000", samples=10)
+    _add_user_with_filter(session, telegram_id=42, below_market_only=True)
+
+    _add_listing(session, external_id="cn", price_usd=Decimal("8000"), city="Китай")
+    local = _add_listing(session, external_id="kg", price_usd=Decimal("8000"))
+
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5)
+    assert [note.listing_id for note in pending] == [local.id]
+
+
 def test_market_average_weighted_and_latest_date() -> None:
     session = _session()
     # Старая дата должна игнорироваться.
@@ -361,7 +393,9 @@ def test_market_average_null_mileage_aggregates_all_buckets() -> None:
     _add_stat(session, avg="8000", samples=3, mileage_bucket="150-200k", customs_status="cleared")
 
     # NULL-пробег: сравниваем со всей годовой когортой -> (10000*3 + 8000*3)/6 = 9000.
-    null_mileage = _add_listing(session, external_id="1", mileage_km=None, price_usd=Decimal("7000"))
+    null_mileage = _add_listing(
+        session, external_id="1", mileage_km=None, price_usd=Decimal("7000")
+    )
     assert market_average(session, null_mileage, min_samples=5) == 9000.0
 
     # Известный пробег: только свой бакет (0-50k, 3 образца) -> порог 5 не выполнен.
@@ -394,7 +428,9 @@ def test_market_average_customs_only_cohort_reaches_min_samples() -> None:
     _add_stat(session, avg="6000", samples=1, customs_status="cleared")
     _add_stat(session, avg="7000", samples=5, customs_status="unknown")
 
-    listing = _add_listing(session, external_id="1", price_usd=Decimal("3000"), customs_status="cleared")
+    listing = _add_listing(
+        session, external_id="1", price_usd=Decimal("3000"), customs_status="cleared"
+    )
     # (6000*1 + 7000*5) / 6 ≈ 6833.33 — раньше здесь была бы None (1 образец).
     assert market_average(session, listing, min_samples=5) == pytest.approx(6833.33, abs=0.01)
 
@@ -446,9 +482,7 @@ def test_match_below_market_only_filter() -> None:
 def test_match_below_market_custom_percent() -> None:
     session = _session()
     since = _now() - timedelta(minutes=60)
-    _add_user_with_filter(
-        session, telegram_id=42, below_market_only=True, below_market_percent=15
-    )
+    _add_user_with_filter(session, telegram_id=42, below_market_only=True, below_market_percent=15)
     _add_stat(session, avg="12000", samples=10)
 
     # 10% ниже средней — порог фильтра 15% не пройден, хотя глобальный factor 0.95 прошел бы.
@@ -514,19 +548,167 @@ def test_match_caps_notifications_per_user_per_cycle() -> None:
 
     # Потолок 2: за цикл фиксируем и шлём не больше двух, остальное — не в
     # sent_notifications (всплывёт в следующем цикле).
-    pending = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user=2)
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user_full=2)
     assert len(pending) == 2
     assert session.scalar(select(func.count()).select_from(SentNotification)) == 2
 
     # Следующий цикл (в пределах lookback) добирает ещё двух — дублей нет.
-    pending2 = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user=2)
+    pending2 = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user_full=2)
     assert len(pending2) == 2
     sent_ids = {note.listing_id for note in pending} | {note.listing_id for note in pending2}
     assert len(sent_ids) == 4
 
-    # max_per_user=0 -> без ограничения: последнее пятое объявление уходит.
-    pending3 = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user=0)
+    # max_per_user_full=0 -> без ограничения: последнее пятое объявление уходит.
+    pending3 = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user_full=0)
     assert len(pending3) == 1
+
+
+def test_delayed_tier_has_its_own_cap() -> None:
+    """Потолок на цикл — по тарифу: медленному свой, независимо от выдержки."""
+    session = _session()
+    since = _now() - timedelta(minutes=180)
+    _add_paid_user_with_filter(session, telegram_id=1, tier="full")
+    _add_paid_user_with_filter(session, telegram_id=2, tier="delayed")
+    for i in range(4):
+        _add_listing(session, external_id=str(i), observed_at=_now() - timedelta(minutes=10))
+
+    # Выдержка выключена (0), чтобы проверить только потолок.
+    pending = match_new_listings(
+        session,
+        since,
+        factor=0.95,
+        min_samples=5,
+        max_per_user_full=3,
+        max_per_user_delayed=1,
+        delayed_lag_minutes=0,
+    )
+    by_chat: dict[int, int] = {}
+    for note in pending:
+        by_chat[note.chat_id] = by_chat.get(note.chat_id, 0) + 1
+    assert by_chat == {1: 3, 2: 1}
+
+
+# --- приоритеты фильтров при нехватке слотов ---------------------------------
+# Плоский потолок + жадный проход давали на проде юзеру с фильтрами «все авто»
+# и «ниже рынка» ноль отправок по второму: «все авто» матчит каждое объявление и
+# забивает слоты раньше, чем очередь дойдёт до дешёвой машины.
+
+
+def _add_user(session: Session, telegram_id: int) -> BotUser:
+    user = BotUser(telegram_id=telegram_id)
+    session.add(user)
+    session.flush()
+    return user
+
+
+def _add_filter(session: Session, user: BotUser, **kwargs) -> UserFilter:
+    user_filter = UserFilter(user_id=user.id, **kwargs)
+    session.add(user_filter)
+    session.commit()
+    return user_filter
+
+
+def test_below_market_filter_outranks_all_cars_within_the_cap() -> None:
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _add_stat(session, avg="10000", samples=10)
+    user = _add_user(session, 42)
+    # «Все авто» заведён РАНЬШЕ (меньший id): при старой сортировке по id он
+    # забирал бы дешёвые машины себе и ставил их в самый слабый уровень.
+    all_cars = _add_filter(session, user, brand_id=None)
+    cheap = _add_filter(
+        session, user, brand_id=None, below_market_only=True, below_market_percent=10
+    )
+
+    # Обычные машины приходят первыми, дешёвые — последними.
+    regular = [_add_listing(session, external_id=f"r{i}") for i in range(3)]
+    bargains = [
+        _add_listing(session, external_id=f"b{i}", price_usd=Decimal("8000")) for i in range(2)
+    ]
+
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user_full=3)
+    sent = {note.listing_id: note for note in pending}
+    # Обе дешёвые прошли, несмотря на порядок появления, и через фильтр «ниже рынка».
+    assert all(listing.id in sent for listing in bargains)
+    assert {sent[listing.id].filter_id for listing in bargains} == {cheap.id}
+    # Оставшийся слот достался «все авто».
+    leftovers = [listing for listing in regular if listing.id in sent]
+    assert len(leftovers) == 1
+    assert sent[leftovers[0].id].filter_id == all_cars.id
+    # Отброшенные не зафиксированы — придут следующим циклом.
+    assert session.scalar(select(func.count()).select_from(SentNotification)) == 3
+
+
+def test_all_cars_candidates_are_ranked_by_below_market_percent() -> None:
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _add_stat(session, avg="10000", samples=10)
+    user = _add_user(session, 42)
+    _add_filter(session, user, brand_id=None)
+
+    _add_listing(session, external_id="p2", price_usd=Decimal("9800"))  # -2%
+    best = _add_listing(session, external_id="p10", price_usd=Decimal("9000"))  # -10%
+    _add_listing(session, external_id="p0", price_usd=Decimal("10000"))  # не ниже рынка
+    second = _add_listing(session, external_id="p5", price_usd=Decimal("9500"))  # -5%
+
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user_full=2)
+    # В лимит попали самые выгодные, а не первые по порядку появления.
+    assert [note.listing_id for note in pending] == [best.id, second.id]
+
+
+def test_specific_brand_filter_ranks_between_below_market_and_all_cars() -> None:
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    source_id, brand_id, _ = _ids(session)
+    _add_stat(session, avg="10000", samples=10)
+    user = _add_user(session, 42)
+    all_cars = _add_filter(session, user, brand_id=None)
+    toyota_any = _add_filter(session, user, brand_id=brand_id)
+    toyota_cheap = _add_filter(session, user, brand_id=brand_id, below_market_only=True)
+
+    toyota_regular = _add_listing(session, external_id="t", price_usd=Decimal("10000"))
+    toyota_bargain = _add_listing(session, external_id="tb", price_usd=Decimal("8000"))
+    # Honda — после объявлений Toyota: `_ids` берёт первую марку по индексу
+    # имени, и с Honda в базе «тойоты» из `_add_listing` стали бы хондами.
+    honda = Brand(name="Honda")
+    session.add(honda)
+    session.flush()
+    honda_listing = Listing(
+        source_id=source_id,
+        external_id="h",
+        brand_id=honda.id,
+        title="Honda Fit",
+        source_slug="honda-fit",
+        year=2020,
+        mileage_km=50_000,
+        current_price_usd=Decimal("9000"),
+        is_active=True,
+        source_created_at=_now(),
+        payload_hash="y" * 8,
+    )
+    session.add(honda_listing)
+    session.flush()
+    session.add(
+        ListingStatusHistory(
+            listing_id=honda_listing.id, event_type="new", new_status="active", observed_at=_now()
+        )
+    )
+    session.commit()
+
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5, max_per_user_full=2)
+    # Порядок: «ниже рынка» → конкретная марка → «все авто» (Honda не влезла).
+    assert [(note.listing_id, note.filter_id) for note in pending] == [
+        (toyota_bargain.id, toyota_cheap.id),
+        (toyota_regular.id, toyota_any.id),
+    ]
+    assert honda_listing.id not in {note.listing_id for note in pending}
+    assert all_cars.id not in {note.filter_id for note in pending}
+
+    # Без потолка Honda доезжает через «все авто» — приоритет не отсекает, а упорядочивает.
+    pending2 = match_new_listings(session, since, factor=0.95, min_samples=5)
+    assert [(note.listing_id, note.filter_id) for note in pending2] == [
+        (honda_listing.id, all_cars.id)
+    ]
 
 
 def test_match_skips_blocked_and_revoked_users() -> None:
@@ -651,19 +833,14 @@ def test_delayed_tier_waits_for_the_lag() -> None:
 
     # 10 минут — рано: объявление дозреет и придёт следующими циклами.
     assert (
-        match_new_listings(
-            session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60
-        )
-        == []
+        match_new_listings(session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60) == []
     )
     # То же объявление с событием 70 минут назад — уже можно.
     session.query(ListingStatusHistory).update(
         {ListingStatusHistory.observed_at: _now() - timedelta(minutes=70)}
     )
     session.commit()
-    pending = match_new_listings(
-        session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60
-    )
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60)
     assert [note.chat_id for note in pending] == [42]
 
 
@@ -693,9 +870,7 @@ def test_full_tier_member_and_trial_get_it_immediately() -> None:
     session.commit()
 
     _add_listing(session, external_id="1", observed_at=now - timedelta(minutes=10))
-    pending = match_new_listings(
-        session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60
-    )
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60)
     assert sorted(note.chat_id for note in pending) == [1, 2, 3]
 
 
@@ -712,17 +887,12 @@ def test_paid_user_without_a_block_falls_back_to_delayed() -> None:
     )
     session.add(user)
     session.flush()
-    session.add(
-        UserFilter(user_id=user.id, brand_id=brand_id, created_at=now - timedelta(hours=3))
-    )
+    session.add(UserFilter(user_id=user.id, brand_id=brand_id, created_at=now - timedelta(hours=3)))
     session.commit()
     _add_listing(session, external_id="1", observed_at=now - timedelta(minutes=10))
 
     assert (
-        match_new_listings(
-            session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60
-        )
-        == []
+        match_new_listings(session, since, factor=0.95, min_samples=5, delayed_lag_minutes=60) == []
     )
 
 
@@ -733,9 +903,7 @@ def test_zero_lag_switches_the_delay_off_entirely() -> None:
     _add_paid_user_with_filter(session, telegram_id=42, tier="delayed")
     _add_listing(session, external_id="1", observed_at=_now() - timedelta(minutes=1))
 
-    pending = match_new_listings(
-        session, since, factor=0.95, min_samples=5, delayed_lag_minutes=0
-    )
+    pending = match_new_listings(session, since, factor=0.95, min_samples=5, delayed_lag_minutes=0)
     assert [note.chat_id for note in pending] == [42]
 
 
@@ -782,9 +950,7 @@ def test_preview_for_delayed_tier_has_an_upper_freshness_bound() -> None:
     fresh = _add_listing(
         session, external_id="fresh", source_created_at=_now() - timedelta(minutes=10)
     )
-    old = _add_listing(
-        session, external_id="old", source_created_at=_now() - timedelta(hours=3)
-    )
+    old = _add_listing(session, external_id="old", source_created_at=_now() - timedelta(hours=3))
 
     preview = preview_for_filter(
         session, user_filter.id, limit=10, min_samples=5, delayed_lag_minutes=60

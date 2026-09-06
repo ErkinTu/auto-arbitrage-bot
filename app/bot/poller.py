@@ -119,7 +119,8 @@ def collect_matches() -> list[PendingNotification]:
             factor=settings.bot_below_avg_factor,
             min_samples=settings.bot_below_avg_min_samples,
             max_age_hours=settings.bot_max_listing_age_hours,
-            max_per_user=settings.bot_max_notifications_per_user_per_cycle,
+            max_per_user_full=settings.bot_max_notifications_per_user_per_cycle_full,
+            max_per_user_delayed=settings.bot_max_notifications_per_user_per_cycle_delayed,
             delayed_lag_minutes=settings.delayed_tier_lag_minutes,
             flush_deadline=flush_deadline,
         )
