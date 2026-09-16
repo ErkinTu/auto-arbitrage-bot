@@ -119,7 +119,7 @@ fetch_listings, fetch_details). Смоук без БД:
   считаем живым. На этом построен точечный валидатор (worker, раз в сутки,
   вручную — `cli.py lalafo-maintenance`): не виденные 3+ дня объявления
   проверяются карточкой от самых давних, не больше
-  `lalafo_validate_max_per_run` (3000 ≈ 40 мин, ~25 МБ трафика прокси).
+  `lalafo_validate_max_per_run` (3000 ≈ 80 мин через прокси, ~25 МБ трафика).
   410 → reason='card_gone', 200 + мёртвый status_id → reason='card_inactive'
   (в details лежит `status_id`), 200 + status 2 → продление `last_seen_at`.
   Это критично: лента — только новейшие 50 на марку, живое объявление со
