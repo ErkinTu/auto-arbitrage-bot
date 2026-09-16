@@ -401,6 +401,15 @@ def command_funnel(args: argparse.Namespace) -> None:
         print(f"Активный триал        {trials:>6}")
 
 
+def command_lalafo_maintenance(_: argparse.Namespace) -> None:
+    """Ручной прогон обслуживания lalafo (валидатор карточек + фолбэк) —
+    то же, что worker делает раз в сутки. Нужен после простоя прокси или при
+    смене LALAFO_VALIDATE_MAX_PER_RUN, чтобы не ждать полуночи."""
+    from app.worker import run_lalafo_maintenance
+
+    run_lalafo_maintenance()
+
+
 def parser() -> argparse.ArgumentParser:
     main = argparse.ArgumentParser(description="Car Analytics MVP CLI")
     sub = main.add_subparsers(dest="command", required=True)
@@ -488,6 +497,12 @@ def parser() -> argparse.ArgumentParser:
     )
     grant.add_argument("--note", default="", help="Free-text reason, printed to the log only")
     grant.set_defaults(func=command_grant_subscription)
+
+    maintenance = sub.add_parser(
+        "lalafo-maintenance",
+        help="Run lalafo card validator + stale fallback now (what worker does daily)",
+    )
+    maintenance.set_defaults(func=command_lalafo_maintenance)
 
     funnel = sub.add_parser("funnel", help="Bot funnel: starts -> trials -> payments -> paid")
     funnel.add_argument("--days", type=int, default=30)

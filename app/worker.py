@@ -43,6 +43,7 @@ from app.services.schedule import local_now, last_slot_start, split_brands_for_w
 from app.services.sources import LALAFO, build_parser, source_base_url
 from app.services.stats import rebuild_daily_market_stats
 from app.services.sync import (
+    count_unseen_active_listings,
     deactivate_stale_listings,
     run_sync,
     utcnow,
@@ -167,31 +168,81 @@ def lalafo_maintenance_if_due(last_run_date: date | None) -> date | None:
     today = local_now(settings.scheduler_timezone).date()
     if last_run_date == today:
         return None
+    run_lalafo_maintenance()
+    return today
+
+
+def run_lalafo_maintenance() -> None:
+    """Один прогон обслуживания lalafo (worker раз в сутки, CLI — вручную).
+
+    Порядок и предохранители:
+    1. Валидатор карточек — от самых давних, не больше `lalafo_validate_max_per_run`.
+       Серия ошибок подряд прерывает прогон (прокси/источник лежит).
+    2. Фолбэк «не видели 30 дней → неактивно» запускается только если
+       валидатору можно верить (`report.fallback_allowed`): при лежащем прокси
+       «не видели» значит «не смогли посмотреть». И только до границы, до
+       которой валидатор дошёл: непроверенное из-за потолка не гасим вслепую —
+       до 16.09.2026 так ежедневно уходило ~1600 объявлений, треть живых.
+    3. Если потолка не хватило и за 30-дневным порогом копятся непроверенные —
+       warning: поднимать LALAFO_VALIDATE_MAX_PER_RUN.
+    """
+    settings = get_settings()
     with SessionLocal() as session:
         source = get_or_create_source(session, LALAFO, source_base_url(LALAFO))
         session.commit()
         parser = build_parser(LALAFO, session)
         try:
-            checked, gone = validate_stale_lalafo_listings(
+            report = validate_stale_lalafo_listings(
                 session,
                 parser,
                 source,
                 validate_after_days=settings.lalafo_validate_after_days,
                 max_per_run=settings.lalafo_validate_max_per_run,
+                commit_every=100,
             )
             session.commit()
         finally:
             parser.close()
-        stale = deactivate_stale_listings(session, stale_days=settings.stale_listing_days)
-        session.commit()
+
+        stale = 0
+        if report.fallback_allowed:
+            stale = deactivate_stale_listings(
+                session,
+                stale_days=settings.stale_listing_days,
+                not_seen_since=None if report.drained else report.reached_last_seen_at,
+            )
+            session.commit()
+        else:
+            logger.warning(
+                "lalafo maintenance: stale fallback skipped — validator unreliable "
+                "(aborted=%s, failed=%s, checked=%s)",
+                report.aborted,
+                report.failed,
+                report.checked,
+            )
+        unseen_past_threshold = count_unseen_active_listings(
+            session, days=settings.stale_listing_days
+        )
     logger.info(
-        "lalafo maintenance: validated %s cards (deactivated %s gone), stale fallback deactivated %s (>%sd)",
-        checked,
-        gone,
+        "lalafo maintenance: validated %s cards (deactivated %s: gone/inactive, failed %s, "
+        "candidates %s, drained=%s, aborted=%s), stale fallback deactivated %s (>%sd)",
+        report.checked,
+        report.deactivated,
+        report.failed,
+        report.candidates,
+        report.drained,
+        report.aborted,
         stale,
         settings.stale_listing_days,
     )
-    return today
+    if unseen_past_threshold:
+        logger.warning(
+            "lalafo maintenance: %s active listings unseen >%sd remain unchecked — "
+            "raise LALAFO_VALIDATE_MAX_PER_RUN (now %s) or the validator will never catch up",
+            unseen_past_threshold,
+            settings.stale_listing_days,
+            settings.lalafo_validate_max_per_run,
+        )
 
 
 def send_renewal_reminders_if_due(last_run_date: date | None) -> date | None:
