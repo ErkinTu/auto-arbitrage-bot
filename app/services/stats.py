@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import DailyMarketStat, Listing
+from app.services.regions import is_foreign
 
 
 def mileage_bucket(mileage_km: int | None) -> str:
@@ -58,6 +59,18 @@ def rebuild_daily_market_stats(
             Listing.car_model_id.is_not(None),
         )
     ).all()
+    # Зарубежные объявления (в поле города — страна: Китай, Корея, США...) — вне
+    # статистики целиком, ДО отсева выбросов и раскладки по бакетам. Внутри одной
+    # когорты «модель+год» они стабильно дешевле местных на 20-35% (цена без
+    # растаможки и доставки — не тот же товар), а по горячим когортам их бывает
+    # больше, чем местных (замер на дампе 2026-09-06: Geely Galaxy 2026 — 323
+    # зарубежных против 85 местных, средняя $22.4k против $28.7k). Оставить их —
+    # значит систематически занижать «рынок» и раздавать ложные «ниже рынка».
+    # Цена: ~17% когорт набирали min_samples только за счёт зарубежного навеса
+    # и теперь замолчат — по правилу «нет надёжной статистики → тишина».
+    # Фильтр в Python, а не в SQL: `is_foreign` делает strip(), а NOT IN на
+    # NULL-городе отбросил бы и объявления без города.
+    listings = [listing for listing in listings if not is_foreign(listing.city)]
 
     # Отсев выбросов ПЕРЕД раскладкой по бакетам: когорта — «модель+год» целиком
     # (не bucket), т.к. один модельный год — связная ценовая группа (пробег двигает

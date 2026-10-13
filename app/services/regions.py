@@ -311,6 +311,15 @@ def _canon(city: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def is_foreign(city: str | None) -> bool:
+    """Объявление из-за рубежа: в поле города источник записал страну.
+
+    Живёт здесь, а не в `bot/matching.py`, потому что нужно и статистике
+    (`services/stats.py`), а та не может импортировать бота без цикла.
+    """
+    return city is not None and city.strip() in FOREIGN_LOCATIONS
+
+
 def region_of(city: str | None) -> str | None:
     """Регион населённого пункта или None, если город неизвестен/спорный.
 

@@ -26,7 +26,7 @@ from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.plans import TIER_DELAYED, effective_tier
-from app.services.regions import FOREIGN_LOCATIONS, region_matches
+from app.services.regions import is_foreign, region_matches
 from app.services.stats import mileage_bucket
 from app.services.sync import utcnow
 from app.services.vehicle_summary import _build_source_url as build_source_url
@@ -35,11 +35,6 @@ from app.services.vehicle_summary import _build_source_url as build_source_url
 def _as_aware(dt: datetime) -> datetime:
     """Наивную дату из БД трактуем как UTC (SQLite теряет tz, Postgres — нет)."""
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
-
-
-def is_foreign(city: str | None) -> bool:
-    """Объявление из-за рубежа: в поле города источник записал страну."""
-    return city is not None and city.strip() in FOREIGN_LOCATIONS
 
 
 @dataclass(slots=True)
@@ -60,7 +55,9 @@ class PendingNotification:
     brand_name: str | None = None
 
 
-def find_new_listings(session: Session, since: datetime, *, max_age_hours: int = 12) -> list[Listing]:
+def find_new_listings(
+    session: Session, since: datetime, *, max_age_hours: int = 12
+) -> list[Listing]:
     """Активные объявления с известной ценой — кандидаты на пуш за окно since.
 
     Два типа кандидатов с РАЗНОЙ логикой свежести:
@@ -174,9 +171,13 @@ def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
         return False
     if user_filter.car_model_id is not None and listing.car_model_id != user_filter.car_model_id:
         return False
-    if user_filter.year_from is not None and (listing.year is None or listing.year < user_filter.year_from):
+    if user_filter.year_from is not None and (
+        listing.year is None or listing.year < user_filter.year_from
+    ):
         return False
-    if user_filter.year_to is not None and (listing.year is None or listing.year > user_filter.year_to):
+    if user_filter.year_to is not None and (
+        listing.year is None or listing.year > user_filter.year_to
+    ):
         return False
     if user_filter.mileage_max_km is not None and (
         listing.mileage_km is None or listing.mileage_km > user_filter.mileage_max_km
@@ -236,6 +237,12 @@ def market_average(
         or listing.current_price_usd is None
     ):
         return None
+    # Зарубежное объявление (в городе — страна) сравнивать не с чем: агрегаты
+    # считаются только по местному рынку (см. stats.py), а цена «в Китае» без
+    # растаможки и доставки — другой товар. Иначе почти любая машина из-за
+    # рубежа выглядела бы «на 30% ниже рынка» просто потому, что рынок чужой.
+    if is_foreign(listing.city):
+        return None
 
     conditions = [
         DailyMarketStat.brand_id == listing.brand_id,
@@ -273,6 +280,63 @@ def market_average(
     return sum(float(row.avg_price_usd) * row.sample_count for row in rows) / total_samples
 
 
+# Уровни приоритета фильтра при нехватке слотов за цикл (меньше = важнее).
+PRIORITY_BELOW_MARKET = 1  # «ниже рынка» — всегда первый, независимо от охвата
+PRIORITY_SPECIFIC = 2  # конкретная марка и/или модель без порога «ниже рынка»
+PRIORITY_ALL_CARS = 3  # «все авто»: без марки, без модели, без порога
+
+
+def filter_priority(user_filter: UserFilter) -> int:
+    """Приоритет фильтра при конкуренции за слоты потолка на цикл.
+
+    Классифицируется САМ фильтр, до матчинга: «ниже рынка» выигрывает у любого
+    охвата (в том числе у «любая Toyota» без порога), конкретная марка/модель —
+    у «все авто». Это не отдельные лимиты, а порядок отбора внутри одного.
+    """
+    if user_filter.below_market_only:
+        return PRIORITY_BELOW_MARKET
+    if user_filter.brand_id is not None or user_filter.car_model_id is not None:
+        return PRIORITY_SPECIFIC
+    return PRIORITY_ALL_CARS
+
+
+def _filter_order(pair: tuple[UserFilter, BotUser]) -> tuple[int, int]:
+    """Порядок перебора фильтров по одному объявлению: приоритет, затем id.
+
+    Первый подходящий фильтр «забирает» объявление для своего юзера, поэтому
+    сильный должен стоять раньше слабого: иначе «все авто» с меньшим id уводил
+    бы дешёвую машину в самый слабый уровень, хотя её же ловит и «ниже рынка».
+    Ключ детерминирован: при равных правах всегда выигрывает один и тот же фильтр.
+    """
+    user_filter = pair[0]
+    return (filter_priority(user_filter), user_filter.id)
+
+
+@dataclass(slots=True)
+class _Candidate:
+    """Пара (объявление, фильтр) одного юзера, прошедшая все проверки, кроме потолка."""
+
+    order: int  # порядок появления — стабильный хвост сортировки
+    priority: int
+    below_percent: float | None
+    avg: float | None
+    listing: Listing
+    user_filter: UserFilter
+    user: BotUser
+
+
+def _candidate_rank(candidate: _Candidate) -> tuple[int, float, int]:
+    """Сортировка кандидатов юзера: уровень приоритета, внутри — по выгоде.
+
+    % ниже рынка уже посчитан для текста уведомления, так что внутри уровня
+    первыми идут самые дешёвые относительно рынка; без статистики — в конец
+    уровня, дальше исходный порядок. Отброшенное потолком не теряется: всплывёт
+    в следующем цикле, пока событие в окне `bot_new_lookback_minutes`.
+    """
+    below = candidate.below_percent if candidate.below_percent is not None else float("-inf")
+    return (candidate.priority, -below, candidate.order)
+
+
 def match_new_listings(
     session: Session,
     since: datetime,
@@ -280,7 +344,8 @@ def match_new_listings(
     factor: float,
     min_samples: int,
     max_age_hours: int = 12,
-    max_per_user: int = 0,
+    max_per_user_full: int = 0,
+    max_per_user_delayed: int = 0,
     delayed_lag_minutes: int = 0,
     flush_deadline: datetime | None = None,
 ) -> list[PendingNotification]:
@@ -290,9 +355,21 @@ def match_new_listings(
     при падении между коммитом и отправкой теряется максимум одно уведомление,
     но дубль не возникает никогда.
 
-    max_per_user (>0) — потолок пушей одному пользователю за цикл: сверх лимита
+    Два прохода, а не один жадный. Раньше объявление → первый подходящий фильтр
+    → сразу в sent_notifications, пока не упрёмся в общий счётчик юзера. При
+    такой схеме «все авто» (матчит буквально каждое объявление) забивал все слоты
+    раньше, чем очередь доходила до генуинно дешёвой машины, которую ловил более
+    узкий фильтр того же человека, — на проде у такого юзера строгие фильтры
+    «ниже рынка» получали ноль отправок (разбор — `docs/TODO.md`, 2026-09-06).
+    Теперь: (1) собираем ВСЕХ кандидатов юзера без урезания, (2) сортируем по
+    `filter_priority` («ниже рынка» → марка/модель → «все авто»), внутри уровня
+    по выгоде, (3) режем по потолку тарифа и только отобранное фиксируем.
+
+    max_per_user_full / max_per_user_delayed (>0) — потолок пушей одному
+    пользователю за цикл по его скорости (`plans.effective_tier`): сверх лимита
     объявление НЕ фиксируется в sent_notifications и придёт в следующем цикле,
     защищая последовательную рассылку от блокировки одним чатом (per-chat delay).
+    0 = без ограничения.
 
     delayed_lag_minutes (>0) — выдержка «дешёвых» тарифов: их объявление уходит
     только когда с квалифицирующего события прошло столько минут. 0 = выдержка
@@ -361,39 +438,40 @@ def match_new_listings(
         row.id: row.name for row in session.execute(select(Brand.id, Brand.name))
     }
     # Чёрные списки — одним запросом на цикл: дальше проверка идёт в памяти.
-    block_sets = load_block_sets(session, {user.id for _, user in filter_user_pairs})
+    user_ids = {user.id for _, user in filter_user_pairs}
+    block_sets = load_block_sets(session, user_ids)
     # Скорость тарифа — тоже одним запросом на цикл (как чёрные списки), а не
-    # по юзеру: строк в access_blocks столько же, сколько платежей.
+    # по юзеру: строк в access_blocks столько же, сколько платежей. Нужна всегда,
+    # не только при включённой выдержке: от неё зависит потолок на цикл.
     lag = timedelta(minutes=delayed_lag_minutes) if delayed_lag_minutes > 0 else None
-    tier_by_user: dict[int, str] = {}
-    if lag is not None:
-        user_ids = {user.id for _, user in filter_user_pairs}
-        active_tiers = load_active_tiers(session, user_ids, now)
-        tier_by_user = {
-            user.id: effective_tier(user, active_tiers.get(user.id), now)
-            for _, user in filter_user_pairs
-        }
+    active_tiers = load_active_tiers(session, user_ids, now)
+    tier_by_user: dict[int, str] = {
+        user.id: effective_tier(user, active_tiers.get(user.id), now)
+        for _, user in filter_user_pairs
+    }
     # Индекс фильтров по марке: у объявления марка ровно одна, и прогонять по
     # нему фильтры чужих марок незачем. Ключ None — фильтры «все марки», их
-    # проверяем всегда. Порядок внутри группы фиксируем по id фильтра, чтобы
-    # при равных правах на объявление всегда выигрывал один и тот же фильтр.
+    # проверяем всегда. Порядок внутри группы — `_filter_order`: сильный
+    # приоритет раньше слабого, при равном — по id фильтра.
     filters_by_brand: dict[int | None, list[tuple[UserFilter, BotUser]]] = {}
     for pair in filter_user_pairs:
         filters_by_brand.setdefault(pair[0].brand_id, []).append(pair)
     for group in filters_by_brand.values():
-        group.sort(key=lambda pair: pair[0].id)
+        group.sort(key=_filter_order)
     any_brand_pairs = filters_by_brand.get(None, [])
 
-    # Пушей уже набрано за этот цикл на пользователя (для max_per_user).
-    sent_counts: dict[int, int] = {}
-    pending: list[PendingNotification] = []
+    # Проход 1: все кандидаты на юзера, без урезания по потолку. Пара
+    # (юзер, объявление) — не больше одного раза: первый подходящий фильтр
+    # в порядке приоритета её забирает.
+    candidates_by_user: dict[int, list[_Candidate]] = {}
+    claimed: set[tuple[int, int]] = set()
+    order = 0
 
     for listing in listings:
         candidates = any_brand_pairs
         if listing.brand_id is not None and listing.brand_id in filters_by_brand:
             candidates = sorted(
-                any_brand_pairs + filters_by_brand[listing.brand_id],
-                key=lambda pair: pair[0].id,
+                any_brand_pairs + filters_by_brand[listing.brand_id], key=_filter_order
             )
         # Одинаково настроенные фильтры разных людей дают одинаковый ответ по
         # одному и тому же объявлению — считаем его один раз на объявление.
@@ -401,7 +479,7 @@ def match_new_listings(
 
         for user_filter, user in candidates:
             key = (user.id, listing.id)
-            if key in already_sent:
+            if key in already_sent or key in claimed:
                 continue
             # Точка отсчёта фильтра: объявления, появившиеся ДО его создания, —
             # не новинки для этого человека, а backfill. Без этой проверки
@@ -412,14 +490,14 @@ def match_new_listings(
             # Отставание дешёвого тарифа. `event_at is None` не задерживаем:
             # случай недостижим (объявления отобраны по событиям в окне), а
             # «задержать навсегда» хуже, чем «отдать сразу» — окно конечно.
-            if lag is not None and event_at is not None and tier_by_user.get(user.id) == TIER_DELAYED:
+            if (
+                lag is not None
+                and event_at is not None
+                and tier_by_user.get(user.id) == TIER_DELAYED
+            ):
                 ripe_at = _as_aware(event_at) + lag
                 if ripe_at > now and (flush_deadline is None or ripe_at <= flush_deadline):
                     continue  # дозреет сегодня — придёт одним из следующих циклов
-            # Потолок на цикл: не фиксируем и не шлём — объявление всплывёт
-            # снова в следующем цикле (в пределах bot_new_lookback_minutes).
-            if max_per_user and sent_counts.get(user.id, 0) >= max_per_user:
-                continue
             signature = _match_signature(user_filter)
             matched = match_cache.get(signature)
             if matched is None:
@@ -433,9 +511,7 @@ def match_new_listings(
                 continue
 
             if listing.id not in avg_cache:
-                avg_cache[listing.id] = market_average(
-                    session, listing, min_samples=min_samples
-                )
+                avg_cache[listing.id] = market_average(session, listing, min_samples=min_samples)
             avg = avg_cache[listing.id]
 
             below_percent: float | None = None
@@ -457,18 +533,46 @@ def match_new_listings(
                 if float(listing.current_price_usd) > avg * threshold:
                     continue
 
-            already_sent.add(key)
-            sent_counts[user.id] = sent_counts.get(user.id, 0) + 1
+            claimed.add(key)
+            candidates_by_user.setdefault(user.id, []).append(
+                _Candidate(
+                    order=order,
+                    priority=filter_priority(user_filter),
+                    below_percent=below_percent,
+                    avg=avg,
+                    listing=listing,
+                    user_filter=user_filter,
+                    user=user,
+                )
+            )
+            order += 1
+
+    # Проход 2: на юзера — сортировка по приоритету и обрезка по потолку тарифа.
+    # Только отобранное фиксируется в sent_notifications; остальное всплывёт в
+    # следующем цикле (в пределах bot_new_lookback_minutes).
+    pending: list[PendingNotification] = []
+    for user_id, user_candidates in candidates_by_user.items():
+        cap = (
+            max_per_user_delayed if tier_by_user.get(user_id) == TIER_DELAYED else max_per_user_full
+        )
+        user_candidates.sort(key=_candidate_rank)
+        selected = user_candidates[:cap] if cap > 0 else user_candidates
+        for candidate in selected:
+            already_sent.add((user_id, candidate.listing.id))
             session.add(
-                SentNotification(user_id=user.id, listing_id=listing.id, filter_id=user_filter.id)
+                SentNotification(
+                    user_id=user_id,
+                    listing_id=candidate.listing.id,
+                    filter_id=candidate.user_filter.id,
+                )
             )
             pending.append(
                 _build_pending(
-                    listing,
-                    chat_id=user.telegram_id,
-                    filter_id=user_filter.id,
-                    below_percent=below_percent,
-                    avg=avg,
+                    candidate.listing,
+                    chat_id=candidate.user.telegram_id,
+                    filter_id=candidate.user_filter.id,
+                    below_percent=candidate.below_percent,
+                    avg=candidate.avg,
                     source_names=source_names,
                     brand_names=brand_names,
                 )
@@ -518,9 +622,10 @@ def preview_for_filter(
         Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
         Listing.source_created_at >= published_after,
     )
-    if delayed_lag_minutes > 0 and effective_tier(
-        user, active_tier(session, user.id, now), now
-    ) == TIER_DELAYED:
+    if (
+        delayed_lag_minutes > 0
+        and effective_tier(user, active_tier(session, user.id, now), now) == TIER_DELAYED
+    ):
         query = query.where(
             Listing.source_created_at <= now - timedelta(minutes=delayed_lag_minutes)
         )
@@ -569,7 +674,9 @@ def preview_for_filter(
 
         # Без статистики ставим в конец: такие показываем, только если лучших
         # не набралось — «ниже рынка» у них не доказано.
-        scored.append((below_percent if below_percent is not None else -1.0, listing, below_percent, avg))
+        scored.append(
+            (below_percent if below_percent is not None else -1.0, listing, below_percent, avg)
+        )
 
     scored.sort(key=lambda item: item[0], reverse=True)
 

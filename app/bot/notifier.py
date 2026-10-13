@@ -139,7 +139,7 @@ async def send_notifications(
     last_sent_per_chat: dict[int, float] = {}
     # Чаты, отвалившиеся прямо в этом цикле: очередь собрана заранее, и без
     # этого мы бы честно отстояли PER_CHAT_DELAY_SECONDS перед каждой из
-    # оставшихся отправок в пустоту (до max_per_user штук на чат).
+    # оставшихся отправок в пустоту (до потолка на цикл штук на чат).
     gone_chats: set[int] = set()
 
     for message in build_outgoing(pending, group_min=group_min):

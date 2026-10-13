@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -250,6 +250,7 @@ def deactivate_stale_listings(
     *,
     stale_days: int,
     source_names: Iterable[str] = ("lalafo.kg",),
+    not_seen_since: datetime | None = None,
 ) -> int:
     """Деактивация «зависших»: у fresh-only источников (lalafo) нет full-scan,
     проданное авто просто исчезает из ленты и осталось бы is_active навсегда.
@@ -258,9 +259,19 @@ def deactivate_stale_listings(
     объявление каждый цикл обновляет last_seen_at и продолжает жить. История
     цен не трогается — аналитика прошлых дней сохраняется. Scope по умолчанию —
     только lalafo: у mashina своя деактивация через weekend full-scan.
+
+    `not_seen_since` дополнительно сужает порог: гасим только объявления с
+    last_seen_at раньше этой отметки. Worker передаёт сюда границу, до которой
+    в этом прогоне дошёл валидатор карточек, — фолбэк тогда добивает лишь то,
+    что валидатор уже ПЫТАЛСЯ проверить и не смог, а не всё, до чего у него
+    не хватило потолка (см. ValidationReport.reached_last_seen_at).
     Коммит — на вызывающей стороне.
     """
     cutoff = utcnow() - timedelta(days=stale_days)
+    if not_seen_since is not None:
+        if not_seen_since.tzinfo is None:  # SQLite в тестах теряет tz
+            not_seen_since = not_seen_since.replace(tzinfo=timezone.utc)
+        cutoff = min(cutoff, not_seen_since)
     stale = session.scalars(
         select(Listing).where(
             Listing.source_id.in_(select(Source.id).where(Source.name.in_(tuple(source_names)))),
@@ -279,9 +290,59 @@ def deactivate_stale_listings(
     return len(stale)
 
 
-# status_id живой карточки lalafo; другие значения пока не встречались —
-# логируем и НЕ деактивируем (консервативно).
+def count_unseen_active_listings(
+    session: Session,
+    *,
+    days: int,
+    source_names: Iterable[str] = ("lalafo.kg",),
+) -> int:
+    """Сколько активных объявлений источника не видели дольше `days` дней —
+    метрика «валидатор не успевает» для warning-а в worker."""
+    cutoff = utcnow() - timedelta(days=days)
+    return session.scalar(
+        select(func.count())
+        .select_from(Listing)
+        .where(
+            Listing.source_id.in_(select(Source.id).where(Source.name.in_(tuple(source_names)))),
+            Listing.is_active.is_(True),
+            Listing.last_seen_at < cutoff,
+        )
+    ) or 0
+
+
+# status_id карточки lalafo (API feed/details отвечает 200 и на мёртвые):
+#   2  — живое объявление (публичная страница 200);
+#   8  — снято/архив: публичная страница того же объявления отвечает 410 Gone
+#        (проверено 16.09.2026 на 13 карточках; на проде это ~74% «живых» по 200);
+#   3  — заблокировано модерацией (спам «внимание…»), страница тоже 410;
+#   11 — страница 200, семантика не выяснена (единичные случаи) — считаем живым.
+# Незнакомые значения НЕ деактивируем (консервативно), но логируем.
 LALAFO_STATUS_ACTIVE = 2
+LALAFO_DEAD_STATUS_IDS = frozenset({3, 8})
+
+
+@dataclass
+class ValidationReport:
+    """Итог одного прогона валидатора карточек lalafo."""
+
+    checked: int = 0  # карточка ответила (200 или 410) — вердикт вынесен
+    deactivated: int = 0  # из checked: 410 Gone или мёртвый status_id
+    failed: int = 0  # сеть/прокси/не-410 ошибка — вердикта нет, last_seen не трогали
+    candidates: int = 0  # сколько кандидатов взяли в прогон (≤ max_per_run)
+    drained: bool = True  # False = кандидатов было больше потолка
+    aborted: bool = False  # прервано по серии ошибок (источник/прокси недоступен)
+    # last_seen_at последнего взятого кандидата (до продления): всё старше уже
+    # ПЫТАЛИСЬ проверить в этом прогоне. Граница для фолбэка «зависших».
+    reached_last_seen_at: datetime | None = None
+
+    @property
+    def fallback_allowed(self) -> bool:
+        """Можно ли после прогона доверять фолбэку «30 дней не видели → мёртвое».
+        Нельзя, если прогон прерван или большинство попыток провалилось: тогда
+        «не видели» означает «не смогли посмотреть», а не «пропало»."""
+        if self.aborted:
+            return False
+        return self.failed <= self.checked
 
 
 def validate_stale_lalafo_listings(
@@ -291,15 +352,25 @@ def validate_stale_lalafo_listings(
     *,
     validate_after_days: int,
     max_per_run: int,
-) -> tuple[int, int]:
+    max_consecutive_failures: int = 5,
+    commit_every: int | None = None,
+) -> ValidationReport:
     """Точечный «валидатор» давно не виденных lalafo-объявлений через карточку.
 
     Лента даёт только новейшие 50 на марку, поэтому живое объявление со
     временем навсегда уходит из нашего поля зрения. Карточка отвечает
     HTTP 200 живым (продлеваем last_seen_at — объявление остаётся в статистике
     и не попадёт под 30-дневный фолбэк) и HTTP 410 Gone удалённым/проданным
-    (честная деактивация раньше фолбэка). Возвращает (checked, deactivated);
-    коммит — на вызывающей стороне."""
+    (честная деактивация раньше фолбэка). Отдельно мёртвые по `status_id`
+    (LALAFO_DEAD_STATUS_IDS): API отдаёт 200, но сайт такое объявление уже не
+    показывает — деактивируем с reason='card_inactive'.
+
+    Кандидаты — от самых давних. `max_consecutive_failures` подряд (прокси лёг,
+    lalafo недоступен) — прогон прерывается: иначе 5 ретраев × N карточек
+    держат worker часами (14.09–16.09.2026 — по ~10 ч за ночь) и блокируют
+    остальные его задачи. `commit_every` — периодический commit внутри прогона,
+    чтобы транзакция не висела открытой все ~40 минут (прогон в 3000 карточек).
+    """
     cutoff = utcnow() - timedelta(days=validate_after_days)
     candidates = session.scalars(
         select(Listing)
@@ -312,8 +383,10 @@ def validate_stale_lalafo_listings(
         .limit(max_per_run)
     ).all()
 
-    checked = deactivated = 0
-    for listing in candidates:
+    report = ValidationReport(candidates=len(candidates), drained=len(candidates) < max_per_run)
+    consecutive_failures = 0
+    for index, listing in enumerate(candidates, start=1):
+        report.reached_last_seen_at = listing.last_seen_at
         try:
             detail = parser.fetch_details(listing.external_id)
         except httpx.HTTPStatusError as exc:
@@ -323,31 +396,59 @@ def validate_stale_lalafo_listings(
                     listing.external_id,
                     exc.response.status_code,
                 )
-                continue
-            checked += 1
-            old_status = listing.status
-            listing.is_active = False
-            listing.status = "inactive"
-            listing.deactivated_at = utcnow()
-            _append_status_history(
-                session, listing, "deactivated", old_status, "inactive", details={"reason": "card_gone"}
-            )
-            deactivated += 1
-            continue
+                report.failed += 1
+                consecutive_failures += 1
+            else:
+                report.checked += 1
+                consecutive_failures = 0
+                _deactivate_by_card(session, listing, reason="card_gone")
+                report.deactivated += 1
         except Exception:
             logger.exception("lalafo validator: detail fetch failed for id=%s", listing.external_id)
-            continue
+            report.failed += 1
+            consecutive_failures += 1
+        else:
+            report.checked += 1
+            consecutive_failures = 0
+            status_id = detail.get("status_id")
+            if status_id in LALAFO_DEAD_STATUS_IDS:
+                _deactivate_by_card(session, listing, reason="card_inactive", status_id=status_id)
+                report.deactivated += 1
+            else:
+                if status_id is not None and status_id != LALAFO_STATUS_ACTIVE:
+                    logger.warning(
+                        "lalafo validator: id=%s alive card with unexpected status_id=%s; keeping active",
+                        listing.external_id,
+                        status_id,
+                    )
+                listing.last_seen_at = utcnow()
 
-        checked += 1
-        status_id = detail.get("status_id")
-        if status_id is not None and status_id != LALAFO_STATUS_ACTIVE:
-            logger.warning(
-                "lalafo validator: id=%s alive card with unexpected status_id=%s; keeping active",
-                listing.external_id,
-                status_id,
+        if commit_every and index % commit_every == 0:
+            session.commit()
+        if consecutive_failures >= max_consecutive_failures:
+            logger.error(
+                "lalafo validator: %s consecutive failures — source or proxy is down, aborting run "
+                "(checked=%s of %s candidates)",
+                consecutive_failures,
+                report.checked,
+                report.candidates,
             )
-        listing.last_seen_at = utcnow()
-    return checked, deactivated
+            report.aborted = True
+            break
+    return report
+
+
+def _deactivate_by_card(
+    session: Session, listing: Listing, *, reason: str, status_id: int | None = None
+) -> None:
+    old_status = listing.status
+    listing.is_active = False
+    listing.status = "inactive"
+    listing.deactivated_at = utcnow()
+    details: dict = {"reason": reason}
+    if status_id is not None:
+        details["status_id"] = status_id
+    _append_status_history(session, listing, "deactivated", old_status, "inactive", details=details)
 
 
 def _enrich_or_skip(

@@ -108,6 +108,20 @@ docker compose exec -T worker uv run python -m app.cli sync \
 
 В summary должно быть `complete_scan=True` и `errors=0`.
 
+> **Сначала проверь, к какому из двух типов относится марка.** Если источник
+> кладёт в поле модели имя СУБ-БРЕНДА, а настоящую модель — в поколение
+> (`source_model_text='Qiyuan'`, `source_generation_text='Q05 II Electro AT'` —
+> так у Changan, и почти наверняка у других китайцев), то шаги 4–5 **алиасами
+> не решаются в принципе**: алиас матчит по `source_model_text`, и все Q05/Q07/
+> A06 склеятся в одну «модель Qiyuan», а `market_average` суммирует поколения —
+> получится сравнение электрички с бензином и ложное «ниже рынка» (замер:
+> Q05 $14.6k против Q07 $22.5k, разрыв 54%). Отрезать модель от поколения умеет
+> только префиксный матчер `catalog.py::parse_vehicle_part`, а он берёт
+> кандидатов из `DEFAULT_CATALOG` — значит, марка заводится **сидами в коде** и
+> едет на прод деплоем. Заодно сиды сами уносят протечку спеков в поколение, и
+> ручные алиасы не нужны вовсе. Пример готового блока — `"Changan"` в
+> `app/services/catalog.py`, история решения — `docs/CHANGELOG.md § 2026-09-01`.
+
 **Шаг 4. Подтвердить модели (категории).** После обхода нераспознанные
 модели лежат как `NormalizationIssue` со `status=open` — их объявления
 **ещё не** analytics-eligible. Посмотри список:
@@ -158,8 +172,16 @@ docker compose exec -T worker uv run python -m app.cli rebuild-stats </dev/null
 
 **Шаг 7. Проверка** (всё должно сойтись):
 
+> **Если марка заведена сидами, `catalog-issues` соврёт.** Старые строки
+> `normalization_issues` остаются `open` навсегда: `_mark_issue_resolved` ищет их
+> по `normalized_source_model`, а после перепарса это поле у объявления другое
+> (`Qiyuan` → `Qiyuan Q05`), и совпадения не будет. Это мёртвые записи рабочего
+> списка, ни на что не влияющие. Настоящая проверка в этом случае — SQL по
+> `analytics_eligible` (последний запрос ниже) и наличие марки в
+> `/api/v1/catalog/brands`.
+
 ```bash
-# open-issues по марке = 0
+# open-issues по марке = 0 (для марки на алиасах; для марки на сидах — см. врезку выше)
 docker compose exec -T worker uv run python -m app.cli catalog-issues --brand Mazda --status open --limit 100
 # марка видна во фронте с active_count
 curl -s http://127.0.0.1:8000/api/v1/catalog/brands | python3 -c 'import sys,json;print([b for b in json.load(sys.stdin) if b["name"]=="Mazda"])'
