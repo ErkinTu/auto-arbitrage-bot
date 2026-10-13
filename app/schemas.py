@@ -128,16 +128,22 @@ class AdminUserItem(BaseModel):
     telegram_id: int
     username: str | None
     first_name: str | None
+    # Статус на момент запроса, по датам (`admin_users.effective_status`), а не
+    # сохранённый ботом при последнем сообщении человека.
     access_status: str
     is_superuser: bool
     # Срок, который что-то значит для этого пользователя: триалу — свой,
     # подписчику — свой, члену группы — ничего.
     expires_at: datetime | None
+    # Для «Нет доступа»: что закончилось (subscription | trial) и когда.
+    lapsed_kind: str | None
+    lapsed_at: datetime | None
     subscription_active: bool
     trial_active: bool
     filters_count: int
     blocks_count: int
-    payments_count: int
+    # Только оплаченные платежи; все попытки — в карточке.
+    paid_payments_count: int
     last_event_at: datetime | None
 
 

@@ -9,10 +9,16 @@
   триал), а не только победивший, — иначе «почему пускает» приходится
   выяснять запросами к базе руками.
 
-Членство в группе Telegram здесь НЕ проверяется: `access.py` для этого зовёт
-Bot API, а панель не должна дёргать Telegram на каждый показ списка. Берём
-`access_status`, который бот уже сохранил, и рядом показываем, когда он
-проверялся (`last_access_check_at`) — так видно и решение, и его свежесть.
+Статус доступа считается по датам в момент показа, а не берётся из
+`access_status`: бот пересчитывает сохранённый статус, только когда человек ему
+пишет, и у молчащих он месяцами висит «Триалом» или «Подпиской» после конца
+срока (на 13.10.2026 — 99 человек из 109 в этих двух статусах). Порядок тот же,
+что в `bot/db.py::decide_access_status`.
+
+Членство в группе по датам не вычислить, а Telegram панель не дёргает (иначе
+Bot API на каждый показ списка): для «Группы» берём сохранённый ботом
+`access_status` и рядом показываем, когда он проверялся
+(`last_access_check_at`) — так видно и решение, и его свежесть.
 """
 
 from __future__ import annotations
@@ -51,7 +57,27 @@ def _aware(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=timezone.utc) if value is not None and value.tzinfo is None else value
 
 
-def _counter(model, user_id_column):
+def effective_status(user: BotUser, now: datetime) -> str:
+    """Статус доступа на момент `now`. SQL-двойник — `_effective_status_sql`."""
+    if user.access_status == "member":
+        return "member"
+    if is_subscription_active(user, now):
+        return "subscriber"
+    if is_trial_active(user, now):
+        return "trial"
+    return "revoked"
+
+
+def _effective_status_sql(now: datetime):
+    return case(
+        (BotUser.access_status == "member", "member"),
+        (BotUser.subscription_expires_at > now, "subscriber"),
+        (BotUser.trial_expires_at > now, "trial"),
+        else_="revoked",
+    )
+
+
+def _counter(model, user_id_column, *conditions):
     """Скалярный подзапрос-счётчик.
 
     Джойнить четыре таблицы разом нельзя — строки перемножатся, и «3 фильтра»
@@ -60,7 +86,7 @@ def _counter(model, user_id_column):
     """
     return (
         select(func.count(model.id))
-        .where(user_id_column == BotUser.id)
+        .where(user_id_column == BotUser.id, *conditions)
         .correlate(BotUser)
         .scalar_subquery()
     )
@@ -68,11 +94,17 @@ def _counter(model, user_id_column):
 
 # Срок, который реально что-то значит для ЭТОГО пользователя: у триала свой,
 # у подписчика свой, у члена группы срока нет вовсе.
-_RELEVANT_EXPIRY = case(
-    (BotUser.access_status == "trial", BotUser.trial_expires_at),
-    (BotUser.access_status == "subscriber", BotUser.subscription_expires_at),
-    else_=None,
-)
+def _relevant_expiry_sql(status):
+    return case(
+        (status == "trial", BotUser.trial_expires_at),
+        (status == "subscriber", BotUser.subscription_expires_at),
+        else_=None,
+    )
+
+
+# Когда доступ закончился — для «Нет доступа». Подписка важнее триала: она
+# говорит, что человек был платным (или получал бонусные дни).
+_LAPSED_AT = func.coalesce(BotUser.subscription_expires_at, BotUser.trial_expires_at)
 
 
 def list_users(
@@ -85,6 +117,8 @@ def list_users(
 ) -> dict:
     limit = max(1, min(limit, MAX_LIMIT))
     offset = max(0, offset)
+    now = _utcnow()
+    status_expr = _effective_status_sql(now)
 
     search: list = []
     if query:
@@ -99,7 +133,7 @@ def list_users(
 
     conditions = list(search)
     if status in ACCESS_STATUSES:
-        conditions.append(BotUser.access_status == status)
+        conditions.append(status_expr == status)
 
     total = session.scalar(select(func.count(BotUser.id)).where(*conditions)) or 0
 
@@ -109,9 +143,9 @@ def list_users(
     status_counts = {
         row[0]: int(row[1])
         for row in session.execute(
-            select(BotUser.access_status, func.count(BotUser.id))
+            select(status_expr, func.count(BotUser.id))
             .where(*search)
-            .group_by(BotUser.access_status)
+            .group_by(status_expr)
         ).all()
     }
 
@@ -127,36 +161,46 @@ def list_users(
             BotUser,
             _counter(UserFilter, UserFilter.user_id).label("filters_count"),
             _counter(UserBlock, UserBlock.user_id).label("blocks_count"),
-            _counter(Payment, Payment.user_id).label("payments_count"),
+            # Только оплаченные: строку в `payments` создаёт каждое нажатие
+            # тарифа в /subscribe, и «12 плат.» у тестового аккаунта с двумя
+            # платежами по 1 сому читались как выручка. Попытки — в карточке.
+            _counter(Payment, Payment.user_id, Payment.status == "paid").label("paid_count"),
             last_event_at.label("last_event_at"),
         )
         .where(*conditions)
         # NULLS LAST важен: у членов группы срока нет, и без этого они заняли бы
-        # начало списка, вытеснив тех, ради кого сортировка и сделана.
-        .order_by(_RELEVANT_EXPIRY.asc().nullslast(), BotUser.id)
+        # начало списка, вытеснив тех, ради кого сортировка и сделана. Среди
+        # «Нет доступа» — сначала недавно отвалившиеся: их ещё можно вернуть.
+        .order_by(
+            _relevant_expiry_sql(status_expr).asc().nullslast(),
+            _LAPSED_AT.desc().nullslast(),
+            BotUser.id,
+        )
         .limit(limit)
         .offset(offset)
     ).all()
 
-    now = _utcnow()
-    items = [
-        {
-            "id": user.id,
-            "telegram_id": user.telegram_id,
-            "username": user.username,
-            "first_name": user.first_name,
-            "access_status": user.access_status,
-            "is_superuser": user.is_superuser,
-            "expires_at": _relevant_expiry_value(user),
-            "subscription_active": is_subscription_active(user, now),
-            "trial_active": is_trial_active(user, now),
-            "filters_count": int(filters_count or 0),
-            "blocks_count": int(blocks_count or 0),
-            "payments_count": int(payments_count or 0),
-            "last_event_at": _aware(last_event),
-        }
-        for user, filters_count, blocks_count, payments_count, last_event in rows
-    ]
+    items = []
+    for user, filters_count, blocks_count, paid_count, last_event in rows:
+        current = effective_status(user, now)
+        items.append(
+            {
+                "id": user.id,
+                "telegram_id": user.telegram_id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "access_status": current,
+                "is_superuser": user.is_superuser,
+                "expires_at": _relevant_expiry_value(user, current),
+                **_lapsed(user, current),
+                "subscription_active": is_subscription_active(user, now),
+                "trial_active": is_trial_active(user, now),
+                "filters_count": int(filters_count or 0),
+                "blocks_count": int(blocks_count or 0),
+                "paid_payments_count": int(paid_count or 0),
+                "last_event_at": _aware(last_event),
+            }
+        )
 
     return {
         "items": items,
@@ -167,12 +211,23 @@ def list_users(
     }
 
 
-def _relevant_expiry_value(user: BotUser) -> datetime | None:
-    if user.access_status == "trial":
+def _relevant_expiry_value(user: BotUser, status: str) -> datetime | None:
+    if status == "trial":
         return _aware(user.trial_expires_at)
-    if user.access_status == "subscriber":
+    if status == "subscriber":
         return _aware(user.subscription_expires_at)
     return None
+
+
+def _lapsed(user: BotUser, status: str) -> dict:
+    """Что и когда закончилось у человека без доступа — «подписка закончилась 05.10»."""
+    if status != "revoked":
+        return {"lapsed_kind": None, "lapsed_at": None}
+    if user.subscription_expires_at is not None:
+        return {"lapsed_kind": "subscription", "lapsed_at": _aware(user.subscription_expires_at)}
+    if user.trial_expires_at is not None:
+        return {"lapsed_kind": "trial", "lapsed_at": _aware(user.trial_expires_at)}
+    return {"lapsed_kind": None, "lapsed_at": None}
 
 
 def get_user(session: Session, user_id: int) -> dict:
@@ -181,6 +236,7 @@ def get_user(session: Session, user_id: int) -> dict:
         raise LookupError("Пользователь не найден")
 
     now = _utcnow()
+    current = effective_status(user, now)
 
     filters = session.scalars(
         select(UserFilter).where(UserFilter.user_id == user.id).order_by(UserFilter.id)
@@ -234,14 +290,14 @@ def get_user(session: Session, user_id: int) -> dict:
         "telegram_id": user.telegram_id,
         "username": user.username,
         "first_name": user.first_name,
-        "access_status": user.access_status,
+        "access_status": current,
         "is_superuser": user.is_superuser,
         "is_active": user.is_active,
         "created_at": _aware(user.created_at),
         # Три источника доступа рядом: панель должна отвечать «почему пускает»,
         # а не только «пускает ли». Порядок — как в bot/db.py::decide_access_status.
         "access": {
-            "status": user.access_status,
+            "status": current,
             "in_group": user.access_status == "member",
             "tier": tier,
             "full_speed_from": full_speed_starts_at(schedule),
