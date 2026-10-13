@@ -15,6 +15,7 @@ from app.bot.commands import setup_bot_commands
 from app.bot.handlers import router
 from app.bot.poller import polling_loop
 from app.bot.protection import ContentProtectionMiddleware
+from app.bot.wizard import WizardExitMiddleware
 from app.core.config import get_settings
 from app.db.session import SessionLocal, init_db
 from app.services.catalog_service import seed_default_catalog
@@ -61,6 +62,8 @@ async def main() -> None:
     dispatcher = Dispatcher(storage=MemoryStorage())
     access = AccessMiddleware()
     dispatcher.message.outer_middleware(access)
+    # После access: сбрасываем визард только у тех, кого бот вообще обслуживает.
+    dispatcher.message.outer_middleware(WizardExitMiddleware())
     dispatcher.callback_query.outer_middleware(access)
     dispatcher.include_router(router)
 
