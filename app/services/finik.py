@@ -13,7 +13,7 @@
 в подпись входят лишь `Host` и заголовки `x-api-*`. Схема восстановлена из
 npm-пакета `@mancho.devs/authorizer` (доки описывают её только словами) и сверена
 с ним байт в байт — векторы в `tests/test_finik.py`, разбор в
-`docs/PAYMENTS_FINIK_ANALYSIS.md §4`.
+`docs/payments/PAYMENTS_FINIK_ANALYSIS.md §4`.
 
 Доки: finik.kg/documentation/web-sdk/{,integration,webhooks,reference}
 """

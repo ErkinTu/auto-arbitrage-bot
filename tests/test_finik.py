@@ -2,7 +2,7 @@
 
 Векторы получены из НАСТОЯЩЕЙ библиотеки Finik `@mancho.devs/authorizer@2.12.8`
 (её `Signer` подписан тестовым ключом из `package/__test__/testData.js`) и
-сверены с нашим портом байт в байт — см. `docs/PAYMENTS_FINIK_ANALYSIS.md §4`.
+сверены с нашим портом байт в байт — см. `docs/payments/PAYMENTS_FINIK_ANALYSIS.md §4`.
 Если Finik молча поменяет каноникализацию, эти тесты покраснеют раньше, чем
 первый платёж отвалится с 401.
 """

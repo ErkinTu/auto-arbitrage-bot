@@ -10,6 +10,10 @@ MVP-сервис для:
 
 Марки по умолчанию задаются в `.env` через `ALLOWED_BRANDS`. В `.env.example` это `BMW,Audi,Toyota,Kia`.
 
+Документация: `CLAUDE.md` (суть и правила), `DEPLOY.md` (деплой и бэкапы),
+`MIGRATION.md` (переезд сервера), остальное — по темам в `docs/` (оглавление —
+`docs/README.md`).
+
 > Важно: внешний endpoint может быть доступен из браузера, но это не означает безусловное разрешение на массовый сбор. Проверь правила источника, не обходи защиту, используй умеренную частоту запросов и понятный User-Agent.
 
 ## Что хранит база
@@ -68,7 +72,7 @@ curl http://localhost:8000/health
 docker compose run --rm api uv run python -m app.cli targets
 ```
 
-`api` при старте сам выполняет `init-db` и `seed`, затем запускает FastAPI. `worker` при старте тоже выполняет `init-db` и `seed`, затем работает по расписанию: полная сверка каталога по выходным и пересчет статистики каждые 8 часов (детали в `docs/SYNC_STRATEGY.md`). Ежедневные fresh-обновления делает сервис `bot`.
+`api` при старте сам выполняет `init-db` и `seed`, затем запускает FastAPI. `worker` при старте тоже выполняет `init-db` и `seed`, затем работает по расписанию: полная сверка каталога по выходным и пересчет статистики каждые 8 часов (детали в `docs/sources/SYNC_STRATEGY.md`). Ежедневные fresh-обновления делает сервис `bot`.
 
 ### Docker-сценарии запуска
 
@@ -128,7 +132,7 @@ docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -
 > каталоге) одного обхода мало: пока модели не подтверждены алиасами,
 > объявления не `analytics_eligible` и марка не появится во фронте/аналитике.
 > Полный порядок (`.env` → контейнеры → обход → **алиасы →
-> `reprocess-catalog`** → `rebuild-stats`) — в `docs/SYNC_STRATEGY.md §4`.
+> `reprocess-catalog`** → `rebuild-stats`) — в `docs/sources/SYNC_STRATEGY.md §4`.
 
 Для первого заполнения BMW запускай **полный обход без `created_period`**. Парсер идет с `page=1` дальше по страницам, пока API не вернет неполную страницу.
 
@@ -306,7 +310,7 @@ docker compose run --rm api uv run python -m app.cli rebuild-stats
 сессия в httpOnly-куке на 12 часов. Права выдаются только SQL
 (`bot_users.is_superuser`). Все ручки **только читают** — кроме входа и выхода
 самого администратора, менять данные из панели нечем.
-Подробнее — `docs/ADMIN_PANEL_PLAN.md`.
+Подробнее — `docs/admin/ADMIN_PANEL_PLAN.md`.
 
 ### Примеры
 

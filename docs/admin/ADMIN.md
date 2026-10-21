@@ -39,7 +39,7 @@ false` на `bot_users` (`models/entities.py`). Проще всего: `bot_user
 запроса. Аудит (кто/когда назначил) на текущем масштабе избыточен — при желании
 добавить `superuser_note`/`superuser_granted_at` позже.
 
-Флаг завели под админ-панель (`docs/ADMIN_PANEL_PLAN.md`), но он ровно тот же,
+Флаг завели под админ-панель (`docs/admin/ADMIN_PANEL_PLAN.md`), но он ровно тот же,
 что нужен идеям 1 и 2 ниже, — второй раз его вводить не придётся.
 
 **Прода это не касается руками:** ALTER лежит в `db/session.py::_upgrade_postgres_schema`
@@ -170,5 +170,5 @@ SELECT telegram_id, username, first_name FROM bot_users WHERE is_superuser;
    через очередь `deliver_after`, если задержка должна быть точной и переживать
    рестарт.
 
-> После реализации любой из идей — добавить `docs/ADMIN.md` в индекс документации
-> `../CLAUDE.md` и, при изменении схемы, обновить `DB_SCHEMA_FOR_GPT.md`.
+> После реализации любой из идей — добавить `docs/admin/ADMIN.md` в индекс документации
+> `../../CLAUDE.md` и, при изменении схемы, обновить `docs/data/DB_SCHEMA_FOR_GPT.md`.

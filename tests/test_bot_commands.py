@@ -16,7 +16,7 @@ HANDLERS_SOURCE = Path(__file__).resolve().parents[1] / "app" / "bot" / "handler
 
 # Команды, которые в меню не показываем осознанно (см. docstring commands.py).
 # `admin` — привилегия: в автодополнении у всех она раскрывала бы сам факт
-# существования панели (`docs/ADMIN_PANEL_PLAN.md`).
+# существования панели (`docs/admin/ADMIN_PANEL_PLAN.md`).
 INTENTIONALLY_HIDDEN = {"subscribe", "admin"}
 
 
