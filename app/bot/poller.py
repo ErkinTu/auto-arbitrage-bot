@@ -22,7 +22,7 @@ import logging
 import time
 from datetime import timedelta
 
-from app.bot.db import mark_user_blocked
+from app.bot.db import mark_user_blocked, refresh_showcase
 from app.bot.matching import PendingNotification, match_new_listings
 from app.bot.notifier import BotLike, send_notifications
 from app.core.config import get_settings
@@ -123,6 +123,8 @@ def collect_matches() -> list[PendingNotification]:
             max_per_user_delayed=settings.bot_max_notifications_per_user_per_cycle_delayed,
             delayed_lag_minutes=settings.delayed_tier_lag_minutes,
             flush_deadline=flush_deadline,
+            require_complete=settings.bot_require_complete_listings,
+            max_below_percent=settings.bot_max_below_market_percent,
         )
 
 
@@ -227,6 +229,14 @@ async def polling_loop(bot: BotLike) -> None:
                 logger.info("cycle complete, no matching new listings")
         except Exception:
             logger.exception("bot poll cycle failed")
+        try:
+            # Прогрев витрины («лучшие сейчас», демо в /start) после свежего
+            # парса: на проде пересчёт — несколько секунд, и пусть их ждёт цикл,
+            # а не новичок, нажавший /start. TTL витрины чуть длиннее цикла,
+            # так что между прогревами кэш не пустеет.
+            await asyncio.to_thread(refresh_showcase)
+        except Exception:
+            logger.exception("showcase warm-up failed")
 
         # Пауза — ОСТАТОК интервала, а не полный интервал: иначе период равен
         # `interval + длительность цикла`, и «каждые 10 минут» на деле выходили

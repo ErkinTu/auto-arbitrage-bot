@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -24,6 +26,7 @@ from app.models import (
 )
 from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
+from app.services.filter_presets import load_brand_groups, min_year_for_age
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.plans import TIER_DELAYED, effective_tier
 from app.services.regions import is_foreign, region_matches
@@ -131,6 +134,42 @@ def qualifying_event_times(session: Session, since: datetime) -> dict[int, datet
     return {listing_id: observed_at for listing_id, observed_at in rows}
 
 
+def price_change_times(session: Session, since: datetime) -> dict[int, datetime]:
+    """Последнее снижение/изменение цены в окне since — по объявлению.
+
+    Нужно точке отсчёта фильтра: подешевевшее объявление — новость, даже если
+    само оно опубликовано до фильтра, но только если цена изменилась ПОСЛЕ него.
+    """
+    rows = session.execute(
+        select(ListingStatusHistory.listing_id, func.max(ListingStatusHistory.observed_at))
+        .where(
+            ListingStatusHistory.event_type == "price_changed",
+            ListingStatusHistory.observed_at >= since,
+        )
+        .group_by(ListingStatusHistory.listing_id)
+    )
+    return {listing_id: observed_at for listing_id, observed_at in rows}
+
+
+def published_before_filter(
+    listing: Listing, user_filter: UserFilter, price_changed_at: datetime | None
+) -> bool:
+    """Объявление — «накопленное» до фильтра, а не новость для этого человека.
+
+    Сравниваем с датой ПУБЛИКАЦИИ, а не с моментом, когда мы его заметили:
+    за ночную паузу, трёхчасовое окно и догон парсера копятся объявления,
+    опубликованные задолго до регистрации, но замеченные нами после неё. Замер
+    21.10.2026: новичок получил 48 таких одним циклом через 15 минут после
+    фильтра. Накопленное отдаёт превью — разово и лучшее, без залпа.
+    Подешевевшее после создания фильтра — новость независимо от публикации.
+    """
+    created_at = _as_aware(user_filter.created_at)
+    if price_changed_at is not None and _as_aware(price_changed_at) >= created_at:
+        return False
+    published = listing.source_created_at
+    return published is None or _as_aware(published) < created_at
+
+
 def _build_pending(
     listing: Listing,
     *,
@@ -161,14 +200,60 @@ def _build_pending(
     )
 
 
-def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
+# Пробег меньше этого у подержанной машины — почти всегда заглушка («100»,
+# «400» км у машины 1998 года), а не реальное значение. У новых (не старше
+# года) малый пробег законен: «2025, 27 км» — машина из салона.
+MIN_PLAUSIBLE_MILEAGE_KM = 1000
+MAX_PLAUSIBLE_MILEAGE_KM = 1_000_000
+
+
+def is_complete_listing(listing: Listing, now: datetime | None = None) -> bool:
+    """Полные ли данные у объявления: марка, модель, год и правдоподобный пробег.
+
+    Без пробега «ниже рынка» сравнивается со средней по всем пробегам модели и
+    года — для оценки это допустимо, а показывать такое как «находку» нельзя:
+    человек не может понять, хорошая ли это цена.
+    """
+    if (
+        listing.brand_id is None
+        or listing.car_model_id is None
+        or listing.year is None
+        or listing.mileage_km is None
+    ):
+        return False
+    if listing.mileage_km > MAX_PLAUSIBLE_MILEAGE_KM:
+        return False
+    current_year = (now or utcnow()).year
+    return listing.mileage_km >= MIN_PLAUSIBLE_MILEAGE_KM or listing.year >= current_year - 1
+
+
+def is_plausible_discount(below_percent: float | None, max_percent: float) -> bool:
+    """Скидка к рынку правдоподобна (max_percent <= 0 — без отсечки)."""
+    return max_percent <= 0 or below_percent is None or below_percent <= max_percent
+
+
+def filter_matches(
+    listing: Listing,
+    user_filter: UserFilter,
+    brand_groups: Mapping[str, frozenset[int]] | None = None,
+    *,
+    now: datetime | None = None,
+) -> bool:
     """Проверка объявления против одного фильтра. NULL-поле фильтра = любое значение.
 
     Если фильтр задает границу, а у объявления поле неизвестно, считаем не-матчем:
     push-уведомление по неполным данным хуже, чем тишина.
+
+    brand_groups — код группы -> id марок (`filter_presets.load_brand_groups`).
+    Фильтр с группой без переданной карты не матчит ничего: та же логика
+    «не доказано — не шлём».
     """
     if user_filter.brand_id is not None and listing.brand_id != user_filter.brand_id:
         return False
+    if user_filter.brand_group is not None:
+        group = (brand_groups or {}).get(user_filter.brand_group)
+        if not group or listing.brand_id not in group:
+            return False
     if user_filter.car_model_id is not None and listing.car_model_id != user_filter.car_model_id:
         return False
     if user_filter.year_from is not None and (
@@ -177,6 +262,10 @@ def filter_matches(listing: Listing, user_filter: UserFilter) -> bool:
         return False
     if user_filter.year_to is not None and (
         listing.year is None or listing.year > user_filter.year_to
+    ):
+        return False
+    if user_filter.max_age_years is not None and (
+        listing.year is None or listing.year < min_year_for_age(user_filter.max_age_years, now)
     ):
         return False
     if user_filter.mileage_max_km is not None and (
@@ -216,6 +305,8 @@ def _match_signature(user_filter: UserFilter) -> tuple:
         user_filter.price_max_usd,
         user_filter.skip_foreign,
         user_filter.region,
+        user_filter.brand_group,
+        user_filter.max_age_years,
     )
 
 
@@ -280,6 +371,26 @@ def market_average(
     return sum(float(row.avg_price_usd) * row.sample_count for row in rows) / total_samples
 
 
+def passes_below_market(
+    listing: Listing, user_filter: UserFilter, avg: float | None, *, factor: float
+) -> bool:
+    """Тумблер «только ниже рынка»: отсутствие статистики = не матч.
+
+    Порог — из фильтра пользователя (5/10/15/20%), иначе глобальный factor.
+    Фильтр без тумблера проходит всегда.
+    """
+    if not user_filter.below_market_only:
+        return True
+    if avg is None or avg <= 0:
+        return False
+    threshold = (
+        1 - user_filter.below_market_percent / 100
+        if user_filter.below_market_percent is not None
+        else factor
+    )
+    return float(listing.current_price_usd) <= avg * threshold
+
+
 # Уровни приоритета фильтра при нехватке слотов за цикл (меньше = важнее).
 PRIORITY_BELOW_MARKET = 1  # «ниже рынка» — всегда первый, независимо от охвата
 PRIORITY_SPECIFIC = 2  # конкретная марка и/или модель без порога «ниже рынка»
@@ -295,7 +406,11 @@ def filter_priority(user_filter: UserFilter) -> int:
     """
     if user_filter.below_market_only:
         return PRIORITY_BELOW_MARKET
-    if user_filter.brand_id is not None or user_filter.car_model_id is not None:
+    if (
+        user_filter.brand_id is not None
+        or user_filter.car_model_id is not None
+        or user_filter.brand_group is not None
+    ):
         return PRIORITY_SPECIFIC
     return PRIORITY_ALL_CARS
 
@@ -348,6 +463,8 @@ def match_new_listings(
     max_per_user_delayed: int = 0,
     delayed_lag_minutes: int = 0,
     flush_deadline: datetime | None = None,
+    require_complete: bool = False,
+    max_below_percent: float = 0,
 ) -> list[PendingNotification]:
     """Подбирает пары (пользователь, новое объявление), фиксирует отправку, возвращает DTO.
 
@@ -376,6 +493,9 @@ def match_new_listings(
     не применяется вовсе (аварийный выключатель тарифов). Частота циклов при этом
     не меняется — сдвинуто только окно кандидатов.
 
+    require_complete — только объявления с полными данными (`is_complete_listing`);
+    max_below_percent (>0) — скидка больше этой считается мусором и не уходит.
+
     flush_deadline — момент последнего цикла на сегодня (см. `window_end_utc`).
     Всё, что не дозреет до него, отдаём отстающему сразу: до утра объявление
     успевают снять или продать, а уведомление на мёртвую страницу читается как
@@ -383,10 +503,13 @@ def match_new_listings(
     осознанная цена за живые ссылки.
     """
     listings = find_new_listings(session, since, max_age_hours=max_age_hours)
+    now = utcnow()
+    if require_complete:
+        listings = [listing for listing in listings if is_complete_listing(listing, now)]
     if not listings:
         return []
-    now = utcnow()
     event_times = qualifying_event_times(session, since)
+    price_changes = price_change_times(session, since)
 
     filter_user_pairs = session.execute(
         select(UserFilter, BotUser)
@@ -437,9 +560,10 @@ def match_new_listings(
     brand_names: dict[int, str] = {
         row.id: row.name for row in session.execute(select(Brand.id, Brand.name))
     }
-    # Чёрные списки — одним запросом на цикл: дальше проверка идёт в памяти.
+    # Чёрные списки и группы марок — одним запросом на цикл, дальше в памяти.
     user_ids = {user.id for _, user in filter_user_pairs}
     block_sets = load_block_sets(session, user_ids)
+    brand_groups = load_brand_groups(session)
     # Скорость тарифа — тоже одним запросом на цикл (как чёрные списки), а не
     # по юзеру: строк в access_blocks столько же, сколько платежей. Нужна всегда,
     # не только при включённой выдержке: от неё зависит потолок на цикл.
@@ -487,6 +611,8 @@ def match_new_listings(
             event_at = event_times.get(listing.id)
             if event_at is not None and event_at < user_filter.created_at:
                 continue
+            if published_before_filter(listing, user_filter, price_changes.get(listing.id)):
+                continue
             # Отставание дешёвого тарифа. `event_at is None` не задерживаем:
             # случай недостижим (объявления отобраны по событиям в окне), а
             # «задержать навсегда» хуже, чем «отдать сразу» — окно конечно.
@@ -501,7 +627,7 @@ def match_new_listings(
             signature = _match_signature(user_filter)
             matched = match_cache.get(signature)
             if matched is None:
-                matched = filter_matches(listing, user_filter)
+                matched = filter_matches(listing, user_filter, brand_groups, now=now)
                 match_cache[signature] = matched
             if not matched:
                 continue
@@ -520,18 +646,10 @@ def match_new_listings(
                 if diff > 0:
                     below_percent = diff
 
-            # Тумблер "только ниже рынка": отсутствие статистики = не матч.
-            # Порог — из фильтра пользователя (5/10/15/20%), иначе глобальный factor.
-            if user_filter.below_market_only:
-                if avg is None or avg <= 0:
-                    continue
-                threshold = (
-                    1 - user_filter.below_market_percent / 100
-                    if user_filter.below_market_percent is not None
-                    else factor
-                )
-                if float(listing.current_price_usd) > avg * threshold:
-                    continue
+            if not passes_below_market(listing, user_filter, avg, factor=factor):
+                continue
+            if not is_plausible_discount(below_percent, max_below_percent):
+                continue
 
             claimed.add(key)
             candidates_by_user.setdefault(user.id, []).append(
@@ -564,6 +682,7 @@ def match_new_listings(
                     user_id=user_id,
                     listing_id=candidate.listing.id,
                     filter_id=candidate.user_filter.id,
+                    below_market_percent=_percent_column(candidate.below_percent),
                 )
             )
             pending.append(
@@ -582,6 +701,10 @@ def match_new_listings(
     return pending
 
 
+def _percent_column(value: float | None) -> Decimal | None:
+    return Decimal(str(value)) if value is not None else None
+
+
 def preview_for_filter(
     session: Session,
     filter_id: int,
@@ -591,6 +714,7 @@ def preview_for_filter(
     factor: float = 0.95,
     min_samples: int = 5,
     delayed_lag_minutes: int = 0,
+    max_below_percent: float = 0,
 ) -> list[PendingNotification]:
     """Разовая подборка сразу после создания фильтра.
 
@@ -602,6 +726,10 @@ def preview_for_filter(
     Отобранное пишем в sent_notifications: иначе те же машины придут ещё раз
     обычной рассылкой. Сортировка — по величине отставания от рынка, чтобы в
     ограниченный лимит попало лучшее, а не случайное.
+
+    Только объявления с полными данными (`is_complete_listing`) и без
+    неправдоподобной скидки: это первое, что человек видит от фильтра, и
+    «Civic 1998, пробег не указан, −51%» убеждает в обратном.
 
     Тариф с отставанием получает здесь верхнюю границу свежести: без неё обход
     тарифа сводился бы к «удалить фильтр и создать заново» — превью отдало бы
@@ -629,8 +757,13 @@ def preview_for_filter(
         query = query.where(
             Listing.source_created_at <= now - timedelta(minutes=delayed_lag_minutes)
         )
+    brand_groups = load_brand_groups(session)
     if user_filter.brand_id is not None:
         query = query.where(Listing.brand_id == user_filter.brand_id)
+    elif user_filter.brand_group is not None:
+        query = query.where(
+            Listing.brand_id.in_(brand_groups.get(user_filter.brand_group) or ())
+        )
     candidates = list(session.scalars(query).all())
     if not candidates:
         return []
@@ -647,9 +780,9 @@ def preview_for_filter(
 
     scored: list[tuple[float, Listing, float | None, float | None]] = []
     for listing in candidates:
-        if listing.id in already_sent:
+        if listing.id in already_sent or not is_complete_listing(listing, now):
             continue
-        if not filter_matches(listing, user_filter):
+        if not filter_matches(listing, user_filter, brand_groups, now=now):
             continue
         if blocked is not None and blocked.blocks(listing):
             continue
@@ -661,16 +794,10 @@ def preview_for_filter(
             if diff > 0:
                 below_percent = diff
 
-        if user_filter.below_market_only:
-            if avg is None or avg <= 0:
-                continue
-            threshold = (
-                1 - user_filter.below_market_percent / 100
-                if user_filter.below_market_percent is not None
-                else factor
-            )
-            if float(listing.current_price_usd) > avg * threshold:
-                continue
+        if not passes_below_market(listing, user_filter, avg, factor=factor):
+            continue
+        if not is_plausible_discount(below_percent, max_below_percent):
+            continue
 
         # Без статистики ставим в конец: такие показываем, только если лучших
         # не набралось — «ниже рынка» у них не доказано.
@@ -683,7 +810,12 @@ def preview_for_filter(
     pending: list[PendingNotification] = []
     for _, listing, below_percent, avg in scored[:limit]:
         session.add(
-            SentNotification(user_id=user.id, listing_id=listing.id, filter_id=user_filter.id)
+            SentNotification(
+                user_id=user.id,
+                listing_id=listing.id,
+                filter_id=user_filter.id,
+                below_market_percent=_percent_column(below_percent),
+            )
         )
         pending.append(
             _build_pending(

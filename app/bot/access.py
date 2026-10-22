@@ -23,6 +23,7 @@ from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app.bot.db import get_subscription_info, resolve_access
 from app.bot.keyboards import trial_kb
+from app.bot.menu import menu_command
 from app.bot.messages import access_denied_text
 from app.core.config import get_settings
 
@@ -123,7 +124,10 @@ class AccessMiddleware(BaseMiddleware):
     @staticmethod
     def _is_entry(event: TelegramObject) -> bool:
         if isinstance(event, Message) and event.text:
-            command = event.text.split(maxsplit=1)[0].lstrip("/").split("@")[0].lower()
+            # Кнопка меню — та же команда: «💎 Подписка» без доступа обязана работать.
+            command = menu_command(event.text) or (
+                event.text.split(maxsplit=1)[0].lstrip("/").split("@")[0].lower()
+            )
             return command in ENTRY_COMMANDS
         # Кнопки входа: «Начать бесплатный период» и выбор тарифа. Доступа у
         # нажимающего ещё НЕТ (он его как раз и получает), поэтому без этой

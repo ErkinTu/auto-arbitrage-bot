@@ -50,6 +50,7 @@ def _settings(**overrides) -> SimpleNamespace:
         referral_max_bonuses=0,  # без потолка: тесты про сам механизм начисления
         subscription_enabled=True,
         subscription_testing=False,
+        bot_max_below_market_percent=50.0,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -553,7 +554,9 @@ def demo_db(sessions, monkeypatch):
     """Как bot_db, но ещё и сбрасывает модульный кэш демо-лота между тестами."""
     monkeypatch.setattr(botdb, "SessionLocal", sessions)
     monkeypatch.setattr(botdb, "get_settings", lambda: _settings(bot_below_avg_min_samples=2))
-    monkeypatch.setattr(botdb, "_demo_cache", (0.0, None))
+    import app.bot.showcase as showcase
+
+    monkeypatch.setattr(showcase, "_cache", (0.0, []))
     return sessions
 
 

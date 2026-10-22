@@ -1,15 +1,41 @@
+import logging
+import re
+import time
+
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import get_settings
 from app.db.base import Base
 
+logger = logging.getLogger(__name__)
+
 settings = get_settings()
+
+
+def _connect_args() -> dict:
+    """Серверные таймауты Postgres на каждое соединение.
+
+    `idle_in_transaction_session_timeout` — страховка от «забытой» транзакции:
+    21.10.2026 выкатка повисла на ALTER TABLE listings, потому что чья-то
+    транзакция стояла открытой, а ждущий ALTER, в свою очередь, блокировал все
+    запросы к таблице. Сервер сам рвёт такую сессию через N секунд.
+    """
+    if not settings.database_url.startswith("postgresql"):
+        return {}
+    timeout_ms = settings.db_idle_in_transaction_timeout_seconds * 1000
+    if timeout_ms <= 0:
+        return {}
+    return {"options": f"-c idle_in_transaction_session_timeout={timeout_ms}"}
+
+
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=10,
+    connect_args=_connect_args(),
 )
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, expire_on_commit=False)
 
@@ -75,10 +101,111 @@ def _upgrade_postgres_schema() -> None:
          WHERE u.subscription_expires_at > now()
            AND NOT EXISTS (SELECT 1 FROM access_blocks b WHERE b.user_id = u.id)
         """,
+        # Пресеты фильтров (services/filter_presets.py): группа марок и «не старше
+        # N лет» — колонки на существующей user_filters.
+        "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS brand_group VARCHAR(16)",
+        "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS max_age_years INTEGER",
+        # Итоги триала: % ниже рынка на момент отправки.
+        "ALTER TABLE sent_notifications ADD COLUMN IF NOT EXISTS below_market_percent NUMERIC(5, 1)",
     )
-    with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
+    for statement in statements:
+        _apply(statement)
+
+
+# `ALTER TABLE t ADD COLUMN IF NOT EXISTS c ...` / `CREATE [UNIQUE] INDEX IF NOT
+# EXISTS i ...` — разбираем, чтобы проверить наличие ДО запроса блокировки.
+_ADD_COLUMN_RE = re.compile(
+    r"^\s*ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)", re.IGNORECASE
+)
+_DROP_NOT_NULL_RE = re.compile(
+    r"^\s*ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL", re.IGNORECASE
+)
+_CREATE_INDEX_RE = re.compile(
+    r"^\s*CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)", re.IGNORECASE
+)
+
+# Сколько ждать блокировку на DDL и сколько раз повторить. Пять секунд — с
+# запасом для обычного запроса, но мало, чтобы очередь за ждущим ALTER успела
+# парализовать бота и API.
+DDL_LOCK_TIMEOUT = "5s"
+DDL_ATTEMPTS = 6
+DDL_RETRY_PAUSE_SECONDS = 5.0
+
+
+def _already_applied(connection, statement: str) -> bool:
+    """Нужен ли DDL вообще — по каталогу, без блокировки таблицы.
+
+    `IF NOT EXISTS` сам по себе не спасает: Postgres берёт `ACCESS EXCLUSIVE`
+    ДО проверки наличия колонки. Любая долгая транзакция на `listings` держит
+    этот ALTER, а он — все запросы к таблице за собой (выкатка 21.10.2026).
+    Чтение information_schema/pg_indexes блокировок на таблицу не берёт.
+    """
+    if match := _ADD_COLUMN_RE.match(statement):
+        table, column = match.groups()
+        return (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = :table AND column_name = :column"
+                ),
+                {"table": table, "column": column},
+            ).first()
+            is not None
+        )
+    if match := _DROP_NOT_NULL_RE.match(statement):
+        table, column = match.groups()
+        return (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = :table AND column_name = :column "
+                    "AND is_nullable = 'YES'"
+                ),
+                {"table": table, "column": column},
+            ).first()
+            is not None
+        )
+    if match := _CREATE_INDEX_RE.match(statement):
+        return (
+            connection.execute(
+                text(
+                    "SELECT 1 FROM pg_indexes "
+                    "WHERE schemaname = current_schema() AND indexname = :name"
+                ),
+                {"name": match.group(1)},
+            ).first()
+            is not None
+        )
+    return False  # DML-бэкфиллы идемпотентны сами и таблицу целиком не блокируют
+
+
+def _apply(statement: str) -> None:
+    """Один шаг апгрейда в своей транзакции, с `lock_timeout` и повтором.
+
+    Не дождались блокировки за DDL_LOCK_TIMEOUT — откатываемся и пробуем снова:
+    короткое ожидание не даёт ждущему DDL собрать очередь из всех запросов.
+    """
+    for attempt in range(1, DDL_ATTEMPTS + 1):
+        try:
+            with engine.begin() as connection:
+                if _already_applied(connection, statement):
+                    return
+                connection.execute(text(f"SET LOCAL lock_timeout = '{DDL_LOCK_TIMEOUT}'"))
+                connection.execute(text(statement))
+                return
+        except OperationalError as exc:
+            # 55P03 lock_not_available — таблицу держит чужая транзакция.
+            if getattr(exc.orig, "sqlstate", None) != "55P03" or attempt == DDL_ATTEMPTS:
+                raise
+            logger.warning(
+                "schema upgrade: lock timeout (attempt %s/%s), retrying: %s",
+                attempt,
+                DDL_ATTEMPTS,
+                " ".join(statement.split())[:120],
+            )
+            time.sleep(DDL_RETRY_PAUSE_SECONDS)
 
 
 def init_db() -> None:

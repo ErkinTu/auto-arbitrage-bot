@@ -7,6 +7,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.db import BrandDTO, FilterDTO, ModelDTO
+from app.services.filter_presets import BASE_PRESET_CODE, presets
 from app.services.plans import PLANS
 from app.services.regions import ALL_CARS_CODE, ALL_CARS_LABEL, REGION_CHOICES
 
@@ -43,12 +44,55 @@ class TrialCB(CallbackData, prefix="trial"):
 
 
 def trial_kb(trial_days: int) -> InlineKeyboardMarkup:
-    """Кнопка активации бесплатного периода в онбординге."""
+    """Кнопка онбординга: триал И базовый фильтр одним нажатием.
+
+    Раньше кнопка давала только триал, а фильтр человек должен был собрать сам
+    в семь шагов — 23% взявших триал так и остались без фильтра, то есть без
+    единого уведомления. Callback прежний (`trial:start`): старые кнопки в
+    истории чатов тоже ставят фильтр.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(
-        text=f"🎁 Начать бесплатный период ({trial_days} дня)",
+        text=f"🎁 Включить {trial_days} дня и начать получать авто",
         callback_data=TrialCB(action="start"),
     )
+    return builder.as_markup()
+
+
+class PresetCB(CallbackData, prefix="preset"):
+    code: str  # код пресета (services/filter_presets.py) или CUSTOM_PRESET
+
+
+# Не пресет, а вход в пошаговый визард /add_filter.
+CUSTOM_PRESET = "custom"
+
+
+def presets_kb() -> InlineKeyboardMarkup:
+    """Готовые фильтры (не больше четырёх) + «Свой» — визард."""
+    builder = InlineKeyboardBuilder()
+    for preset in presets():
+        builder.button(text=preset.button, callback_data=PresetCB(code=preset.code))
+    builder.button(text="⚙️ Свой фильтр (марка, год, цена…)", callback_data=PresetCB(code=CUSTOM_PRESET))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def base_filter_kb() -> InlineKeyboardMarkup:
+    """Одна кнопка «поставить базовый фильтр» — для напоминаний и рассылок."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="✅ Поставить базовый фильтр", callback_data=PresetCB(code=BASE_PRESET_CODE)
+    )
+    return builder.as_markup()
+
+
+class BestCB(CallbackData, prefix="best"):
+    offset: int
+
+
+def best_more_kb(offset: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Ещё 3 ▶️", callback_data=BestCB(offset=offset))
     return builder.as_markup()
 
 

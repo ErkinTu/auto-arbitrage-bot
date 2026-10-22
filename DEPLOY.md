@@ -58,7 +58,7 @@ docker compose up -d --build
 Проверка:
 
 ```bash
-docker compose ps            # 4 сервиса Up
+docker compose ps            # 4 сервиса Up (+ migrate: Exited (0) — это норма)
 docker compose logs -f bot   # "bot poller started: every 10 min within 08:00-24:00"
 curl http://127.0.0.1:8000/health
 ```
@@ -180,14 +180,14 @@ chmod +x scripts/*.sh
 
 docker compose up -d --build             # api + worker + bot
 
-docker compose ps                        # 4 сервиса Up, порты 127.0.0.1:...
+docker compose ps -a                     # 4 сервиса Up + migrate Exited (0)
 curl http://127.0.0.1:8000/health        # {"status":"ok"}
 docker compose logs -f bot               # Ctrl+C для выхода
 ```
 
-Порядок важен: сначала **только** postgres (чтобы `init-db`/`seed` из
-остальных сервисов не заполнили базу до restore), потом restore в чистую БД,
-потом всё остальное.
+Порядок важен: сначала **только** postgres (чтобы `init-db`/`seed` сервиса
+`migrate` не заполнили базу до restore), потом restore в чистую БД, потом всё
+остальное.
 
 > Перед этим шагом останови локальный бот (`docker compose stop bot`
 > локально), иначе два бота с одним токеном будут конфликтовать.
@@ -246,26 +246,33 @@ rsync -avn -e "ssh -i $KEY" --exclude '.env' --exclude '.venv' --exclude '.git' 
 - На будущее чище — приватный git-репозиторий и `git pull` на сервере вместо
   rsync (тогда `.env` держат отдельно, а не заливают из локали).
 
-### Затор DDL при `up -d --build` (случается регулярно, лечится одной командой)
+### Миграции при `up -d --build`: сервис `migrate` (с 10.2026)
 
-`up -d --build` пересоздаёт `api`, `worker` и `bot` одновременно, и **все три
-выполняют `init-db`** (плюс `api` делает это ещё раз в своём lifespan). Отсюда
-два наблюдаемых сбоя — оба видны только в логах, наружу выглядят как «сервис не
-поднялся».
+Схему и сид (`init-db` + `seed`) выполняет **один** одноразовый контейнер
+`migrate`; `api`, `worker` и `bot` стартуют только после его успешного
+завершения (`depends_on: service_completed_successfully`) и схему сами больше
+не трогают. В `docker compose ps -a` он висит как `Exited (0)` — это норма;
+упал — остальные не поднимутся, смотреть `docker compose logs migrate`.
 
-1. **Лок на `listings`.** `ALTER TABLE listings ADD COLUMN IF NOT EXISTS …`
-   берёт ACCESS EXCLUSIVE ДО проверки `IF EXISTS`, поэтому даже no-op ALTER
-   встаёт в очередь за любой открытой транзакцией по `listings`. Бот и воркер
-   уже стартовали и держат сессию `idle in transaction` (у них
-   `autoflush=False`, соединение остаётся в транзакции между запросами) →
-   `init_db` висит, `api` замирает на `Waiting for application startup.`,
-   `/health` не отвечает.
-2. **Гонка `CREATE TABLE`.** Когда в релизе есть НОВАЯ таблица, три `create_all`
-   стартуют одновременно и двое проигрывают:
-   `UniqueViolation: duplicate key value violates unique constraint
-   "pg_type_typname_nsp_index"`. Таблица при этом создаётся (победителем), данные
-   целы, но в логах остаётся traceback — не пугаться, а проверить, что таблица и
-   её индексы на месте.
+Почему так. До 10.2026 `init-db` запускали все три сервиса разом, и выкатка
+регулярно вставала колом (последний раз 21.10.2026, пришлось `pg_terminate_backend`,
+что оборвало прогон валидатора lalafo):
+
+1. **Лок на `listings`.** `ALTER TABLE … ADD COLUMN IF NOT EXISTS` берёт
+   ACCESS EXCLUSIVE ДО проверки `IF NOT EXISTS`, поэтому даже no-op ALTER
+   вставал в очередь за любой открытой транзакцией по таблице, а все запросы —
+   за ним. Теперь `_upgrade_postgres_schema` сначала смотрит колонку/индекс в
+   каталоге (`information_schema`, `pg_indexes` — без блокировок), и на обычной
+   выкатке DDL не выполняется вовсе. Когда колонка действительно новая, ALTER
+   идёт с `lock_timeout = 5s` и до 6 повторов (warning в логе `migrate`).
+2. **Гонка `CREATE TABLE`** и **дубли `sync_targets`** при параллельном `seed` —
+   ушли вместе с параллельным запуском.
+3. **Страховки от долгих транзакций:** `idle_in_transaction_session_timeout`
+   на каждое соединение (`DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS=300`), а
+   валидатор lalafo коммитит после каждой карточки и не держит транзакцию
+   через HTTP.
+
+Если всё же что-то повисло — ниже прежний рецепт.
 
 **Диагностика и лечение** (в 08/2026 понадобилось при выкатке тарифов):
 
@@ -289,8 +296,7 @@ curl -s 127.0.0.1:8000/health      # через несколько секунд 
 ```
 
 Проверять `pg_stat_activity` полезно и ДО деплоя: пустой список означает, что
-затора не будет. Настоящее лечение (advisory-lock вокруг `init_db`, чтобы
-миграцию выполнял ровно один контейнер) — в бэклоге, `docs/planning/TODO.md`.
+затора не будет.
 
 ### Первая выкладка ветки `dev-admin-panel` (ещё не сделана)
 

@@ -13,7 +13,7 @@ Python (FastAPI + SQLAlchemy + PostgreSQL), Telegram-бот на aiogram.
 Стек: Python ≥3.12, FastAPI+uvicorn, SQLAlchemy 2.0, psycopg3, aiogram 3,
 httpx, pydantic-settings. Зависимости через **uv**. Линт/тесты: ruff, pytest.
 
-## Архитектура: 4 Docker-сервиса
+## Архитектура: 4 Docker-сервиса + одноразовый `migrate`
 
 | Сервис | Что делает | Entrypoint |
 |---|---|---|
@@ -21,6 +21,16 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 | `api` | FastAPI: оценка/графики/каталог на :8000 | `uvicorn app.main:app` |
 | `worker` | full scan по выходным + пересчёт статистики + деактивация «зависших» | `app.worker` |
 | `bot` | Telegram: fresh-парс каждые 10 мин + уведомления | `app.bot` |
+| `migrate` | одноразово: `init-db` + `seed`, затем `Exited (0)` | `app.cli` |
+
+**Схему трогает ТОЛЬКО `migrate`** (с 10.2026, в коде, ждёт выката): остальные
+трое стартуют после него (`service_completed_successfully`) и `init_db` не
+зовут. `_upgrade_postgres_schema` сверяет колонку/индекс с каталогом ДО ALTER
+(`IF NOT EXISTS` берёт ACCESS EXCLUSIVE до проверки — выкатка 21.10.2026
+повисла на `listings`), реальный DDL — с `lock_timeout` 5 с и повтором.
+Новую колонку добавлять так же: строкой `ALTER … ADD COLUMN IF NOT EXISTS` в
+`db/session.py` — разбор регуляркой опирается на этот вид. Страховка —
+`idle_in_transaction_session_timeout` (`DB_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`).
 
 Ключевые факты (частые источники непонимания):
 
@@ -203,6 +213,33 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   `listings` нет его идентификатора. NULL-поля объявления под запрет не
   попадают: запрет должен быть доказан. Вход — кнопка «🚫 Не показывать такие»
   под карточкой (двухшаговое меню) и `/blacklist`.
+- **Онбординг и конверсия** (разбор 21.10.2026, `docs/planning/TODO.md`; **в коде,
+  ждёт выката**). Кнопка триала (`trial:start`, и старые в истории тоже) ставит
+  ещё и **базовый фильтр** «КР, ниже рынка на `BOT_BASE_FILTER_PERCENT`=20%» —
+  только если своих фильтров нет (`db.ensure_base_filter`). `/add_filter`
+  начинается с **пресетов** (≤4 + «Свой» → визард), реестр —
+  `services/filter_presets.py`; «Японцы» — одно поле `user_filters.brand_group`,
+  а не 4 фильтра, «до 10 лет» — `max_age_years`, год считается при матчинге
+  (не устаревает). Перед сменой порогов — `cli.py preset-volume`. Превью после
+  создания фильтра — 3 карточки. **Только полные данные**: витрина и превью
+  всегда, рассылка — по `BOT_REQUIRE_COMPLETE_LISTINGS=true` — шлют объявления
+  с маркой, моделью, годом и правдоподобным пробегом
+  (`matching.is_complete_listing`), а скидку больше
+  `BOT_MAX_BELOW_MARKET_PERCENT=60` не шлют нигде (мусор цены). На lalafo пробег
+  пуст у ~43%, поэтому пушей станет заметно меньше. **Витрина `/best`** (`bot/showcase.py`):
+  лучшие по % ниже рынка за 24 ч, только активные; кэш в памяти процесса, пересчёт прогревом после каждого цикла бота;
+  демо-лот `/start` — её первое место. **Меню** — reply-клавиатура из 4 кнопок
+  (`bot/menu.py`); текст кнопки = команда для `AccessMiddleware` и
+  `WizardExitMiddleware` (тот ещё и сбрасывает `data["raw_state"]` — фильтры
+  состояний aiogram читают его, а не хранилище; без этого фикс 13.10 не
+  работал). **Worker** шлёт напоминания (`services/engagement.py`: не включил
+  триал / на триале без фильтра — через 12 мин и 24 ч, только тем, чей якорь в
+  последних 48 ч) и **итоги за 12 ч до конца триала** (из
+  `sent_notifications.below_market_percent` — % на момент отправки; нулевой
+  итог заменяется витриной). Учёт — события `nudge_<kind>_<step>`,
+  `trial_summary`, `broadcast_<segment>` в `user_events`; касания — только в
+  окне активности бота. Разовые рассылки — `cli.py broadcast` (сухой прогон по
+  умолчанию).
 - **Группировка уведомлений** (`BOT_GROUP_MIN_LISTINGS`, по умолчанию 0 =
   выключено). Замер на проде за 14 дней: обычный цикл — 5 сообщений на человека
   (p90 12), первый цикл после ночной паузы — в среднем **28**, максимум 55; в
@@ -289,7 +326,11 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   (триал, рефералка, журнал воронки), `telegram.py` (sync sendMessage из
   worker/api).
 - `bot/` — aiogram: `poller.py` (fresh-циклы), `handlers.py`, `notifier.py`,
-  `db.py` (прямой доступ к БД), `access.py` (проверка членства в группе).
+  `db.py` (прямой доступ к БД), `access.py` (проверка членства в группе),
+  `menu.py` (постоянное меню), `showcase.py` (витрина «лучшие сейчас»),
+  `campaigns.py` (разовые рассылки + замер объёма пресетов, зовёт `cli.py`).
+  Ещё в `services/`: `filter_presets.py` (пресеты, группы марок),
+  `engagement.py` (кандидаты на напоминания и итоги триала).
 - `models/entities.py` — ORM-модели (в т.ч. `AccessBlock` — отрезок доступа с
   тарифом, `UserEvent` — журнал воронки,
   `UserBlock` — чёрный список, `AdminLoginToken` + `AdminSession` — вход в
@@ -301,7 +342,7 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
 ```bash
 cp .env.example .env         # заполнить POSTGRES_PASSWORD, TELEGRAM_* и т.д.
 docker compose up -d --build
-docker compose ps            # 4 сервиса Up; порты 127.0.0.1:...
+docker compose ps -a         # 4 сервиса Up + migrate Exited (0); порты 127.0.0.1:...
 curl http://127.0.0.1:8000/health
 pytest                       # тесты (pythonpath=. в pyproject)
 ```
@@ -320,7 +361,11 @@ docker compose exec -T worker uv run python -m app.cli <cmd>
 дефолт `--tier full`),
 `funnel [--days 30]` (воронка: старты → триалы → пейвол → платежи → оплаты),
 `lalafo-maintenance` (валидатор карточек lalafo + фолбэк «зависших» сейчас, не
-дожидаясь полуночи — после простоя прокси или смены потолка).
+дожидаясь полуночи — после простоя прокси или смены потолка),
+`preset-volume [--days 7]` (сколько «ниже рынка» в сутки по КР при 5–25% и по
+каждому пресету — только чтение), `broadcast --segment burned|no-filter
+[--limit N] [--send]` (разовая рассылка; без `--send` — сухой прогон, днём,
+один раз на человека).
 
 ## Продакшн
 

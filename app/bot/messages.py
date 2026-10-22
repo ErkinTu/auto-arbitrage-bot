@@ -7,6 +7,7 @@ import html
 from app.bot.matching import PendingNotification, is_foreign
 from app.core.config import get_settings
 from app.services.access_schedule import ScheduleEntry
+from app.services.filter_presets import brand_group_label
 from app.services.plans import PLANS, TIER_DELAYED, Plan
 from app.services.regions import REGION_LABELS
 
@@ -24,6 +25,7 @@ def start_text() -> str:
         "<b>Нет фильтров — нет объявлений.</b>\n"
         f"Создайте фильтр, их может быть до {limit}: /add_filter\n\n"
         "/filters — мои фильтры\n"
+        "/best — лучшие предложения прямо сейчас\n"
         "/help — все команды и как это работает"
     )
 
@@ -32,8 +34,9 @@ HELP_TEXT = (
     "Вы создаёте фильтр — я каждые 10 минут проверяю новые объявления "
     "и присылаю сюда те, что вам подходят.\n\n"
     "Команды\n"
-    "/add_filter — создать фильтр\n"
+    "/add_filter — создать фильтр (готовый или свой)\n"
     "/filters — мои фильтры и удаление\n"
+    "/best — лучшие предложения прямо сейчас\n"
     "/blacklist — что не показывать\n"
     "/invite — пригласить друзей и получить дни бесплатно\n"
     "/status — мой доступ\n"
@@ -248,12 +251,154 @@ DEMO_UNAVAILABLE_TEXT = (
 )
 
 
-def trial_started_text(expires_at, trial_days: int) -> str:
-    return (
+def trial_started_text(expires_at, trial_days: int, base_filter: str | None = None) -> str:
+    """Триал включён. `base_filter` — описание фильтра, поставленного той же кнопкой.
+
+    None — фильтр не ставили (у человека уже были свои): тогда не обещаем того,
+    чего не делали, и про фильтры молчим только если они есть.
+    """
+    head = (
         f"🎁 Бесплатный период на {trial_days} дня активирован — до "
         f"{expires_at.strftime('%d.%m.%Y')}.\n\n"
-        "Без фильтра объявления не приходят — создайте первый: /add_filter\n"
-        "Пригласите друзей и получите ещё дни бесплатно: /invite"
+    )
+    if base_filter:
+        body = (
+            f"✅ Поставил базовый фильтр: {base_filter}.\n"
+            "Изменить: /filters, добавить свой: /add_filter\n\n"
+        )
+    else:
+        body = "Ваши фильтры: /filters\n\n"
+    return head + body + "Пригласите друзей и получите ещё дни бесплатно: /invite"
+
+
+def base_filter_set_text(summary: str) -> str:
+    return f"✅ Поставил базовый фильтр: {summary}.\nИзменить: /filters"
+
+
+PRESETS_PROMPT_TEXT = (
+    "Выберите готовый фильтр — или настройте свой по марке, году, пробегу и цене:"
+)
+
+
+def filter_created_text(summary: str) -> str:
+    return (
+        f"✅ Фильтр создан:\n{summary}\n\n"
+        "Как только появится подходящее объявление — пришлю его сюда.\n"
+        "/filters — мои фильтры, /add_filter — еще один."
+    )
+
+
+# Показывается под /filters, только когда у человека фильтры разных уровней
+# приоритета (`matching.filter_priority`): иначе порядок ему ничего не меняет.
+# Слово «приоритет» не используем: работает это только при переполнении
+# потолка за цикл, и звучать должно успокаивающе, а не как правило с подвохом.
+FILTERS_PRIORITY_NOTE = (
+    "ℹ️ Если новых авто сразу много, сначала приходят те, что дешевле рынка, "
+    "затем по конкретной марке, затем остальные. Ничего не теряется: что не "
+    "поместилось, придёт в следующем цикле."
+)
+
+
+SHOWCASE_INTRO_TEXT = "🔥 Лучшие предложения за сутки — дешевле всего относительно рынка:"
+
+SHOWCASE_EMPTY_TEXT = (
+    "Сейчас нет машин заметно ниже рынка за последние сутки — загляните позже."
+)
+
+
+def nudge_trial_text(trial_days: int, step: int) -> str:
+    """Напоминание тому, кто нажал /start, но не включил бесплатный период."""
+    if step == 1:
+        return (
+            "Вы ещё не включили бесплатный период 🙂\n\n"
+            "Одна кнопка — и я начну присылать машины по Кыргызстану, которые "
+            f"дешевле рынка на {get_settings().bot_base_filter_percent}% и больше. "
+            f"{trial_days} дня бесплатно, без карты."
+        )
+    return (
+        "Пока вы думаете, машины ниже рынка уходят за часы.\n"
+        f"Включите {trial_days} бесплатных дня — фильтр поставлю сам, "
+        "поменять его можно в любой момент."
+    )
+
+
+def nudge_filter_text(step: int) -> str:
+    """Напоминание тому, у кого доступ есть, а фильтра нет — бот для него молчит."""
+    if step == 1:
+        return (
+            "У вас пока нет ни одного фильтра — поэтому я молчу.\n\n"
+            "Поставить базовый: вся КР, ниже рынка на "
+            f"{get_settings().bot_base_filter_percent}%? Изменить можно в /filters."
+        )
+    return (
+        "Фильтра всё ещё нет, и новые машины проходят мимо вас.\n"
+        "Одна кнопка — и базовый фильтр начнёт работать. Свой: /add_filter"
+    )
+
+
+def trial_summary_text(*, sent: int, below_market: int, best_percent: float | None) -> str:
+    """Итоги триала за ~12 ч до конца: что человек уже получил.
+
+    Вызывается только при sent > 0 — нулевой итог («я прислал вам 0 машин»)
+    продаёт против нас, вместо него уходит `trial_summary_market_text`.
+    """
+    lines = [
+        "⏳ Бесплатный период заканчивается примерно через 12 часов.\n",
+        f"За это время я прислал вам {sent} {_plural(sent, 'машину', 'машины', 'машин')}"
+        + (
+            f", из них {below_market} — ниже рынка."
+            if below_market
+            else "."
+        ),
+    ]
+    if best_percent:
+        lines.append(f"Лучшая находка — на {_fmt_percent(best_percent)}% дешевле рынка.")
+    lines.append(
+        "\nЧтобы уведомления не прекратились, продлите доступ: /subscribe\n"
+        f"Самый доступный вариант — {_fmt_int(min(plan.price for plan in PLANS))} сом."
+    )
+    return "\n".join(lines)
+
+
+def trial_summary_market_text(best: list[PendingNotification]) -> str:
+    """Итоги триала, когда по фильтрам ничего не пришло: показываем рынок."""
+    lines = [
+        "⏳ Бесплатный период заканчивается примерно через 12 часов.\n",
+        "По вашим фильтрам за это время подходящих машин не нашлось — возможно, "
+        "фильтр слишком узкий. Вот что есть на рынке прямо сейчас:\n",
+    ]
+    for note in best:
+        lines.append(f"• {_digest_line(note)}")
+    lines.append(
+        "\nРасширить фильтр: /filters · продлить доступ: /subscribe"
+    )
+    return "\n".join(lines)
+
+
+def burned_broadcast_text(*, matches: int | None) -> str:
+    """Разовая рассылка тем, у кого триал сгорел, а оплату не начинали.
+
+    `matches` — сколько машин ниже рынка было за неделю по фильтрам человека;
+    None — фильтров нет, предлагаем базовый (кнопка в сообщении).
+    """
+    # Самый дешёвый вход — неделя с отставанием (300 сом): разовое «попробуйте»,
+    # без скидки — о скидке владелец решает отдельно.
+    cheapest = min(PLANS, key=lambda plan: plan.price)
+    if matches:
+        head = (
+            f"🚗 За последнюю неделю по вашему фильтру было {matches} "
+            f"{_plural(matches, 'машина', 'машины', 'машин')} ниже рынка — "
+            "я не мог их прислать: бесплатный период закончился.\n\n"
+        )
+    else:
+        head = (
+            "🚗 Каждый день на рынке Кыргызстана появляются машины на 20% и больше "
+            "дешевле рынка — их разбирают за часы.\n\n"
+        )
+    return (
+        head
+        + f"Попробуйте: {cheapest.title.lower()} — {_fmt_int(cheapest.price)} сом, "
+        "оплата по QR из банковского приложения: /subscribe"
     )
 
 
@@ -516,6 +661,22 @@ def format_notification(p: PendingNotification) -> str:
     )
 
 
+def _fmt_percent(value: float) -> str:
+    return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+
+
+def _digest_line(note: PendingNotification) -> str:
+    """Одна строка про машину: ссылка, цена и % ниже рынка."""
+    title = html.escape(note.title or "Объявление")
+    details = []
+    if note.price_usd is not None:
+        details.append(f"${_fmt_int(round(note.price_usd))}")
+    if note.below_market_percent:
+        details.append(f"на {_fmt_percent(note.below_market_percent)}% ниже рынка")
+    suffix = f" — {', '.join(details)}" if details else ""
+    return f'<a href="{note.url}">{title}</a>{suffix}'
+
+
 def _plural(count: int, one: str, few: str, many: str) -> str:
     if 11 <= count % 100 <= 14:
         return many
@@ -565,13 +726,19 @@ def format_filter_line(
     below_market_percent: int | None = None,
     skip_foreign: bool = False,
     region: str | None = None,
+    brand_group: str | None = None,
+    max_age_years: int | None = None,
 ) -> str:
-    if brand_name is None:
-        parts = ["Все марки"]
-    else:
+    if brand_name is not None:
         parts = [f"{brand_name} {model_name}" if model_name else f"{brand_name} (все модели)"]
+    elif brand_group_label(brand_group):
+        parts = [brand_group_label(brand_group)]
+    else:
+        parts = ["Все марки"]
     if year_from is not None or year_to is not None:
         parts.append(f"{year_from or '…'}–{year_to or '…'} г.")
+    if max_age_years is not None:
+        parts.append(f"не старше {max_age_years} лет")
     if mileage_max_km is not None:
         parts.append(f"до {_fmt_int(mileage_max_km)} км")
     if price_max_usd is not None:
