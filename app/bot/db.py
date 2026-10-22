@@ -552,16 +552,6 @@ def refresh_showcase() -> None:
     )
 
 
-def get_demo_listing(chat_id: int) -> PendingNotification | None:
-    """Живой пример «ниже рынка» для онбординга (не хардкод) — первое место витрины.
-
-    Витрина считает ту же `market_average`, что и рассылка, так что демо
-    показывает ровно то, что человек будет получать, и кэшируется вместе с ней.
-    """
-    page, _ = get_showcase(chat_id, 0)
-    return page[0] if page else None
-
-
 def list_brands() -> list[BrandDTO]:
     allowed = get_settings().allowed_brand_list
     with SessionLocal() as session:
@@ -820,6 +810,7 @@ class BlockResult:
     already: bool = False
     limit_reached: bool = False
     unavailable: bool = False  # у объявления нет такого признака (NULL в БД)
+    block_id: int | None = None  # запрет (новый или уже бывший) — для «Вернуть»
 
 
 def _block_labels(session, listing: Listing) -> dict[str, tuple[str, str]]:
@@ -876,7 +867,7 @@ def add_block_from_listing(telegram_id: int, listing_id: int, kind: str) -> Bloc
             )
         )
         if existing is not None:
-            return BlockResult(ok=False, already=True, label=existing.label)
+            return BlockResult(ok=False, already=True, label=existing.label, block_id=existing.id)
 
         used = session.scalar(
             select(func.count()).select_from(UserBlock).where(UserBlock.user_id == user.id)
@@ -884,9 +875,28 @@ def add_block_from_listing(telegram_id: int, listing_id: int, kind: str) -> Bloc
         if used >= MAX_BLOCKS_PER_USER:
             return BlockResult(ok=False, limit_reached=True, label=label)
 
-        session.add(UserBlock(user_id=user.id, kind=kind, value=value, label=label))
+        block = UserBlock(user_id=user.id, kind=kind, value=value, label=label)
+        session.add(block)
         session.commit()
-        return BlockResult(ok=True, label=label)
+        return BlockResult(ok=True, label=label, block_id=block.id)
+
+
+def hide_from_listing(telegram_id: int, listing_id: int) -> BlockResult:
+    """«Не то» под карточкой: запрет на модель объявления, без модели — на марку.
+
+    Город одним тапом не скрываем: «не то» почти всегда про машину, а запрет
+    города молча выключил бы все марки оттуда.
+    """
+    options = block_options(listing_id)
+    if options is None:
+        return BlockResult(ok=False, unavailable=True)
+    if options.model_name is not None:
+        kind = KIND_MODEL
+    elif options.brand_name is not None:
+        kind = KIND_BRAND
+    else:
+        return BlockResult(ok=False, unavailable=True)
+    return add_block_from_listing(telegram_id, listing_id, kind)
 
 
 def list_blocks(telegram_id: int) -> list[BlockDTO]:

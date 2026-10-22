@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.parsers.base import ParserAdapter
 from app.services.catalog_service import resolve_normalized_listing
+from app.services.images import extract_image_url
 from app.services.normalizer import NormalizedListing
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,10 @@ def _set_current_fields(listing: Listing, item: NormalizedListing) -> None:
     listing.drive_type = item.drive_type
     listing.steering_wheel = item.steering_wheel
     listing.city = item.city
+    # Фото без него в ответе (лента lalafo, упавшая карточка) не затирает
+    # известное: пропажа ссылки из ответа — не пропажа фото у объявления.
+    if item.image_url:
+        listing.image_url = item.image_url
     listing.customs_status = item.customs_status
     listing.seller_type = item.seller_type
     listing.is_verified_seller = item.is_verified_seller
@@ -427,6 +432,8 @@ def validate_stale_lalafo_listings(
                         status_id,
                     )
                 listing.last_seen_at = utcnow()
+                if listing.image_url is None:
+                    listing.image_url = extract_image_url(detail)
 
         if commit_every and index % commit_every == 0:
             session.commit()
@@ -483,6 +490,10 @@ def _enrich_or_skip(
         )
         if same_price:
             listing.last_seen_at = utcnow()
+            # Карточку не тянем, но фото есть и в ленте: так объявления, увиденные
+            # до появления колонки image_url, получают его без лишних запросов.
+            if listing.image_url is None:
+                listing.image_url = extract_image_url(raw)
             return None
     try:
         return parser.fetch_details(raw["id"])

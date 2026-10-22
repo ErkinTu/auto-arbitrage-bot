@@ -223,6 +223,7 @@ async def polling_loop(bot: BotLike) -> None:
                     pending,
                     on_blocked=_on_blocked,
                     group_min=settings.bot_group_min_listings,
+                    rich_cards=settings.bot_rich_cards_per_cycle,
                 )
                 logger.info("notifications: %s message(s) for %s listing(s)", sent, len(pending))
             else:

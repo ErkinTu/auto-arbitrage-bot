@@ -154,6 +154,9 @@ class Listing(Base, TimestampMixin):
     drive_type: Mapped[str | None] = mapped_column(String(80))
     steering_wheel: Mapped[str | None] = mapped_column(String(40))
     city: Mapped[str | None] = mapped_column(String(80), index=True)
+    # Главное фото (ссылка на CDN источника) — для карточки с фото в боте.
+    # Отдельной колонкой, потому что raw_payloads галерею не хранят.
+    image_url: Mapped[str | None] = mapped_column(Text)
     customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
     seller_type: Mapped[str | None] = mapped_column(String(30))
     is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

@@ -5,7 +5,7 @@
 мёртвые страницы. Берём только активные — снятое валидатором или full-scan-ом
 пропадает из витрины со следующим пересчётом.
 
-Чистая sync-логика без aiogram: зовут бот (`/best`, демо в онбординге — через
+Чистая sync-логика без aiogram: зовут бот (`/best`, витрина в `/start` — через
 asyncio.to_thread) и worker (итоги триала с пустым результатом).
 """
 
@@ -20,17 +20,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.bot.matching import (
+    BASIS_AVG,
+    MarketEstimate,
     PendingNotification,
+    build_pending,
     is_complete_listing,
     is_plausible_discount,
-    market_average,
+    load_model_names,
+    market_estimate,
 )
 from app.models import Brand, Listing, Source
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.regions import is_foreign
 from app.services.stats import mileage_bucket
 from app.services.sync import utcnow
-from app.services.vehicle_summary import _build_source_url as build_source_url
 
 # Чуть дольше цикла рассылки (10 мин): бот прогревает витрину после каждого
 # цикла, и кэш не должен истечь раньше, чем придёт следующий прогрев.
@@ -46,15 +49,27 @@ _cache: tuple[float, list[PendingNotification]] = (0.0, [])
 def market_averages(
     session: Session, listings, *, min_samples: int
 ) -> dict[Listing, float | None]:
-    """`market_average` для пачки объявлений с кэшем по когорте.
+    """`market_average` для пачки объявлений (см. `market_estimates`)."""
+    return {
+        listing: estimate.avg_usd if estimate is not None else None
+        for listing, estimate in market_estimates(
+            session, listings, min_samples=min_samples
+        ).items()
+    }
+
+
+def market_estimates(
+    session: Session, listings, *, min_samples: int, basis: str = BASIS_AVG
+) -> dict[Listing, MarketEstimate | None]:
+    """`market_estimate` для пачки объявлений с кэшем по когорте.
 
     Когорта = марка+модель+год+бакет пробега (NULL-пробег — своя ветка, как в
-    самой `market_average`). Свежих за сутки ~2500, когорт среди них заметно
+    самой `market_estimate`). Свежих за сутки ~2500, когорт среди них заметно
     меньше, а каждая — два запроса. Зарубежные отбрасываются: средней для них
     нет по построению.
     """
-    avg_by_cohort: dict[tuple, float | None] = {}
-    result: dict[Listing, float | None] = {}
+    avg_by_cohort: dict[tuple, MarketEstimate | None] = {}
+    result: dict[Listing, MarketEstimate | None] = {}
     for listing in listings:
         if is_foreign(listing.city):
             continue
@@ -65,7 +80,9 @@ def market_averages(
             mileage_bucket(listing.mileage_km) if listing.mileage_km is not None else None,
         )
         if cohort not in avg_by_cohort:
-            avg_by_cohort[cohort] = market_average(session, listing, min_samples=min_samples)
+            avg_by_cohort[cohort] = market_estimate(
+                session, listing, min_samples=min_samples, basis=basis
+            )
         result[listing] = avg_by_cohort[cohort]
     return result
 
@@ -102,33 +119,30 @@ def compute_showcase(
     candidates = [listing for listing in candidates if is_complete_listing(listing, now)]
     source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
     brand_names = {row.id: row.name for row in session.execute(select(Brand.id, Brand.name))}
+    model_names = load_model_names(session)
 
-    scored: list[tuple[float, Listing, float]] = []
-    for listing, avg in market_averages(session, candidates, min_samples=min_samples).items():
-        if avg is None or avg <= 0:
+    scored: list[tuple[float, Listing, MarketEstimate]] = []
+    estimates = market_estimates(session, candidates, min_samples=min_samples)
+    for listing, estimate in estimates.items():
+        if estimate is None or estimate.avg_usd <= 0:
             continue
-        percent = round((1 - float(listing.current_price_usd) / avg) * 100, 1)
+        percent = round((1 - float(listing.current_price_usd) / estimate.avg_usd) * 100, 1)
         if percent > 0 and is_plausible_discount(percent, max_below_percent):
-            scored.append((percent, listing, avg))
+            scored.append((percent, listing, estimate))
 
     scored.sort(key=lambda item: item[0], reverse=True)
     return [
-        PendingNotification(
+        build_pending(
+            listing,
             chat_id=0,
-            listing_id=listing.id,
             filter_id=0,  # витрина не привязана к фильтру
-            title=listing.title,
-            year=listing.year,
-            mileage_km=listing.mileage_km,
-            price_usd=float(listing.current_price_usd),
-            city=listing.city,
-            url=build_source_url(listing),
-            below_market_percent=percent,
-            market_avg_usd=avg,
-            source_name=source_names.get(listing.source_id, "mashina.kg"),
-            brand_name=brand_names.get(listing.brand_id),
+            below_percent=percent,
+            estimate=estimate,
+            source_names=source_names,
+            brand_names=brand_names,
+            model_names=model_names,
         )
-        for percent, listing, avg in scored[:size]
+        for percent, listing, estimate in scored[:size]
     ]
 
 

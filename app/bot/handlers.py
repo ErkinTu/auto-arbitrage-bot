@@ -23,6 +23,7 @@ from app.bot.keyboards import (
     BoolCB,
     BrandCB,
     FilterDeleteCB,
+    HideCB,
     ModelCB,
     CUSTOM_PRESET,
     PercentCB,
@@ -31,10 +32,14 @@ from app.bot.keyboards import (
     RegionCB,
     SkipCB,
     TrialCB,
+    UnhideCB,
     best_more_kb,
     block_choice_kb,
     blocks_kb,
     brands_kb,
+    card_kb,
+    hidden_kb,
+    markup_url,
     filters_kb,
     models_kb,
     pay_kb,
@@ -49,13 +54,14 @@ from app.bot.keyboards import (
 )
 from app.bot.messages import (
     BLOCK_LIST_EMPTY_TEXT,
-    DEMO_INTRO_TEXT,
     DEMO_UNAVAILABLE_TEXT,
     FILTERS_PRIORITY_NOTE,
     HELP_TEXT,
     PRESETS_PROMPT_TEXT,
     SHOWCASE_EMPTY_TEXT,
     SHOWCASE_INTRO_TEXT,
+    START_SHOWCASE_INTRO_TEXT,
+    START_TRIAL_PROMPT_TEXT,
     SUBSCRIPTION_MEMBER_TEXT,
     SUBSCRIPTION_REQUIRED_TEXT,
     SUBSCRIPTION_SOON_TEXT,
@@ -68,7 +74,6 @@ from app.bot.messages import (
     filter_created_text,
     filters_limit_text,
     format_filter_line,
-    format_notification,
     invite_text,
     onboarding_text,
     preview_intro_text,
@@ -87,7 +92,15 @@ from app.bot.matching import (
     PRIORITY_BELOW_MARKET,
     PRIORITY_SPECIFIC,
 )
-from app.bot.menu import MENU_ADD_FILTER, MENU_FILTERS, MENU_HELP, MENU_SUBSCRIBE, main_menu_kb
+from app.bot.menu import (
+    LEGACY_MENU_HELP,
+    LEGACY_MENU_SUBSCRIBE,
+    MENU_ACCESS,
+    MENU_ADD_FILTER,
+    MENU_BEST,
+    MENU_FILTERS,
+    main_menu_kb,
+)
 from app.bot.notifier import send_notifications
 from app.bot.states import AddFilter
 from app.core.config import get_settings
@@ -117,7 +130,7 @@ def _parse_positive_int(text: str) -> int | None:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject | None = None) -> None:
-    """Онбординг: приветствие → как работает → демо-лот → кнопка триала.
+    """Онбординг: приветствие → как работает → витрина (3 карточки) → кнопка триала.
 
     Ветки: у кого доступ уже есть (член группы, подписчик, идущий триал) —
     обычное меню; кто триал ещё не брал — оффер с кнопкой; кто израсходовал —
@@ -134,14 +147,18 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
 
     # Постоянное меню едет с первым же сообщением: reply-клавиатура держится в
     # чате, пока её не заменят, так что повторять её в каждом ответе незачем.
+    # Витрина — всем и при каждом /start (решение владельца 22.10.2026): три
+    # живые карточки объясняют бота лучше любого текста.
     if info.access_status == "member" or info.subscription_active or info.trial_active:
         await message.answer(start_text(), reply_markup=main_menu_kb())
+        await _send_start_showcase(message)
         return
 
     if info.trial_used or not settings.trial_enabled:
-        # Триал израсходован (или выключен) — сразу к оплате.
+        # Триал израсходован (или выключен) — витрина и сразу к оплате.
         payments_open = settings.subscription_allowed_for(message.from_user.id)
         await message.answer(start_text(), reply_markup=main_menu_kb())
+        await _send_start_showcase(message)
         await message.answer(
             trial_already_used_text(payments_open)
             if info.trial_used
@@ -150,27 +167,34 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
         return
 
     await message.answer(onboarding_text(settings.trial_days), reply_markup=main_menu_kb())
-    await _send_demo_listing(message, reply_markup=trial_kb(settings.trial_days))
-
-
-async def _send_demo_listing(message: Message, *, reply_markup=None) -> None:
-    """Показывает реальное объявление ниже рынка — тем же форматом, что и рассылка.
-
-    Кнопка триала едет ПОД этим объявлением, а не отдельным сообщением: текст
-    «N дня бесплатно, без карты» уже сказан в приветствии, и третьим сообщением
-    он только повторял сам себя. Кнопка нужнее прямо под примером — там человек
-    как раз увидел, что именно он получит.
-    """
-    demo = await asyncio.to_thread(db.get_demo_listing, message.from_user.id)
-    if demo is None:
-        await message.answer(DEMO_UNAVAILABLE_TEXT, reply_markup=reply_markup)
-        return
-    await message.answer(DEMO_INTRO_TEXT)
+    shown = await _send_start_showcase(message)
+    # Кнопка триала — отдельным сообщением после карточек: под каждой карточкой
+    # свои кнопки («Не то», «Открыть»), а без витрины — под честным «примера нет».
     await message.answer(
-        format_notification(demo),
-        disable_web_page_preview=False,
-        reply_markup=reply_markup,
+        START_TRIAL_PROMPT_TEXT if shown else DEMO_UNAVAILABLE_TEXT,
+        reply_markup=trial_kb(settings.trial_days),
     )
+
+
+async def _send_start_showcase(message: Message) -> bool:
+    """Первая страница витрины (3 карточки) в /start; False — показать нечего.
+
+    Не пишется в sent_notifications — как и /best: это не рассылка. Первое
+    место витрины — бывший «демо-лот». Ошибка витрины /start не ломает.
+    """
+    settings = get_settings()
+    try:
+        page, _ = await asyncio.to_thread(db.get_showcase, message.chat.id, 0)
+    except Exception:
+        logger.exception("start showcase failed for chat %s", message.chat.id)
+        return False
+    if not page:
+        return False
+    await message.answer(START_SHOWCASE_INTRO_TEXT)
+    await send_notifications(
+        message.bot, page, rich_cards=settings.bot_rich_cards_per_cycle
+    )
+    return True
 
 
 @router.callback_query(TrialCB.filter(F.action == "start"))
@@ -260,16 +284,33 @@ async def cmd_invite(message: Message) -> None:
 
 
 @router.message(Command("help"))
-@router.message(F.text == MENU_HELP)
+@router.message(F.text == LEGACY_MENU_HELP)
 async def cmd_help(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
 
 @router.message(Command("subscribe"))
-@router.message(F.text == MENU_SUBSCRIBE)
+@router.message(F.text == LEGACY_MENU_SUBSCRIBE)
 async def cmd_subscribe(message: Message) -> None:
-    settings = get_settings()
     info = await asyncio.to_thread(db.get_subscription_info, message.from_user.id)
+    await _send_plans(message, info)
+
+
+@router.message(F.text == MENU_ACCESS)
+async def menu_access(message: Message) -> None:
+    """«💎 Доступ»: сначала что есть сейчас (статус), сразу под ним — тарифы.
+
+    Работает и без доступа (в `access.py` кнопка = входная команда subscribe):
+    тому, у кого триал кончился, экран обязан вести к оплате, а не в тупик.
+    """
+    info = await asyncio.to_thread(db.get_subscription_info, message.from_user.id)
+    if info is not None and info.access_status != "member":
+        await message.answer(_status_text(info))
+    await _send_plans(message, info)
+
+
+async def _send_plans(message: Message, info) -> None:
+    settings = get_settings()
     if info is not None and info.access_status == "member":
         # Участнику группы платить нечем и незачем — до вайтлиста оплаты не
         # доходим, иначе он получил бы «оплата скоро», хотя доступ у него есть.
@@ -350,16 +391,18 @@ async def cmd_status(message: Message) -> None:
     if info is None:
         await message.answer("❌ Подписка неактивна. Оформить: /subscribe")
         return
-    await message.answer(
-        status_text(
-            access_status=info.access_status,
-            expires_at=info.expires_at,
-            active=info.active,
-            trial_active=info.trial_active,
-            trial_expires_at=info.trial_expires_at,
-            schedule=info.schedule,
-            tier=info.tier,
-        )
+    await message.answer(_status_text(info))
+
+
+def _status_text(info) -> str:
+    return status_text(
+        access_status=info.access_status,
+        expires_at=info.expires_at,
+        active=info.active,
+        trial_active=info.trial_active,
+        trial_expires_at=info.trial_expires_at,
+        schedule=info.schedule,
+        tier=info.tier,
     )
 
 
@@ -539,10 +582,57 @@ async def block_add_cb(query: CallbackQuery, callback_data: BlockCB) -> None:
         await query.message.edit_reply_markup(reply_markup=None)
 
 
+@router.callback_query(HideCB.filter())
+async def hide_cb(query: CallbackQuery, callback_data: HideCB) -> None:
+    """«🚫 Не то»: одним тапом скрыть модель и сразу дать «Вернуть».
+
+    Клавиатуру карточки заменяем на «↩️ Вернуть …» + прежнюю ссылку: подпись
+    к фото edit_text не меняется, а кнопки — одинаково и у фото, и у текста.
+    """
+    try:
+        result = await asyncio.to_thread(
+            db.hide_from_listing, query.from_user.id, callback_data.listing_id
+        )
+    except LookupError:
+        await query.answer("Отправьте /start, чтобы начать пользоваться ботом", show_alert=True)
+        return
+
+    if result.limit_reached:
+        await query.answer()
+        await query.message.answer(block_limit_text(MAX_BLOCKS_PER_USER))
+        return
+    if result.unavailable or result.block_id is None:
+        await query.answer("По этому объявлению так не получится", show_alert=True)
+        return
+    await query.answer(f"Скрыто: {result.label}. Больше не покажу")
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(
+            reply_markup=hidden_kb(
+                result.label,
+                result.block_id,
+                callback_data.listing_id,
+                markup_url(query.message.reply_markup),
+            )
+        )
+
+
+@router.callback_query(UnhideCB.filter())
+async def unhide_cb(query: CallbackQuery, callback_data: UnhideCB) -> None:
+    """«↩️ Вернуть»: снять запрет и вернуть карточке кнопки «Не то»/«Открыть»."""
+    deleted = await asyncio.to_thread(db.delete_block, query.from_user.id, callback_data.block_id)
+    await query.answer("Вернул в выдачу" if deleted else "Уже возвращено")
+    url = markup_url(query.message.reply_markup)
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(
+            reply_markup=card_kb(callback_data.listing_id, url) if url else None
+        )
+
+
 # --- Витрина «лучшие сейчас» -------------------------------------------------
 
 
 @router.message(Command("best"))
+@router.message(F.text == MENU_BEST)
 async def cmd_best(message: Message) -> None:
     await _send_showcase_page(message, offset=0)
 
@@ -565,7 +655,12 @@ async def _send_showcase_page(message: Message, *, offset: int) -> None:
         return
     if offset == 0:
         await message.answer(SHOWCASE_INTRO_TEXT)
-    await send_notifications(message.bot, page, group_min=settings.bot_group_min_listings)
+    await send_notifications(
+        message.bot,
+        page,
+        group_min=settings.bot_group_min_listings,
+        rich_cards=settings.bot_rich_cards_per_cycle,
+    )
     if next_offset is not None:
         await message.answer("Показать ещё?", reply_markup=best_more_kb(next_offset))
 
@@ -946,7 +1041,12 @@ async def _send_filter_preview(message: Message, filter_id: int) -> None:
     if not preview:
         return
     await message.answer(preview_intro_text(len(preview)))
-    await send_notifications(message.bot, preview, group_min=settings.bot_group_min_listings)
+    await send_notifications(
+        message.bot,
+        preview,
+        group_min=settings.bot_group_min_listings,
+        rich_cards=settings.bot_rich_cards_per_cycle,
+    )
 
 
 # --- Fallback: неожиданный ввод внутри визарда ------------------------------

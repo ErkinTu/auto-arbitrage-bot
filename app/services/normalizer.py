@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.services.catalog import parse_vehicle_part, split_listing_year_suffix
+from app.services.images import extract_image_url
 
 # Mileage above this (km) is treated as implausible. Such values also overflow the
 # INTEGER mileage column (e.g. a bogus 2_394_664_666 km) and would abort the sync,
@@ -64,10 +65,15 @@ class NormalizedListing:
     source_created_at: datetime | None
     source_upped_at: datetime | None
     safe_payload: dict[str, Any]
+    # Главное фото. Вне `payload_hash`: ссылка на CDN — не характеристика машины,
+    # и её появление в новой версии кода не должно разом пометить всю базу как
+    # «updated» (по строке raw_payloads на каждое объявление).
+    image_url: str | None = None
 
     def analytics_payload(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("safe_payload", None)
+        data.pop("image_url", None)
         return data
 
     @property
@@ -397,6 +403,7 @@ def normalize_lalafo_listing(
         source_created_at=_from_unix(raw.get("created_time")),
         source_upped_at=_from_unix(raw.get("updated_time")),
         safe_payload=_lalafo_safe_payload(raw),
+        image_url=extract_image_url(raw),
     )
 
 
@@ -464,4 +471,5 @@ def normalize_mashina_listing(
         source_created_at=_parse_datetime(raw.get("created_at")),
         source_upped_at=_parse_datetime(raw.get("upped_at")),
         safe_payload=_safe_payload(raw),
+        image_url=extract_image_url(raw),
     )

@@ -210,6 +210,52 @@ def block_menu_kb(listing_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+class HideCB(CallbackData, prefix="hide"):
+    """«🚫 Не то» под карточкой: одним тапом скрыть модель (нет модели — марку)."""
+
+    listing_id: int
+
+
+class UnhideCB(CallbackData, prefix="unhide"):
+    """«↩️ Вернуть» после «Не то»: снять только что поставленный запрет."""
+
+    block_id: int
+    listing_id: int
+
+
+def card_kb(listing_id: int, url: str) -> InlineKeyboardMarkup:
+    """Под карточкой: «Не то» и ссылка на объявление.
+
+    Двухшаговое меню «что именно не показывать» живёт в /blacklist: под
+    карточкой нужен один тап, а не выбор из трёх.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🚫 Не то", callback_data=HideCB(listing_id=listing_id))
+    builder.button(text="Открыть ↗", url=url)
+    return builder.as_markup()
+
+
+def hidden_kb(label: str, block_id: int, listing_id: int, url: str | None) -> InlineKeyboardMarkup:
+    """Карточка после «Не то»: что скрыто и кнопка вернуть. Ссылка остаётся."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"↩️ Вернуть {label}",
+        callback_data=UnhideCB(block_id=block_id, listing_id=listing_id),
+    )
+    if url:
+        builder.button(text="Открыть ↗", url=url)
+    return builder.as_markup()
+
+
+def markup_url(markup: InlineKeyboardMarkup | None) -> str | None:
+    """Ссылка из URL-кнопки клавиатуры — чтобы перерисовать её без запроса к БД."""
+    for row in (markup.inline_keyboard if markup is not None else ()):
+        for button in row:
+            if button.url:
+                return button.url
+    return None
+
+
 def block_choice_kb(
     listing_id: int, *, brand_name: str | None, model_name: str | None, city: str | None
 ) -> InlineKeyboardMarkup:

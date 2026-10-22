@@ -107,6 +107,10 @@ def _upgrade_postgres_schema() -> None:
         "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS max_age_years INTEGER",
         # Итоги триала: % ниже рынка на момент отправки.
         "ALTER TABLE sent_notifications ADD COLUMN IF NOT EXISTS below_market_percent NUMERIC(5, 1)",
+        # Карточка с фото: главное фото объявления. raw_payloads галерею не хранят
+        # (safe_payload её отбрасывает), поэтому бэкфилла нет — колонку заполняют
+        # парсеры при следующей встрече объявления.
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS image_url TEXT",
     )
     for statement in statements:
         _apply(statement)

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     BotUser,
     Brand,
+    CarModel,
     DailyMarketStat,
     Listing,
     ListingStatusHistory,
@@ -56,6 +57,27 @@ class PendingNotification:
     source_name: str = "mashina.kg"
     # Марка — для группировки нескольких авто в одно сообщение (notifier).
     brand_name: str | None = None
+    # Модель из каталога — для заголовка карточки «Toyota Camry · 2018».
+    model_name: str | None = None
+    # По скольким машинам посчитана средняя («Рынок: $X — по N похожим»).
+    market_samples: int | None = None
+    # Главное фото; карточку с фото получает только топ цикла (notifier).
+    image_url: str | None = None
+
+
+# База «цены рынка». Рассылка, витрина и превью — на средней; медиана только
+# для замера `cli.py market-basis` (план 22.10.2026, п. 1.5): смена базы сдвигает
+# проценты «ниже рынка» и объём пушей, поэтому решает владелец по цифрам.
+BASIS_AVG = "avg"
+BASIS_MEDIAN = "median"
+
+
+@dataclass(slots=True, frozen=True)
+class MarketEstimate:
+    """Цена рынка для объявления и число машин, по которым она посчитана."""
+
+    avg_usd: float
+    samples: int
 
 
 def find_new_listings(
@@ -170,15 +192,16 @@ def published_before_filter(
     return published is None or _as_aware(published) < created_at
 
 
-def _build_pending(
+def build_pending(
     listing: Listing,
     *,
     chat_id: int,
     filter_id: int,
     below_percent: float | None,
-    avg: float | None,
+    estimate: MarketEstimate | None,
     source_names: dict[int, str],
     brand_names: dict[int, str],
+    model_names: dict[int, str],
 ) -> PendingNotification:
     """Сборка DTO уведомления — общая для рассылки и для превью нового фильтра."""
     return PendingNotification(
@@ -194,10 +217,17 @@ def _build_pending(
         city=listing.city,
         url=build_source_url(listing),
         below_market_percent=below_percent,
-        market_avg_usd=avg,
+        market_avg_usd=estimate.avg_usd if estimate is not None else None,
         source_name=source_names.get(listing.source_id, "mashina.kg"),
         brand_name=brand_names.get(listing.brand_id) if listing.brand_id else None,
+        model_name=model_names.get(listing.car_model_id) if listing.car_model_id else None,
+        market_samples=estimate.samples if estimate is not None else None,
+        image_url=listing.image_url,
     )
+
+
+def load_model_names(session: Session) -> dict[int, str]:
+    return {row.id: row.name for row in session.execute(select(CarModel.id, CarModel.name))}
 
 
 # Пробег меньше этого у подержанной машины — почти всегда заглушка («100»,
@@ -316,10 +346,28 @@ def market_average(
     *,
     min_samples: int,
 ) -> float | None:
+    """Средняя цена по рынку для группы объявления (см. `market_estimate`)."""
+    estimate = market_estimate(session, listing, min_samples=min_samples)
+    return estimate.avg_usd if estimate is not None else None
+
+
+def market_estimate(
+    session: Session,
+    listing: Listing,
+    *,
+    min_samples: int,
+    basis: str = BASIS_AVG,
+) -> MarketEstimate | None:
     """Средняя цена по рынку из daily_market_stats для группы объявления.
 
     Возвращает None, когда статистики недостаточно для уверенного вывода
-    (мало образцов, нет рядов, неполные данные объявления).
+    (мало образцов, нет рядов, неполные данные объявления). Число образцов
+    едет вместе со средней: карточка называет его («по 31 похожей машине»).
+
+    `basis=median` — то же по `median_price_usd`. Рядов бывает несколько
+    (поколения, все бакеты при NULL-пробеге), и точную общую медиану из
+    медиан не собрать: берём их среднее, взвешенное по образцам, — для замера
+    этого достаточно.
     """
     if (
         listing.brand_id is None
@@ -368,7 +416,15 @@ def market_average(
         return None
 
     # Взвешенное по числу образцов среднее по поколениям (и группам растаможки при unknown).
-    return sum(float(row.avg_price_usd) * row.sample_count for row in rows) / total_samples
+    def price(row: DailyMarketStat) -> float:
+        if basis == BASIS_MEDIAN and row.median_price_usd is not None:
+            return float(row.median_price_usd)
+        return float(row.avg_price_usd)
+
+    return MarketEstimate(
+        avg_usd=sum(price(row) * row.sample_count for row in rows) / total_samples,
+        samples=total_samples,
+    )
 
 
 def passes_below_market(
@@ -434,7 +490,7 @@ class _Candidate:
     order: int  # порядок появления — стабильный хвост сортировки
     priority: int
     below_percent: float | None
-    avg: float | None
+    estimate: MarketEstimate | None
     listing: Listing
     user_filter: UserFilter
     user: BotUser
@@ -553,13 +609,14 @@ def match_new_listings(
         )
     }
 
-    avg_cache: dict[int, float | None] = {}
+    estimate_cache: dict[int, MarketEstimate | None] = {}
     source_names: dict[int, str] = {
         row.id: row.name for row in session.execute(select(Source.id, Source.name))
     }
     brand_names: dict[int, str] = {
         row.id: row.name for row in session.execute(select(Brand.id, Brand.name))
     }
+    model_names = load_model_names(session)
     # Чёрные списки и группы марок — одним запросом на цикл, дальше в памяти.
     user_ids = {user.id for _, user in filter_user_pairs}
     block_sets = load_block_sets(session, user_ids)
@@ -636,9 +693,12 @@ def match_new_listings(
             if blocked is not None and blocked.blocks(listing):
                 continue
 
-            if listing.id not in avg_cache:
-                avg_cache[listing.id] = market_average(session, listing, min_samples=min_samples)
-            avg = avg_cache[listing.id]
+            if listing.id not in estimate_cache:
+                estimate_cache[listing.id] = market_estimate(
+                    session, listing, min_samples=min_samples
+                )
+            estimate = estimate_cache[listing.id]
+            avg = estimate.avg_usd if estimate is not None else None
 
             below_percent: float | None = None
             if avg is not None and avg > 0:
@@ -657,7 +717,7 @@ def match_new_listings(
                     order=order,
                     priority=filter_priority(user_filter),
                     below_percent=below_percent,
-                    avg=avg,
+                    estimate=estimate,
                     listing=listing,
                     user_filter=user_filter,
                     user=user,
@@ -686,14 +746,15 @@ def match_new_listings(
                 )
             )
             pending.append(
-                _build_pending(
+                build_pending(
                     candidate.listing,
                     chat_id=candidate.user.telegram_id,
                     filter_id=candidate.user_filter.id,
                     below_percent=candidate.below_percent,
-                    avg=candidate.avg,
+                    estimate=candidate.estimate,
                     source_names=source_names,
                     brand_names=brand_names,
+                    model_names=model_names,
                 )
             )
 
@@ -777,8 +838,9 @@ def preview_for_filter(
     blocked = load_block_sets(session, {user.id}).get(user.id)
     source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
     brand_names = {row.id: row.name for row in session.execute(select(Brand.id, Brand.name))}
+    model_names = load_model_names(session)
 
-    scored: list[tuple[float, Listing, float | None, float | None]] = []
+    scored: list[tuple[float, Listing, float | None, MarketEstimate | None]] = []
     for listing in candidates:
         if listing.id in already_sent or not is_complete_listing(listing, now):
             continue
@@ -787,7 +849,8 @@ def preview_for_filter(
         if blocked is not None and blocked.blocks(listing):
             continue
 
-        avg = market_average(session, listing, min_samples=min_samples)
+        estimate = market_estimate(session, listing, min_samples=min_samples)
+        avg = estimate.avg_usd if estimate is not None else None
         below_percent: float | None = None
         if avg is not None and avg > 0:
             diff = round((1 - float(listing.current_price_usd) / avg) * 100, 1)
@@ -802,13 +865,13 @@ def preview_for_filter(
         # Без статистики ставим в конец: такие показываем, только если лучших
         # не набралось — «ниже рынка» у них не доказано.
         scored.append(
-            (below_percent if below_percent is not None else -1.0, listing, below_percent, avg)
+            (below_percent if below_percent is not None else -1.0, listing, below_percent, estimate)
         )
 
     scored.sort(key=lambda item: item[0], reverse=True)
 
     pending: list[PendingNotification] = []
-    for _, listing, below_percent, avg in scored[:limit]:
+    for _, listing, below_percent, estimate in scored[:limit]:
         session.add(
             SentNotification(
                 user_id=user.id,
@@ -818,14 +881,15 @@ def preview_for_filter(
             )
         )
         pending.append(
-            _build_pending(
+            build_pending(
                 listing,
                 chat_id=user.telegram_id,
                 filter_id=user_filter.id,
                 below_percent=below_percent,
-                avg=avg,
+                estimate=estimate,
                 source_names=source_names,
                 brand_names=brand_names,
+                model_names=model_names,
             )
         )
     session.commit()

@@ -243,7 +243,9 @@ def onboarding_text(trial_days: int) -> str:
     )
 
 
-DEMO_INTRO_TEXT = "Вот пример объявления, которое я нашёл сегодня:"
+START_SHOWCASE_INTRO_TEXT = "Вот что я нашёл за сутки — дешевле всего относительно рынка:"
+
+START_TRIAL_PROMPT_TEXT = "Хотите получать такие, как только они появятся?"
 
 DEMO_UNAVAILABLE_TEXT = (
     "Сейчас нет свежего примера под рукой — как только появится машина ниже рынка, "
@@ -626,7 +628,73 @@ def _fmt_int(value: int) -> str:
     return f"{value:,}".replace(",", " ")
 
 
+def card_title(p: PendingNotification) -> str:
+    """«Toyota Camry · 2018»: марка и модель из каталога, иначе заголовок источника.
+
+    Заголовок lalafo — «Toyota Camry: 2016 г., 2.5 л, …», от него берём часть до
+    двоеточия. Поколение не добавляем: у mashina в нём спеки двигателя
+    («V (XA50) 2.5hyb AT 4WD»), в первой строке пуша это шум.
+    """
+    if p.brand_name and p.model_name:
+        name = f"{p.brand_name} {p.model_name}"
+    else:
+        name = (p.title or "").split(":", 1)[0].strip() or "Объявление"
+    return f"{name} · {p.year}" if p.year is not None else name
+
+
+def _round_hundred(value: float) -> int:
+    return int(round(value / 100.0)) * 100
+
+
 def format_notification(p: PendingNotification) -> str:
+    """Карточка объявления — подпись к фото или отдельное сообщение.
+
+    Название, цена и скидка — в первых строках: только они попадают в
+    push-превью, поэтому служебной фразы «Новое объявление…» больше нет.
+    Строка без значения не выводится вовсе (никаких «—»). «Похожие» — та же
+    модель, год и диапазон пробега (так считает `market_estimate`); при
+    неизвестном пробеге — все пробеги, и это сказано прямо.
+    """
+    lines = [f"<b>{html.escape(card_title(p))}</b>"]
+
+    if p.price_usd is not None:
+        price_line = f"💰 ${_fmt_int(round(p.price_usd))}"
+        # Целые проценты: десятые в push-превью — шум («на 14.9%» → «на 15%»).
+        percent = round(p.below_market_percent) if p.below_market_percent is not None else 0
+        if percent > 0:
+            price_line += f" · на {percent}% ниже рынка"
+            if p.market_avg_usd is not None:
+                saving = _round_hundred(p.market_avg_usd - p.price_usd)
+                if saving > 0:
+                    price_line += f" (выгода ≈ ${_fmt_int(saving)})"
+        lines.append(price_line)
+
+    if p.market_avg_usd is not None:
+        market_line = f"Рынок: ${_fmt_int(_round_hundred(p.market_avg_usd))}"
+        if p.market_samples:
+            similar = _plural(p.market_samples, "похожей машине", "похожим машинам", "похожим машинам")
+            market_line += f" — по {p.market_samples} {similar}"
+        if p.mileage_km is None:
+            market_line += " (пробег не указан — по всем пробегам)"
+        lines.append(market_line)
+
+    details = []
+    if p.mileage_km is not None:
+        details.append(f"{_fmt_int(p.mileage_km)} км")
+    if p.city:
+        details.append(html.escape(p.city))
+    if details:
+        lines.append(" · ".join(details))
+
+    if is_foreign(p.city):
+        lines.append("🌍 <b>Внимание: авто находится за рубежом</b>")
+
+    lines.append(f'<a href="{p.url}">Открыть на {html.escape(p.source_name)}</a>')
+    return "\n".join(lines)
+
+
+def format_notification_legacy(p: PendingNotification) -> str:
+    """Карточка до 22.10.2026 — вид при `BOT_RICH_CARDS_PER_CYCLE=0` (откат флагом)."""
     title = html.escape(p.title) if p.title else "Объявление"
     year = str(p.year) if p.year is not None else "—"
     mileage = f"{_fmt_int(p.mileage_km)} км" if p.mileage_km is not None else "—"
@@ -703,7 +771,7 @@ def format_digest(brand_name: str, notes: list[PendingNotification]) -> str:
         price = f"${_fmt_int(round(note.price_usd))}" if note.price_usd is not None else "—"
         details = [price]
         if note.below_market_percent is not None and note.below_market_percent > 0:
-            details.append(f"на {note.below_market_percent:g}% ниже средней")
+            details.append(f"на {note.below_market_percent:g}% ниже рынка")
         if note.mileage_km is not None:
             details.append(f"{_fmt_int(note.mileage_km)} км")
         if note.city:
