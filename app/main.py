@@ -1,5 +1,3 @@
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,22 +12,16 @@ from app.api.market import router as market_router
 from app.api.payments import router as payments_router
 from app.api.routes import router as analytics_router
 from app.core.config import get_settings
-from app.db.session import init_db
 
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    init_db()
-    yield
-
-
+# Схему БД здесь НЕ трогаем: миграции делает одноразовый сервис `migrate`
+# (docker-compose.yml), API стартует уже после него. Раньше init_db звали все
+# три сервиса разом, и их ALTER-ы толкались за блокировку `listings`.
 settings = get_settings()
 
 app = FastAPI(
     title="Car Analytics MVP",
     version="0.1.0",
     description="Price history and market estimates for selected car brands.",
-    lifespan=lifespan,
 )
 
 app.add_middleware(

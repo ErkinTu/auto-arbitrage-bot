@@ -410,6 +410,44 @@ def command_lalafo_maintenance(_: argparse.Namespace) -> None:
     run_lalafo_maintenance()
 
 
+def command_preset_volume(args: argparse.Namespace) -> None:
+    """Объём «ниже рынка» в сутки по КР при разных порогах и по пресетам.
+
+    Прогон перед сменой BOT_BASE_FILTER_PERCENT / порогов пресетов: только
+    чтение, на проде безопасен (несколько тысяч запросов к статистике).
+    """
+    from app.bot.campaigns import preset_volume
+
+    with SessionLocal() as session:
+        total, rows = preset_volume(session, days=args.days)
+    print(f"Опубликовано за {args.days} дн.: {total} ({total / args.days:.0f}/сутки)\n")
+    for row in rows:
+        print(f"{row.per_day:>8.1f}/сутки  {row.label}")
+
+
+def command_broadcast(args: argparse.Namespace) -> None:
+    """Разовая рассылка сегменту. Без --send — сухой прогон: размер и примеры."""
+    from app.bot.campaigns import recipients_for, send_campaign
+    from app.services.schedule import local_now
+
+    settings = get_settings()
+    with SessionLocal() as session:
+        recipients = recipients_for(session, args.segment)
+        if args.limit:
+            recipients = recipients[: args.limit]
+        print(f"Сегмент {args.segment}: {len(recipients)} получателей (уже получившие исключены)")
+        for recipient in recipients[:3]:
+            print(f"\n--- telegram_id={recipient.user.telegram_id}\n{recipient.text}")
+        if not args.send:
+            print("\nСухой прогон. Отправить: добавьте --send")
+            return
+        hour = local_now(settings.scheduler_timezone).hour
+        if not settings.bot_active_start_hour <= hour < settings.bot_active_end_hour:
+            raise SystemExit("Сейчас ночная пауза бота — рассылку делаем днём.")
+        outcomes = send_campaign(session, args.segment, recipients)
+    print(f"\nИтог: {dict(outcomes)}")
+
+
 def parser() -> argparse.ArgumentParser:
     main = argparse.ArgumentParser(description="Car Analytics MVP CLI")
     sub = main.add_subparsers(dest="command", required=True)
@@ -503,6 +541,23 @@ def parser() -> argparse.ArgumentParser:
         help="Run lalafo card validator + stale fallback now (what worker does daily)",
     )
     maintenance.set_defaults(func=command_lalafo_maintenance)
+
+    volume = sub.add_parser(
+        "preset-volume",
+        help="Below-market listings/day across KG at 5..25%% and per filter preset (read-only)",
+    )
+    volume.add_argument("--days", type=int, default=7)
+    volume.set_defaults(func=command_preset_volume)
+
+    from app.bot.campaigns import SEGMENTS
+
+    broadcast = sub.add_parser(
+        "broadcast", help="One-off message to a user segment (dry run unless --send)"
+    )
+    broadcast.add_argument("--segment", choices=SEGMENTS, required=True)
+    broadcast.add_argument("--limit", type=int, default=0, help="Send to the first N only")
+    broadcast.add_argument("--send", action="store_true", help="Actually send (default: dry run)")
+    broadcast.set_defaults(func=command_broadcast)
 
     funnel = sub.add_parser("funnel", help="Bot funnel: starts -> trials -> payments -> paid")
     funnel.add_argument("--days", type=int, default=30)

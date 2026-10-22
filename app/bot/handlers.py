@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from contextlib import suppress
 
 from aiogram import F, Router
@@ -17,16 +18,20 @@ from app.bot import db
 from app.bot.keyboards import (
     BlockCB,
     BlockDeleteCB,
+    BestCB,
     BlockMenuCB,
     BoolCB,
     BrandCB,
     FilterDeleteCB,
     ModelCB,
+    CUSTOM_PRESET,
     PercentCB,
     PlanCB,
+    PresetCB,
     RegionCB,
     SkipCB,
     TrialCB,
+    best_more_kb,
     block_choice_kb,
     blocks_kb,
     brands_kb,
@@ -35,6 +40,7 @@ from app.bot.keyboards import (
     pay_kb,
     percent_kb,
     plans_kb,
+    presets_kb,
     region_kb,
     share_kb,
     skip_kb,
@@ -45,7 +51,11 @@ from app.bot.messages import (
     BLOCK_LIST_EMPTY_TEXT,
     DEMO_INTRO_TEXT,
     DEMO_UNAVAILABLE_TEXT,
+    FILTERS_PRIORITY_NOTE,
     HELP_TEXT,
+    PRESETS_PROMPT_TEXT,
+    SHOWCASE_EMPTY_TEXT,
+    SHOWCASE_INTRO_TEXT,
     SUBSCRIPTION_MEMBER_TEXT,
     SUBSCRIPTION_REQUIRED_TEXT,
     SUBSCRIPTION_SOON_TEXT,
@@ -55,6 +65,7 @@ from app.bot.messages import (
     block_limit_text,
     blocks_text,
     duplicate_filter_text,
+    filter_created_text,
     filters_limit_text,
     format_filter_line,
     format_notification,
@@ -71,10 +82,17 @@ from app.bot.messages import (
     trial_already_used_text,
     trial_started_text,
 )
+from app.bot.matching import (
+    PRIORITY_ALL_CARS,
+    PRIORITY_BELOW_MARKET,
+    PRIORITY_SPECIFIC,
+)
+from app.bot.menu import MENU_ADD_FILTER, MENU_FILTERS, MENU_HELP, MENU_SUBSCRIBE, main_menu_kb
 from app.bot.notifier import send_notifications
 from app.bot.states import AddFilter
 from app.core.config import get_settings
 from app.services.blocklist import MAX_BLOCKS_PER_USER
+from app.services.filter_presets import base_preset, find_preset
 from app.services.finik import init_payment
 from app.services.plans import find_plan
 from app.services.regions import ALL_CARS_CODE, is_valid_region
@@ -114,14 +132,16 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
         deep_link_payload=command.args if command else None,
     )
 
+    # Постоянное меню едет с первым же сообщением: reply-клавиатура держится в
+    # чате, пока её не заменят, так что повторять её в каждом ответе незачем.
     if info.access_status == "member" or info.subscription_active or info.trial_active:
-        await message.answer(start_text())
+        await message.answer(start_text(), reply_markup=main_menu_kb())
         return
 
     if info.trial_used or not settings.trial_enabled:
         # Триал израсходован (или выключен) — сразу к оплате.
         payments_open = settings.subscription_allowed_for(message.from_user.id)
-        await message.answer(start_text())
+        await message.answer(start_text(), reply_markup=main_menu_kb())
         await message.answer(
             trial_already_used_text(payments_open)
             if info.trial_used
@@ -129,7 +149,7 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
         )
         return
 
-    await message.answer(onboarding_text(settings.trial_days))
+    await message.answer(onboarding_text(settings.trial_days), reply_markup=main_menu_kb())
     await _send_demo_listing(message, reply_markup=trial_kb(settings.trial_days))
 
 
@@ -178,7 +198,20 @@ async def cb_trial_start(callback: CallbackQuery) -> None:
     # одноразовый), но выглядели бы как поломка.
     with suppress(TelegramAPIError):
         await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(trial_started_text(result.expires_at, settings.trial_days))
+    # Та же кнопка ставит базовый фильтр — без подтверждения (решение владельца
+    # 21.10.2026): триал без фильтра — это три дня тишины, у 23% так и вышло.
+    # Если свои фильтры уже есть, их не трогаем.
+    base_filter = await asyncio.to_thread(db.ensure_base_filter, callback.from_user.id)
+    await callback.message.answer(
+        trial_started_text(
+            result.expires_at,
+            settings.trial_days,
+            base_filter=base_preset().summary if base_filter else None,
+        ),
+        reply_markup=main_menu_kb(),
+    )
+    if base_filter is not None:
+        await _send_filter_preview(callback.message, base_filter.id)
 
     if result.referrer_chat_id and result.referrer_bonus_days:
         await _notify_referral_bonus(
@@ -227,11 +260,13 @@ async def cmd_invite(message: Message) -> None:
 
 
 @router.message(Command("help"))
+@router.message(F.text == MENU_HELP)
 async def cmd_help(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
 
 @router.message(Command("subscribe"))
+@router.message(F.text == MENU_SUBSCRIBE)
 async def cmd_subscribe(message: Message) -> None:
     settings = get_settings()
     info = await asyncio.to_thread(db.get_subscription_info, message.from_user.id)
@@ -338,33 +373,72 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 # Зарегистрирован раньше шагов визарда, чтобы команда работала и внутри него.
 
 
-def _filters_text(filters: list[db.FilterDTO]) -> str:
+def _filter_summary(item: db.FilterDTO) -> str:
+    return format_filter_line(
+        brand_name=item.brand_name,
+        model_name=item.model_name,
+        year_from=item.year_from,
+        year_to=item.year_to,
+        mileage_max_km=item.mileage_max_km,
+        price_max_usd=item.price_max_usd,
+        below_market_only=item.below_market_only,
+        below_market_percent=item.below_market_percent,
+        skip_foreign=item.skip_foreign,
+        region=item.region,
+        brand_group=item.brand_group,
+        max_age_years=item.max_age_years,
+    )
+
+
+def _filters_text(filters: list[db.FilterDTO], *, note: bool = False) -> str:
     limit = get_settings().bot_max_filters_per_user
     lines = [f"📋 Ваши фильтры ({len(filters)} из {limit}):\n"]
     for index, item in enumerate(filters, start=1):
-        line = format_filter_line(
-            brand_name=item.brand_name,
-            model_name=item.model_name,
-            year_from=item.year_from,
-            year_to=item.year_to,
-            mileage_max_km=item.mileage_max_km,
-            price_max_usd=item.price_max_usd,
-            below_market_only=item.below_market_only,
-            below_market_percent=item.below_market_percent,
-            skip_foreign=item.skip_foreign,
-            region=item.region,
-        )
-        lines.append(f"{index}. {line}")
+        lines.append(f"{index}. {_filter_summary(item)}")
+    if note:
+        lines.append(f"\n{FILTERS_PRIORITY_NOTE}")
     return "\n".join(lines)
 
 
+def _priority_level(item: db.FilterDTO) -> int:
+    """Уровень фильтра — зеркало `matching.filter_priority`, но по DTO."""
+    if item.below_market_only:
+        return PRIORITY_BELOW_MARKET
+    if item.brand_name is not None or item.model_name is not None or item.brand_group:
+        return PRIORITY_SPECIFIC
+    return PRIORITY_ALL_CARS
+
+
+# Сноску про порядок показываем не чаще раза в сутки на чат: при каждом
+# /filters она превращается в шум, который перестают читать. Память процесса,
+# а не БД: после рестарта бота лишний раз показать подсказку не страшно.
+PRIORITY_NOTE_INTERVAL_SECONDS = 24 * 3600
+_priority_note_shown: dict[int, float] = {}
+
+
+def _should_show_priority_note(chat_id: int, filters: list[db.FilterDTO]) -> bool:
+    if len({_priority_level(item) for item in filters}) < 2:
+        return False  # один уровень — порядок ничего не меняет
+    now = time.monotonic()
+    shown_at = _priority_note_shown.get(chat_id)
+    if shown_at is not None and now - shown_at < PRIORITY_NOTE_INTERVAL_SECONDS:
+        return False
+    _priority_note_shown[chat_id] = now
+    return True
+
+
 @router.message(Command("filters"))
+@router.message(F.text == MENU_FILTERS)
 async def cmd_filters(message: Message) -> None:
     filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
     if not filters:
-        await message.answer("У вас пока нет фильтров. Создайте первый: /add_filter")
+        await message.answer(
+            "У вас пока нет фильтров — поэтому я молчу.\n\n" + PRESETS_PROMPT_TEXT,
+            reply_markup=presets_kb(),
+        )
         return
-    await message.answer(_filters_text(filters), reply_markup=filters_kb(filters))
+    note = _should_show_priority_note(message.chat.id, filters)
+    await message.answer(_filters_text(filters, note=note), reply_markup=filters_kb(filters))
 
 
 @router.callback_query(FilterDeleteCB.filter())
@@ -375,7 +449,10 @@ async def delete_filter_cb(query: CallbackQuery, callback_data: FilterDeleteCB) 
     await query.answer("Фильтр удален" if deleted else "Фильтр уже удален")
     filters = await asyncio.to_thread(db.list_filters, query.from_user.id)
     if not filters:
-        await query.message.edit_text("Фильтров не осталось. /add_filter — создать новый.")
+        await query.message.edit_text(
+            "Фильтров не осталось — без них я молчу.\n\n" + PRESETS_PROMPT_TEXT,
+            reply_markup=presets_kb(),
+        )
         return
     await query.message.edit_text(_filters_text(filters), reply_markup=filters_kb(filters))
 
@@ -462,24 +539,145 @@ async def block_add_cb(query: CallbackQuery, callback_data: BlockCB) -> None:
         await query.message.edit_reply_markup(reply_markup=None)
 
 
+# --- Витрина «лучшие сейчас» -------------------------------------------------
+
+
+@router.message(Command("best"))
+async def cmd_best(message: Message) -> None:
+    await _send_showcase_page(message, offset=0)
+
+
+@router.callback_query(BestCB.filter())
+async def cb_best_more(query: CallbackQuery, callback_data: BestCB) -> None:
+    await query.answer()
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(reply_markup=None)
+    await _send_showcase_page(query.message, offset=callback_data.offset)
+
+
+async def _send_showcase_page(message: Message, *, offset: int) -> None:
+    """3 карточки витрины + «Ещё 3». Не пишется в sent_notifications: это не
+    рассылка, и показанная здесь машина всё равно придёт по фильтру, если подходит."""
+    settings = get_settings()
+    page, next_offset = await asyncio.to_thread(db.get_showcase, message.chat.id, offset)
+    if not page:
+        await message.answer(SHOWCASE_EMPTY_TEXT)
+        return
+    if offset == 0:
+        await message.answer(SHOWCASE_INTRO_TEXT)
+    await send_notifications(message.bot, page, group_min=settings.bot_group_min_listings)
+    if next_offset is not None:
+        await message.answer("Показать ещё?", reply_markup=best_more_kb(next_offset))
+
+
 # --- Визард /add_filter -----------------------------------------------------
 
 
 @router.message(Command("add_filter"))
+@router.message(F.text == MENU_ADD_FILTER)
 async def cmd_add_filter(message: Message, state: FSMContext) -> None:
+    """Первый экран: готовые фильтры одной кнопкой и «Свой» — пошаговый визард."""
     await state.clear()
     quota = await asyncio.to_thread(db.filters_quota, message.from_user.id)
     if not quota.can_add:
         await message.answer(filters_limit_text(quota.used, quota.limit))
         return
+    await message.answer(PRESETS_PROMPT_TEXT, reply_markup=presets_kb())
+
+
+@router.callback_query(PresetCB.filter())
+async def cb_preset(query: CallbackQuery, callback_data: PresetCB, state: FSMContext) -> None:
+    if callback_data.code == CUSTOM_PRESET:
+        await _start_wizard(query, state)
+        return
+    if find_preset(callback_data.code) is None:
+        # Кнопка из истории чата после смены реестра пресетов.
+        await query.answer("Такого готового фильтра больше нет", show_alert=True)
+        await query.message.answer(PRESETS_PROMPT_TEXT, reply_markup=presets_kb())
+        return
+    await state.clear()
+    try:
+        created = await asyncio.to_thread(
+            db.create_preset_filter, query.from_user.id, callback_data.code
+        )
+    except db.FilterLimitError as exc:
+        await query.answer()
+        await query.message.answer(filters_limit_text(exc.used, exc.limit))
+        return
+    except db.DuplicateFilterError:
+        await query.answer()
+        await query.message.answer(duplicate_filter_text())
+        return
+    except LookupError:
+        await query.answer("Отправьте /start, чтобы начать пользоваться ботом", show_alert=True)
+        return
+    await query.answer("Фильтр сохранен")
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(reply_markup=None)
+    await query.message.answer(filter_created_text(_filter_summary(created)))
+    await _send_filter_preview(query.message, created.id)
+
+
+async def _start_wizard(query: CallbackQuery, state: FSMContext) -> None:
+    quota = await asyncio.to_thread(db.filters_quota, query.from_user.id)
+    if not quota.can_add:
+        await query.answer()
+        await query.message.answer(filters_limit_text(quota.used, quota.limit))
+        return
     brands = await asyncio.to_thread(db.list_brands)
     if not brands:
-        await message.answer(
+        await query.answer()
+        await query.message.answer(
             "Каталог марок пока пуст — база еще наполняется. Попробуйте позже."
         )
         return
     await state.set_state(AddFilter.brand)
-    await message.answer("Шаг 1/7. Выберите марку:", reply_markup=brands_kb(brands))
+    await state.update_data(prompt_id=query.message.message_id)
+    await query.answer()
+    await query.message.edit_text("Шаг 1/7. Выберите марку:", reply_markup=brands_kb(brands))
+
+
+# Текстовые шаги (годы, пробег, цена) отвечают НОВЫМ сообщением — иначе ответ
+# человека оказался бы выше вопроса. Но предыдущий вопрос с кнопкой
+# «Пропустить» тогда висел бы в чате мёртвым. Поэтому id текущего вопроса
+# храним в FSM и при переходе дальше превращаем его в строку-итог без кнопок
+# («✅ Пробег: до 150 000 км»): история настройки читается, неактивных кнопок нет.
+
+
+async def _ask(message: Message, state: FSMContext, text: str, reply_markup=None) -> None:
+    """Задаёт вопрос новым сообщением и запоминает его как текущий."""
+    sent = await message.answer(text, reply_markup=reply_markup)
+    await state.update_data(prompt_id=sent.message_id)
+
+
+async def _close_prompt(message: Message, state: FSMContext, summary: str | None = None) -> None:
+    """Гасит кнопки текущего вопроса; summary — заменить текст итогом шага.
+
+    Best-effort: вопрос могли удалить, а Telegram не даёт править сообщения
+    старше 48 ч — ошибка здесь не повод ломать визард.
+    """
+    prompt_id = (await state.get_data()).get("prompt_id")
+    if prompt_id is None:
+        return
+    with suppress(TelegramAPIError):
+        if summary is None:
+            await message.bot.edit_message_reply_markup(
+                chat_id=message.chat.id, message_id=prompt_id, reply_markup=None
+            )
+        else:
+            await message.bot.edit_message_text(
+                summary, chat_id=message.chat.id, message_id=prompt_id
+            )
+
+
+async def _reask(message: Message, state: FSMContext, text: str, reply_markup=None) -> None:
+    """Неверный ввод: старый вопрос без кнопок, подсказка с кнопками — новым."""
+    await _close_prompt(message, state)
+    await _ask(message, state, text, reply_markup)
+
+
+def _years_label(year_from: int, year_to: int) -> str:
+    return str(year_from) if year_from == year_to else f"{year_from}–{year_to}"
 
 
 @router.callback_query(AddFilter.brand, BrandCB.filter())
@@ -563,27 +761,34 @@ async def wizard_years_skip(query: CallbackQuery, state: FSMContext) -> None:
 async def wizard_years(message: Message, state: FSMContext) -> None:
     match = YEAR_RANGE_RE.match(message.text or "")
     if match is None:
-        await message.answer(
+        await _reask(
+            message,
+            state,
             "Не понял 🤔 Напишите диапазон, например `2015-2020`, один год `2018` "
             "или нажмите «Пропустить».",
-            reply_markup=skip_kb("years"),
+            skip_kb("years"),
         )
         return
     year_from = int(match.group(1))
     year_to = int(match.group(2)) if match.group(2) else year_from
     if not (MIN_YEAR <= year_from <= MAX_YEAR) or not (MIN_YEAR <= year_to <= MAX_YEAR):
-        await message.answer(
+        await _reask(
+            message,
+            state,
             f"Год должен быть между {MIN_YEAR} и {MAX_YEAR}. Попробуйте еще раз:",
-            reply_markup=skip_kb("years"),
+            skip_kb("years"),
         )
         return
     if year_from > year_to:
         year_from, year_to = year_to, year_from
     await state.update_data(year_from=year_from, year_to=year_to)
     await state.set_state(AddFilter.mileage)
-    await message.answer(
+    await _close_prompt(message, state, f"✅ Годы: {_years_label(year_from, year_to)}")
+    await _ask(
+        message,
+        state,
         "Шаг 4/7. Максимальный пробег в км, например `150000`:",
-        reply_markup=skip_kb("mileage"),
+        skip_kb("mileage"),
     )
 
 
@@ -602,16 +807,21 @@ async def wizard_mileage_skip(query: CallbackQuery, state: FSMContext) -> None:
 async def wizard_mileage(message: Message, state: FSMContext) -> None:
     value = _parse_positive_int(message.text or "")
     if value is None or value > MAX_MILEAGE_KM:
-        await message.answer(
+        await _reask(
+            message,
+            state,
             "Нужно число в км, например `150000` (или «Пропустить»):",
-            reply_markup=skip_kb("mileage"),
+            skip_kb("mileage"),
         )
         return
     await state.update_data(mileage_max_km=value)
     await state.set_state(AddFilter.price)
-    await message.answer(
+    await _close_prompt(message, state, f"✅ Пробег: до {value:,} км".replace(",", " "))
+    await _ask(
+        message,
+        state,
         "Шаг 5/7. Максимальная цена в долларах, например `20000`:",
-        reply_markup=skip_kb("price"),
+        skip_kb("price"),
     )
 
 
@@ -630,16 +840,21 @@ async def wizard_price_skip(query: CallbackQuery, state: FSMContext) -> None:
 async def wizard_price(message: Message, state: FSMContext) -> None:
     value = _parse_positive_int(message.text or "")
     if value is None or value > MAX_PRICE_USD:
-        await message.answer(
+        await _reask(
+            message,
+            state,
             "Нужно число в долларах, например `20000` (или «Пропустить»):",
-            reply_markup=skip_kb("price"),
+            skip_kb("price"),
         )
         return
     await state.update_data(price_max_usd=float(value))
     await state.set_state(AddFilter.below_avg)
-    await message.answer(
+    await _close_prompt(message, state, f"✅ Цена: до ${value:,}".replace(",", " "))
+    await _ask(
+        message,
+        state,
         "Шаг 6/7. Присылать только авто с ценой ниже средней по рынку?",
-        reply_markup=yes_no_kb("below_avg"),
+        yes_no_kb("below_avg"),
     )
 
 
@@ -709,23 +924,7 @@ async def wizard_region(query: CallbackQuery, callback_data: RegionCB, state: FS
         await query.message.edit_text(duplicate_filter_text())
         return
     await query.answer("Фильтр сохранен")
-    summary = format_filter_line(
-        brand_name=created.brand_name,
-        model_name=created.model_name,
-        year_from=created.year_from,
-        year_to=created.year_to,
-        mileage_max_km=created.mileage_max_km,
-        price_max_usd=created.price_max_usd,
-        below_market_only=created.below_market_only,
-        below_market_percent=created.below_market_percent,
-        skip_foreign=created.skip_foreign,
-        region=created.region,
-    )
-    await query.message.edit_text(
-        f"✅ Фильтр создан:\n{summary}\n\n"
-        "Как только появится подходящее объявление — пришлю его сюда.\n"
-        "/filters — мои фильтры, /add_filter — еще один."
-    )
+    await query.message.edit_text(filter_created_text(_filter_summary(created)))
     await _send_filter_preview(query.message, created.id)
 
 
@@ -765,27 +964,49 @@ async def wizard_expect_buttons(message: Message) -> None:
 
 
 @router.message(AddFilter.years)
-async def wizard_years_fallback(message: Message) -> None:
-    await message.answer(
+async def wizard_years_fallback(message: Message, state: FSMContext) -> None:
+    await _reask(
+        message,
+        state,
         "Отправьте годы текстом, например `2015-2020`, или нажмите «Пропустить».",
-        reply_markup=skip_kb("years"),
+        skip_kb("years"),
     )
 
 
 @router.message(AddFilter.mileage)
-async def wizard_mileage_fallback(message: Message) -> None:
-    await message.answer(
+async def wizard_mileage_fallback(message: Message, state: FSMContext) -> None:
+    await _reask(
+        message,
+        state,
         "Отправьте число в км, например `150000`, или нажмите «Пропустить».",
-        reply_markup=skip_kb("mileage"),
+        skip_kb("mileage"),
     )
 
 
 @router.message(AddFilter.price)
-async def wizard_price_fallback(message: Message) -> None:
-    await message.answer(
+async def wizard_price_fallback(message: Message, state: FSMContext) -> None:
+    await _reask(
+        message,
+        state,
         "Отправьте число в долларах, например `20000`, или нажмите «Пропустить».",
-        reply_markup=skip_kb("price"),
+        skip_kb("price"),
     )
+
+
+# Кнопки шагов визарда без активного шага: визард бросили (команда, кнопка
+# меню, рестарт бота — состояние в памяти), а последний вопрос с кнопками
+# остался в чате. Без этого хендлера нажатие ни на что не отвечает и Telegram
+# крутит «часики». Регистрируется после всех шагов — ловит только «осиротевшие».
+@router.callback_query(BrandCB.filter())
+@router.callback_query(ModelCB.filter())
+@router.callback_query(SkipCB.filter())
+@router.callback_query(BoolCB.filter())
+@router.callback_query(PercentCB.filter())
+@router.callback_query(RegionCB.filter())
+async def wizard_stale_button(query: CallbackQuery) -> None:
+    await query.answer("Этот шаг уже неактуален — начните заново: /add_filter", show_alert=True)
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(reply_markup=None)
 
 
 # --- /admin ------------------------------------------------------------------

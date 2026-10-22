@@ -10,9 +10,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
-import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Callable, TypeVar
@@ -20,8 +19,10 @@ from typing import Callable, TypeVar
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
-from app.bot.matching import PendingNotification, market_average
+from app.bot.matching import PendingNotification
 from app.bot.matching import preview_for_filter as _preview_for_filter
+from app.bot.showcase import get_showcase as _get_showcase
+from app.bot.showcase import page_for_chat as showcase_page
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models import (
@@ -31,12 +32,10 @@ from app.models import (
     CarModel,
     Listing,
     Payment,
-    Source,
     UserBlock,
     UserEvent,
     UserFilter,
 )
-from app.services.vehicle_summary import _build_source_url as build_source_url
 from app.services.blocklist import (
     KIND_BRAND,
     KIND_CITY,
@@ -52,6 +51,7 @@ from app.services.access_schedule import (
     tail_end,
 )
 from app.services.events import EVENT_PAYMENT_CREATED, EVENT_START, log_event
+from app.services.filter_presets import base_preset, find_preset
 from app.services.plans import TIER_FULL, effective_tier, find_plan
 from app.services.referral import (
     ReferralStats,
@@ -139,6 +139,8 @@ class FilterDTO:
     below_market_percent: int | None
     skip_foreign: bool
     region: str | None
+    brand_group: str | None = None
+    max_age_years: int | None = None
 
 
 def _utcnow() -> datetime:
@@ -528,70 +530,36 @@ def get_invite_info(telegram_id: int) -> InviteInfo:
         )
 
 
-# Демо-лот для онбординга: настоящий, но пересчитывать его на каждый /start
-# дорого (market_average — два запроса на объявление), а меняется он медленно.
-DEMO_CANDIDATES = 40
-DEMO_CACHE_TTL_SECONDS = 900
-DEMO_GOOD_ENOUGH_PERCENT = 20.0  # нашли такое — дальше не ищем
-_demo_cache: tuple[float, PendingNotification | None] = (0.0, None)
+def get_showcase(chat_id: int, offset: int = 0) -> tuple[list[PendingNotification], int | None]:
+    """Страница витрины «лучшие сейчас» для чата (см. `bot/showcase.py`)."""
+    settings = get_settings()
+    items = _get_showcase(
+        SessionLocal,
+        min_samples=settings.bot_below_avg_min_samples,
+        max_below_percent=settings.bot_max_below_market_percent,
+    )
+    return showcase_page(items, chat_id, offset)
+
+
+def refresh_showcase() -> None:
+    """Пересчёт витрины сейчас — прогрев из цикла бота (poller)."""
+    settings = get_settings()
+    _get_showcase(
+        SessionLocal,
+        min_samples=settings.bot_below_avg_min_samples,
+        max_below_percent=settings.bot_max_below_market_percent,
+        refresh=True,
+    )
 
 
 def get_demo_listing(chat_id: int) -> PendingNotification | None:
-    """Живой пример «ниже рынка» для онбординга (не хардкод).
+    """Живой пример «ниже рынка» для онбординга (не хардкод) — первое место витрины.
 
-    Берём свежие объявления и считаем по ним ту же `market_average`, что и
-    рассылка, — демо показывает ровно то, что человек будет получать. Результат
-    кэшируется на DEMO_CACHE_TTL_SECONDS: /start редкий, но выдавать по 80
-    запросов на нажатие незачем.
+    Витрина считает ту же `market_average`, что и рассылка, так что демо
+    показывает ровно то, что человек будет получать, и кэшируется вместе с ней.
     """
-    global _demo_cache
-    cached_until, cached = _demo_cache
-    if time.monotonic() < cached_until and cached is not None:
-        return replace(cached, chat_id=chat_id)
-
-    settings = get_settings()
-    best: PendingNotification | None = None
-    best_percent = 0.0
-    with SessionLocal() as session:
-        candidates = session.scalars(
-            select(Listing)
-            .where(
-                Listing.is_active.is_(True),
-                Listing.current_price_usd.is_not(None),
-                Listing.analytics_eligible.is_(True),
-                Listing.source_created_at.is_not(None),
-            )
-            .order_by(Listing.source_created_at.desc())
-            .limit(DEMO_CANDIDATES)
-        ).all()
-        source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
-        for listing in candidates:
-            avg = market_average(session, listing, min_samples=settings.bot_below_avg_min_samples)
-            if avg is None or avg <= 0:
-                continue
-            percent = round((1 - float(listing.current_price_usd) / avg) * 100, 1)
-            if percent <= best_percent:
-                continue
-            best_percent = percent
-            best = PendingNotification(
-                chat_id=chat_id,
-                listing_id=listing.id,
-                filter_id=0,  # демо не привязано к фильтру
-                title=listing.title,
-                year=listing.year,
-                mileage_km=listing.mileage_km,
-                price_usd=float(listing.current_price_usd),
-                city=listing.city,
-                url=build_source_url(listing),
-                below_market_percent=percent,
-                market_avg_usd=avg,
-                source_name=source_names.get(listing.source_id, "mashina.kg"),
-            )
-            if percent >= DEMO_GOOD_ENOUGH_PERCENT:
-                break
-
-    _demo_cache = (time.monotonic() + DEMO_CACHE_TTL_SECONDS, best)
-    return best
+    page, _ = get_showcase(chat_id, 0)
+    return page[0] if page else None
 
 
 def list_brands() -> list[BrandDTO]:
@@ -627,6 +595,8 @@ def _filter_signature(user_filter: UserFilter) -> tuple:
         user_filter.below_market_percent,
         user_filter.skip_foreign,
         user_filter.region,
+        user_filter.brand_group,
+        user_filter.max_age_years,
     )
 
 
@@ -647,6 +617,8 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
         below_market_percent=user_filter.below_market_percent,
         skip_foreign=user_filter.skip_foreign,
         region=user_filter.region,
+        brand_group=user_filter.brand_group,
+        max_age_years=user_filter.max_age_years,
     )
 
 
@@ -713,6 +685,8 @@ def create_filter(
     below_market_percent: int | None = None,
     skip_foreign: bool = False,
     region: str | None = None,
+    brand_group: str | None = None,
+    max_age_years: int | None = None,
 ) -> FilterDTO:
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
@@ -738,6 +712,8 @@ def create_filter(
             below_market_percent,
             skip_foreign,
             region,
+            brand_group,
+            max_age_years,
         )
         for item in existing:
             if _filter_signature(item) == candidate:
@@ -754,10 +730,51 @@ def create_filter(
             below_market_percent=below_market_percent,
             skip_foreign=skip_foreign,
             region=region,
+            brand_group=brand_group,
+            max_age_years=max_age_years,
         )
         session.add(user_filter)
         session.commit()
         return _filter_dto(session, user_filter)
+
+
+def create_preset_filter(telegram_id: int, preset_code: str) -> FilterDTO:
+    """Фильтр из пресета одной кнопкой. Ошибки — те же, что у `create_filter`.
+
+    LookupError — и для незнакомого юзера, и для неизвестного кода (кнопка из
+    старой истории чата после смены реестра).
+    """
+    preset = find_preset(preset_code)
+    if preset is None:
+        raise LookupError(f"unknown preset {preset_code!r}")
+    return create_filter(
+        telegram_id,
+        brand_id=None,
+        car_model_id=None,
+        year_from=None,
+        year_to=None,
+        mileage_max_km=None,
+        price_max_usd=preset.price_max_usd,
+        below_market_only=True,
+        below_market_percent=preset.below_market_percent,
+        region=preset.region,
+        brand_group=preset.brand_group,
+        max_age_years=preset.max_age_years,
+    )
+
+
+def ensure_base_filter(telegram_id: int) -> FilterDTO | None:
+    """Ставит базовый фильтр, если у человека нет НИ ОДНОГО; иначе None.
+
+    Нужен там, где фильтр ставится не по прямой просьбе (триал в одно нажатие,
+    кнопка в напоминании): свои фильтры человека не трогаем и слот не тратим.
+    """
+    if filters_quota(telegram_id).used:
+        return None
+    try:
+        return create_preset_filter(telegram_id, base_preset().code)
+    except (DuplicateFilterError, FilterLimitError):
+        return None  # гонка двух нажатий: фильтр уже поставил соседний апдейт
 
 
 def delete_filter(telegram_id: int, filter_id: int) -> bool:
@@ -957,4 +974,5 @@ def preview_for_filter(filter_id: int) -> list[PendingNotification]:
             factor=settings.bot_below_avg_factor,
             min_samples=settings.bot_below_avg_min_samples,
             delayed_lag_minutes=settings.delayed_tier_lag_minutes,
+            max_below_percent=settings.bot_max_below_market_percent,
         )

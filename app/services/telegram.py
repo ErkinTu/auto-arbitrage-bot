@@ -69,13 +69,29 @@ def _describe(response: httpx.Response) -> str:
         return response.text
 
 
-def send_message(chat_id: int, text: str) -> SendOutcome:
-    """Отправка одного сообщения; см. SendOutcome про трактовку результата."""
+def send_message(
+    chat_id: int,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+    html: bool = False,
+) -> SendOutcome:
+    """Отправка одного сообщения; см. SendOutcome про трактовку результата.
+
+    reply_markup — клавиатура в JSON-виде Bot API (aiogram:
+    `markup.model_dump(exclude_none=True)`); html=True — parse_mode HTML,
+    как у бота (ссылки на объявления в итогах триала).
+    """
     settings = get_settings()
     token = settings.telegram_bot_token
     if not token:
         return SendOutcome.FAILED
     payload: dict[str, object] = {"chat_id": chat_id, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    if html:
+        payload["parse_mode"] = "HTML"
+        payload["disable_web_page_preview"] = True
     # Этот путь минует aiogram (и его session-middleware), поэтому защиту
     # ставим здесь сами — правило про whitelist общее с ботом.
     if settings.protect_content_for(chat_id):

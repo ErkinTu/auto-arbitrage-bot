@@ -333,6 +333,8 @@ def get_user(session: Session, user_id: int) -> dict:
                     below_market_percent=item.below_market_percent,
                     skip_foreign=item.skip_foreign,
                     region=item.region,
+                    brand_group=item.brand_group,
+                    max_age_years=item.max_age_years,
                 ),
             }
             for item in filters

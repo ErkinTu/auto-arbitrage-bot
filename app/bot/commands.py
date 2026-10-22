@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 BOT_COMMANDS: tuple[tuple[str, str], ...] = (
     ("add_filter", "Создать фильтр поиска"),
     ("filters", "Мои фильтры"),
+    ("best", "Лучшие предложения сейчас"),
     ("blacklist", "Что не показывать"),
     ("invite", "Пригласить друзей — дни бесплатно"),
     ("status", "Мой доступ"),

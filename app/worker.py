@@ -28,16 +28,34 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.db.session import SessionLocal, init_db
-from app.bot.messages import renewal_reminder_text, trial_paywall_text
+from app.db.session import SessionLocal
+from app.bot.keyboards import base_filter_kb, trial_kb
+from app.bot.messages import (
+    nudge_filter_text,
+    nudge_trial_text,
+    renewal_reminder_text,
+    trial_paywall_text,
+    trial_summary_market_text,
+    trial_summary_text,
+)
+from app.bot.showcase import SHOWCASE_PAGE, compute_showcase
 from app.models import BotUser, ParserRun, Payment
+from app.services.engagement import (
+    EVENT_TRIAL_SUMMARY,
+    NUDGE_FILTER,
+    NUDGE_TRIAL,
+    filter_nudge_candidates,
+    nudge_event,
+    trial_nudge_candidates,
+    trial_stats,
+    trial_summary_candidates,
+)
 from app.services.events import EVENT_TRIAL_EXPIRED, log_event
 from app.services.telegram import SendOutcome, send_message
 from app.services.access_schedule import tail_tier
 from app.services.plans import TIER_FULL
 from app.services.trial import paywall_candidates
 from app.parsers.mashina import MashinaParser
-from app.services.catalog_service import seed_default_catalog
 from app.services.lookup import ensure_brand_targets, get_or_create_source
 from app.services.schedule import local_now, last_slot_start, split_brands_for_weekend
 from app.services.sources import LALAFO, build_parser, source_base_url
@@ -198,7 +216,7 @@ def run_lalafo_maintenance() -> None:
                 source,
                 validate_after_days=settings.lalafo_validate_after_days,
                 max_per_run=settings.lalafo_validate_max_per_run,
-                commit_every=100,
+                commit_every=1,
             )
             session.commit()
         finally:
@@ -346,6 +364,109 @@ def send_trial_paywall_notices() -> int:
     return sent
 
 
+def _within_bot_window() -> bool:
+    """Касания (напоминания, итоги) — только днём, в окне активности бота.
+
+    Ночное сообщение от бота, который ночью и так молчит, будит человека ради
+    маркетинга; дождётся утра — ничего не теряет.
+    """
+    settings = get_settings()
+    hour = local_now(settings.scheduler_timezone).hour
+    return settings.bot_active_start_hour <= hour < settings.bot_active_end_hour
+
+
+def _record_touch(session, user: BotUser, event: str, outcome: SendOutcome) -> bool:
+    """Журналит касание; True — доставлено.
+
+    FAILED (429/сеть) не журналим — человек останется кандидатом и получит
+    сообщение следующим циклом. UNDELIVERABLE (заблокировал бота) журналим,
+    иначе дёргали бы его каждую минуту до конца окна.
+    """
+    if outcome is SendOutcome.FAILED:
+        return False
+    log_event(session, user.id, event, {"delivered": outcome is SendOutcome.DELIVERED})
+    return outcome is SendOutcome.DELIVERED
+
+
+def send_nudges() -> int:
+    """Напоминания «включите триал» и «поставьте фильтр»: по два, через 12 мин и сутки.
+
+    Кто нажал /start и не включил триал — кнопка «триал + базовый фильтр».
+    Кто на триале без фильтра — кнопка «поставить базовый фильтр». Кандидаты и
+    окна — `services/engagement.py`. Каждый цикл worker-а, как и пейвол: у
+    каждого своё время, а запрос почти всегда пустой.
+    """
+    settings = get_settings()
+    if not settings.trial_enabled or not _within_bot_window():
+        return 0
+    now = utcnow()
+    sent = 0
+    trial_markup = trial_kb(settings.trial_days).model_dump(exclude_none=True)
+    filter_markup = base_filter_kb().model_dump(exclude_none=True)
+    with SessionLocal() as session:
+        for step in (1, 2):
+            for user in trial_nudge_candidates(session, step, now):
+                outcome = send_message(
+                    user.telegram_id,
+                    nudge_trial_text(settings.trial_days, step),
+                    reply_markup=trial_markup,
+                )
+                sent += _record_touch(session, user, nudge_event(NUDGE_TRIAL, step), outcome)
+            for user in filter_nudge_candidates(session, step, now):
+                outcome = send_message(
+                    user.telegram_id, nudge_filter_text(step), reply_markup=filter_markup
+                )
+                sent += _record_touch(session, user, nudge_event(NUDGE_FILTER, step), outcome)
+            session.commit()
+    if sent:
+        logger.info("nudges sent: %s", sent)
+    return sent
+
+
+def send_trial_summaries() -> int:
+    """Итоги за ~12 ч до конца триала: сколько авто пришло, лучшая скидка.
+
+    Нулевой итог не показываем — он продаёт против нас: вместо «я прислал вам
+    0 машин» человек видит, что есть на рынке прямо сейчас (витрина). Пустая
+    и витрина — молчим, но событие пишем, чтобы не пересчитывать каждую минуту.
+    """
+    settings = get_settings()
+    if not settings.trial_enabled or not _within_bot_window():
+        return 0
+    now = utcnow()
+    sent = 0
+    with SessionLocal() as session:
+        candidates = trial_summary_candidates(session, now)
+        if not candidates:
+            return 0
+        showcase = None
+        for user in candidates:
+            stats = trial_stats(session, user)
+            if stats.sent:
+                text = trial_summary_text(
+                    sent=stats.sent,
+                    below_market=stats.below_market,
+                    best_percent=stats.best_percent,
+                )
+            else:
+                if showcase is None:  # одна витрина на прогон, а не на юзера
+                    showcase = compute_showcase(
+                        session,
+                        min_samples=settings.bot_below_avg_min_samples,
+                        max_below_percent=settings.bot_max_below_market_percent,
+                    )[:SHOWCASE_PAGE]
+                if not showcase:
+                    log_event(session, user.id, EVENT_TRIAL_SUMMARY, {"skipped": "empty"})
+                    continue
+                text = trial_summary_market_text(showcase)
+            outcome = send_message(user.telegram_id, text, html=True)
+            sent += _record_touch(session, user, EVENT_TRIAL_SUMMARY, outcome)
+        session.commit()
+    if sent:
+        logger.info("trial summaries sent: %s", sent)
+    return sent
+
+
 def expire_stale_payments() -> int:
     """Гасит незавершённые платежи: pending старше PAYMENT_PENDING_TTL_HOURS.
 
@@ -369,10 +490,9 @@ def expire_stale_payments() -> int:
 
 def main() -> None:
     settings = get_settings()
-    init_db()
+    # Схема, источники и каталог — забота сервиса `migrate` (init-db + seed),
+    # worker стартует после него (depends_on: service_completed_successfully).
     with SessionLocal() as session:
-        get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
-        seed_default_catalog(session)
         orphaned = fail_orphaned_full_runs(session)
         session.commit()
     if orphaned:
@@ -419,6 +539,14 @@ def main() -> None:
             send_trial_paywall_notices()
         except Exception:
             logger.exception("trial paywall notices failed")
+        try:
+            send_trial_summaries()
+        except Exception:
+            logger.exception("trial summaries failed")
+        try:
+            send_nudges()
+        except Exception:
+            logger.exception("nudges failed")
         try:
             expire_stale_payments()
         except Exception:

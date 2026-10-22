@@ -370,6 +370,9 @@ def validate_stale_lalafo_listings(
     держат worker часами (14.09–16.09.2026 — по ~10 ч за ночь) и блокируют
     остальные его задачи. `commit_every` — периодический commit внутри прогона,
     чтобы транзакция не висела открытой все ~40 минут (прогон в 3000 карточек).
+    worker передаёт 1: тогда транзакция не переживает ни одного HTTP-запроса —
+    иначе она часами держит строки `listings`, и DDL при выкатке встаёт в
+    очередь за ней, а все запросы к таблице — за DDL (21.10.2026).
     """
     cutoff = utcnow() - timedelta(days=validate_after_days)
     candidates = session.scalars(
@@ -383,6 +386,8 @@ def validate_stale_lalafo_listings(
         .limit(max_per_run)
     ).all()
 
+    if commit_every:
+        session.commit()  # выборку прочитали — не держим её транзакцию через HTTP
     report = ValidationReport(candidates=len(candidates), drained=len(candidates) < max_per_run)
     consecutive_failures = 0
     for index, listing in enumerate(candidates, start=1):

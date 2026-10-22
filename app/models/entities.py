@@ -461,6 +461,12 @@ class UserFilter(Base, TimestampMixin):
     # Регион объявления (см. app/services/regions.py): код области/города/'foreign'.
     # NULL = «Все авто» (без ограничения по географии).
     region: Mapped[str | None] = mapped_column(String(16))
+    # Группа марок (services/filter_presets.py::BRAND_GROUPS), напр. 'japan'.
+    # Одно поле, а не N фильтров по марке: иначе пресет «Японцы» съел бы 4 слота.
+    brand_group: Mapped[str | None] = mapped_column(String(16))
+    # «Не старше N лет» — год считается при матчинге, поэтому не устаревает,
+    # в отличие от year_from. NULL = без ограничения.
+    max_age_years: Mapped[int | None] = mapped_column(Integer)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -514,6 +520,10 @@ class SentNotification(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False)
     listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), nullable=False)
     filter_id: Mapped[int | None] = mapped_column(ForeignKey("user_filters.id", ondelete="SET NULL"))
+    # % ниже рынка НА МОМЕНТ отправки (NULL — не ниже или статистики не было).
+    # Нужен итогам триала («лучшая скидка — N%»): пересчитать задним числом
+    # нельзя, рынок и цена с тех пор сдвинулись.
+    below_market_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 1))
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
