@@ -376,5 +376,5 @@ Finik сам, со своего сервера, отправляет запро�
 ---
 
 Подробности и план работ — `PAYMENTS_FINIK_ANALYSIS.md`.
-Задачи — `docs/planning/TODO.md § Переход на Finik`. Официальная документация —
+Задачи — `docs/planning/TODO_ARCHIVE.md § Переход на Finik`. Официальная документация —
 https://www.finik.kg/documentation/web-sdk/
