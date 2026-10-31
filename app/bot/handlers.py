@@ -22,6 +22,7 @@ from app.bot.keyboards import (
     BlockMenuCB,
     BoolCB,
     BrandCB,
+    DigestCB,
     FilterDeleteCB,
     HideCB,
     ModelCB,
@@ -38,8 +39,13 @@ from app.bot.keyboards import (
     blocks_kb,
     brands_kb,
     card_kb,
+    digest_kb,
     hidden_kb,
     markup_url,
+    more_rows,
+    with_rows,
+    without_best_rows,
+    without_digest_rows,
     filters_kb,
     models_kb,
     pay_kb,
@@ -54,6 +60,9 @@ from app.bot.keyboards import (
 )
 from app.bot.messages import (
     BLOCK_LIST_EMPTY_TEXT,
+    DIGEST_EMPTY_TEXT,
+    DIGEST_EXPIRED_TEXT,
+    DIGEST_GONE_TEXT,
     DEMO_UNAVAILABLE_TEXT,
     FILTERS_PRIORITY_NOTE,
     HELP_TEXT,
@@ -102,6 +111,7 @@ from app.bot.menu import (
     main_menu_kb,
 )
 from app.bot.notifier import send_notifications
+from app.bot.showcase import mark_seen, seen_ids
 from app.bot.states import AddFilter
 from app.core.config import get_settings
 from app.services.blocklist import MAX_BLOCKS_PER_USER
@@ -192,8 +202,12 @@ async def _send_start_showcase(message: Message) -> bool:
         return False
     await message.answer(START_SHOWCASE_INTRO_TEXT)
     await send_notifications(
-        message.bot, page, rich_cards=settings.bot_rich_cards_per_cycle
+        message.bot,
+        page,
+        rich_cards=settings.bot_rich_cards_per_cycle,
+        interactive=True,
     )
+    mark_seen(message.chat.id, [note.listing_id for note in page])
     return True
 
 
@@ -605,13 +619,17 @@ async def hide_cb(query: CallbackQuery, callback_data: HideCB) -> None:
         await query.answer("По этому объявлению так не получится", show_alert=True)
         return
     await query.answer(f"Скрыто: {result.label}. Больше не покажу")
+    # Кнопка дайджеста могла переехать под эту карточку — не теряем её.
     with suppress(TelegramAPIError):
         await query.message.edit_reply_markup(
-            reply_markup=hidden_kb(
-                result.label,
-                result.block_id,
-                callback_data.listing_id,
-                markup_url(query.message.reply_markup),
+            reply_markup=with_rows(
+                hidden_kb(
+                    result.label,
+                    result.block_id,
+                    callback_data.listing_id,
+                    markup_url(query.message.reply_markup),
+                ),
+                more_rows(query.message.reply_markup),
             )
         )
 
@@ -624,8 +642,48 @@ async def unhide_cb(query: CallbackQuery, callback_data: UnhideCB) -> None:
     url = markup_url(query.message.reply_markup)
     with suppress(TelegramAPIError):
         await query.message.edit_reply_markup(
-            reply_markup=card_kb(callback_data.listing_id, url) if url else None
+            reply_markup=with_rows(
+                card_kb(callback_data.listing_id, url) if url else None,
+                more_rows(query.message.reply_markup),
+            )
         )
+
+
+@router.callback_query(DigestCB.filter())
+async def digest_more_cb(query: CallbackQuery, callback_data: DigestCB) -> None:
+    """«📷 Показать с фото»: следующие 3 карточки, кнопка переезжает под последнюю.
+
+    Кнопку снимаем с нажатого сообщения (сам список или прошлая карточка) ДО
+    отправки: двойное нажатие иначе прислало бы те же карточки дважды. Новые
+    карточки уходят с ней же строкой под последней — кнопка всегда внизу чата,
+    а не над присланным. Последняя порция её не несёт; список устарел или всё
+    снято — честно говорим.
+    """
+    page = await asyncio.to_thread(
+        db.digest_page, query.from_user.id, callback_data.batch, callback_data.offset
+    )
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(
+            reply_markup=without_digest_rows(query.message.reply_markup)
+        )
+    if page.status != db.DIGEST_OK:
+        text = {
+            db.DIGEST_EXPIRED: DIGEST_EXPIRED_TEXT,
+            db.DIGEST_GONE: DIGEST_GONE_TEXT,
+        }.get(page.status, DIGEST_EMPTY_TEXT)
+        await query.answer(text, show_alert=True)
+        return
+
+    await query.answer()
+    await send_notifications(
+        query.message.bot,
+        page.notes,
+        rich_cards=len(page.notes),
+        tail_markup=digest_kb(callback_data.batch, page.next_offset, page.remaining)
+        if page.next_offset is not None
+        else None,
+        interactive=True,
+    )
 
 
 # --- Витрина «лучшие сейчас» -------------------------------------------------
@@ -634,22 +692,33 @@ async def unhide_cb(query: CallbackQuery, callback_data: UnhideCB) -> None:
 @router.message(Command("best"))
 @router.message(F.text == MENU_BEST)
 async def cmd_best(message: Message) -> None:
-    await _send_showcase_page(message, offset=0)
+    # fresh: повторное нажатие даёт следующие машины, а не те же три.
+    await _send_showcase_page(message, offset=0, fresh=True)
 
 
 @router.callback_query(BestCB.filter())
 async def cb_best_more(query: CallbackQuery, callback_data: BestCB) -> None:
     await query.answer()
+    # Кнопка стоит под карточкой: снимаем только её строку, «Не то»/«Открыть» остаются.
     with suppress(TelegramAPIError):
-        await query.message.edit_reply_markup(reply_markup=None)
+        await query.message.edit_reply_markup(
+            reply_markup=without_best_rows(query.message.reply_markup)
+        )
     await _send_showcase_page(query.message, offset=callback_data.offset)
 
 
-async def _send_showcase_page(message: Message, *, offset: int) -> None:
-    """3 карточки витрины + «Ещё 3». Не пишется в sent_notifications: это не
-    рассылка, и показанная здесь машина всё равно придёт по фильтру, если подходит."""
+async def _send_showcase_page(message: Message, *, offset: int, fresh: bool = False) -> None:
+    """3 карточки витрины, под последней — «Показать ещё 3 лучших».
+
+    Не пишется в sent_notifications: это не рассылка, и показанная здесь машина
+    всё равно придёт по фильтру, если подходит. Показанное запоминается на 30 минут
+    (`showcase.mark_seen`), чтобы превью фильтра и повторное «Лучшее сейчас» не
+    повторяли те же машины; `fresh` — начать с первой непоказанной.
+    """
     settings = get_settings()
-    page, next_offset = await asyncio.to_thread(db.get_showcase, message.chat.id, offset)
+    page, next_offset = await asyncio.to_thread(
+        db.get_showcase, message.chat.id, offset, skip_seen=fresh
+    )
     if not page:
         await message.answer(SHOWCASE_EMPTY_TEXT)
         return
@@ -660,9 +729,10 @@ async def _send_showcase_page(message: Message, *, offset: int) -> None:
         page,
         group_min=settings.bot_group_min_listings,
         rich_cards=settings.bot_rich_cards_per_cycle,
+        interactive=True,
+        tail_markup=best_more_kb(next_offset) if next_offset is not None else None,
     )
-    if next_offset is not None:
-        await message.answer("Показать ещё?", reply_markup=best_more_kb(next_offset))
+    mark_seen(message.chat.id, [note.listing_id for note in page])
 
 
 # --- Визард /add_filter -----------------------------------------------------
@@ -1034,7 +1104,10 @@ async def _send_filter_preview(message: Message, filter_id: int) -> None:
     """
     settings = get_settings()
     try:
-        preview = await asyncio.to_thread(db.preview_for_filter, filter_id)
+        # Уже показанное в этом чате (витрина в /start) не повторяем.
+        preview = await asyncio.to_thread(
+            db.preview_for_filter, filter_id, seen_ids(message.chat.id)
+        )
     except Exception:
         logger.exception("filter preview failed for filter %s", filter_id)
         return
@@ -1046,7 +1119,9 @@ async def _send_filter_preview(message: Message, filter_id: int) -> None:
         preview,
         group_min=settings.bot_group_min_listings,
         rich_cards=settings.bot_rich_cards_per_cycle,
+        interactive=True,
     )
+    mark_seen(message.chat.id, [note.listing_id for note in preview])
 
 
 # --- Fallback: неожиданный ввод внутри визарда ------------------------------

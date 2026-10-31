@@ -19,9 +19,11 @@ from typing import Callable, TypeVar
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
-from app.bot.matching import PendingNotification
+from app.bot.digest import DIGEST_PAGE, DIGEST_TTL_MINUTES, batch_age_minutes, order_digest
+from app.bot.matching import PendingNotification, build_pending, load_model_names, market_estimate
 from app.bot.matching import preview_for_filter as _preview_for_filter
 from app.bot.showcase import get_showcase as _get_showcase
+from app.bot.showcase import first_unseen_offset
 from app.bot.showcase import page_for_chat as showcase_page
 from app.core.config import get_settings
 from app.db.session import SessionLocal
@@ -32,6 +34,8 @@ from app.models import (
     CarModel,
     Listing,
     Payment,
+    SentNotification,
+    Source,
     UserBlock,
     UserEvent,
     UserFilter,
@@ -530,14 +534,22 @@ def get_invite_info(telegram_id: int) -> InviteInfo:
         )
 
 
-def get_showcase(chat_id: int, offset: int = 0) -> tuple[list[PendingNotification], int | None]:
-    """Страница витрины «лучшие сейчас» для чата (см. `bot/showcase.py`)."""
+def get_showcase(
+    chat_id: int, offset: int = 0, *, skip_seen: bool = False
+) -> tuple[list[PendingNotification], int | None]:
+    """Страница витрины «лучшие сейчас» для чата (см. `bot/showcase.py`).
+
+    `skip_seen` — начать с первой машины, которую этому чату ещё не показывали
+    (повторное «Лучшее сейчас» даёт новые, а не те же три).
+    """
     settings = get_settings()
     items = _get_showcase(
         SessionLocal,
         min_samples=settings.bot_below_avg_min_samples,
         max_below_percent=settings.bot_max_below_market_percent,
     )
+    if skip_seen:
+        offset = first_unseen_offset(items, chat_id)
     return showcase_page(items, chat_id, offset)
 
 
@@ -972,8 +984,10 @@ def mark_user_blocked(telegram_id: int) -> None:
             session.commit()
 
 
-def preview_for_filter(filter_id: int) -> list[PendingNotification]:
-    """Подборка «что уже есть» для только что созданного фильтра."""
+def preview_for_filter(filter_id: int, exclude_ids=frozenset()) -> list[PendingNotification]:
+    """Подборка «что уже есть» для только что созданного фильтра.
+
+    `exclude_ids` — машины, которые чату уже показали (витрина в /start)."""
     settings = get_settings()
     with SessionLocal() as session:
         return _preview_for_filter(
@@ -985,4 +999,123 @@ def preview_for_filter(filter_id: int) -> list[PendingNotification]:
             min_samples=settings.bot_below_avg_min_samples,
             delayed_lag_minutes=settings.delayed_tier_lag_minutes,
             max_below_percent=settings.bot_max_below_market_percent,
+            exclude_listing_ids=frozenset(exclude_ids),
+        )
+
+
+# --- дайджест: кнопка «Показать с фото» --------------------------------------
+
+
+def tag_digest_rows(batch_id: int, groups: list[tuple[int, list[int]]]) -> bool:
+    """Ставит номер пачки строкам `sent_notifications`, ушедшим списком.
+
+    Зовёт рассылка ДО отправки (`notifier.send_notifications(on_digest=…)`):
+    кнопка под списком ищет его позиции по (пользователь, пачка, марка).
+    """
+    with SessionLocal() as session:
+        user_ids = dict(
+            session.execute(
+                select(BotUser.telegram_id, BotUser.id).where(
+                    BotUser.telegram_id.in_({chat_id for chat_id, _ in groups})
+                )
+            ).all()
+        )
+        for chat_id, listing_ids in groups:
+            user_id = user_ids.get(chat_id)
+            if user_id is None or not listing_ids:
+                continue
+            session.execute(
+                update(SentNotification)
+                .where(
+                    SentNotification.user_id == user_id,
+                    SentNotification.listing_id.in_(listing_ids),
+                )
+                .values(batch_id=batch_id)
+            )
+        session.commit()
+    return True
+
+
+DIGEST_OK = "ok"
+DIGEST_EXPIRED = "expired"  # кнопке больше суток
+DIGEST_GONE = "gone"  # всё оставшееся в списке снято с продажи
+DIGEST_EMPTY = "empty"  # позиций дальше нет (повторное нажатие на старую кнопку)
+
+
+@dataclass(slots=True)
+class DigestPage:
+    status: str
+    notes: list[PendingNotification]
+    next_offset: int | None = None
+    remaining: int = 0  # сколько ещё активных до конца этого списка
+
+
+def digest_page(telegram_id: int, batch_id: int, offset: int) -> DigestPage:
+    """Следующие DIGEST_PAGE активных объявлений дайджеста — карточками с фото.
+
+    Позиции списка — строки `sent_notifications` пользователя с этой пачкой в
+    порядке `order_digest` (разделы по маркам, как в самом списке). Снятые
+    пропускаем. % ниже рынка — сохранённый на момент отправки (как в строке
+    списка), цену рынка и число образцов пересчитываем для подписи карточки.
+    """
+    if batch_age_minutes(batch_id, _utcnow()) > DIGEST_TTL_MINUTES:
+        return DigestPage(status=DIGEST_EXPIRED, notes=[])
+    settings = get_settings()
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            return DigestPage(status=DIGEST_EMPTY, notes=[])
+        rows = session.execute(
+            select(SentNotification, Listing)
+            .join(Listing, Listing.id == SentNotification.listing_id)
+            .where(SentNotification.user_id == user.id, SentNotification.batch_id == batch_id)
+        ).all()
+        brand_names = {row.id: row.name for row in session.execute(select(Brand.id, Brand.name))}
+        rows = order_digest(
+            rows,
+            key=lambda row: (
+                brand_names.get(row[1].brand_id) if row[1].brand_id else None,
+                row[0].below_market_percent,
+                row[1].id,
+            ),
+        )
+        window = rows[offset:]
+        if not window:
+            return DigestPage(status=DIGEST_EMPTY, notes=[])
+
+        source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
+        model_names = load_model_names(session)
+        notes: list[PendingNotification] = []
+        consumed = 0
+        for sent, listing in window:
+            if len(notes) == DIGEST_PAGE:
+                break
+            consumed += 1
+            if not listing.is_active:
+                continue
+            notes.append(
+                build_pending(
+                    listing,
+                    chat_id=telegram_id,
+                    filter_id=sent.filter_id or 0,
+                    below_percent=float(sent.below_market_percent)
+                    if sent.below_market_percent is not None
+                    else None,
+                    estimate=market_estimate(
+                        session, listing, min_samples=settings.bot_below_avg_min_samples
+                    ),
+                    source_names=source_names,
+                    brand_names=brand_names,
+                    model_names=model_names,
+                )
+            )
+        if not notes:
+            return DigestPage(status=DIGEST_GONE, notes=[])
+        rest = window[consumed:]
+        remaining = sum(1 for _, listing in rest if listing.is_active)
+        return DigestPage(
+            status=DIGEST_OK,
+            notes=notes,
+            next_offset=offset + consumed if remaining else None,
+            remaining=remaining,
         )

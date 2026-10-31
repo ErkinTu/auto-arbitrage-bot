@@ -63,6 +63,8 @@ class PendingNotification:
     market_samples: int | None = None
     # Главное фото; карточку с фото получает только топ цикла (notifier).
     image_url: str | None = None
+    # id марки — для кнопки дайджеста (callback_data короткий: id, а не имя).
+    brand_id: int | None = None
 
 
 # База «цены рынка». Рассылка, витрина и превью — на средней; медиана только
@@ -223,6 +225,7 @@ def build_pending(
         model_name=model_names.get(listing.car_model_id) if listing.car_model_id else None,
         market_samples=estimate.samples if estimate is not None else None,
         image_url=listing.image_url,
+        brand_id=listing.brand_id,
     )
 
 
@@ -776,8 +779,12 @@ def preview_for_filter(
     min_samples: int = 5,
     delayed_lag_minutes: int = 0,
     max_below_percent: float = 0,
+    exclude_listing_ids: frozenset[int] = frozenset(),
 ) -> list[PendingNotification]:
     """Разовая подборка сразу после создания фильтра.
+
+    `exclude_listing_ids` — уже показанное этому чату (витрина в /start): без
+    этого превью и витрина, сортируя одно и то же по выгоде, давали те же три.
 
     Нужна как противовес точке отсчёта: сама по себе она означает, что человек,
     настроив фильтр, сидит в тишине до первой новой машины — а это могут быть
@@ -835,6 +842,7 @@ def preview_for_filter(
             select(SentNotification.listing_id).where(SentNotification.user_id == user.id)
         )
     }
+    already_sent |= set(exclude_listing_ids)
     blocked = load_block_sets(session, {user.id}).get(user.id)
     source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
     brand_names = {row.id: row.name for row in session.execute(select(Brand.id, Brand.name))}

@@ -14,6 +14,8 @@
     ... --count 3 --photo broken      # битая ссылка — откат на текст
     ... --count 6 --brand Toyota      # одна марка — для дайджеста
     ... --count 60                    # больше потолка 50 за цикл
+    ... --max-percent 35              # без «мусорных» скидок: реалистичная пачка
+    ... --min-year 2012 --min-price 6000   # «витринная» пачка для показа заказчику
     ... --cleanup
 """
 
@@ -34,7 +36,7 @@ from app.bot.matching import (
 from app.bot.showcase import market_estimates
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.models import Brand, BotUser, Listing, ListingStatusHistory, UserFilter
+from app.models import Brand, BotUser, Listing, ListingStatusHistory, SentNotification, UserFilter
 from app.services.blocklist import load_block_sets
 from app.services.filter_presets import load_brand_groups
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
@@ -106,7 +108,15 @@ def inject(args: argparse.Namespace) -> None:
             if is_complete_listing(listing, now) and not is_foreign(listing.city)
         ]
 
+        # Машины, которые человек уже получал (в том числе клонами), не повторяем:
+        # для него клон выглядит как та же самая машина второй раз.
         already = set(
+            session.scalars(
+                select(Listing.source_slug)
+                .join(SentNotification, SentNotification.listing_id == Listing.id)
+                .where(SentNotification.user_id == user.id)
+            )
+        ) | set(
             session.scalars(
                 select(Listing.source_slug).where(Listing.external_id.like(f"{PREFIX}%"))
             )
@@ -122,6 +132,12 @@ def inject(args: argparse.Namespace) -> None:
             avg = estimate.avg_usd if estimate is not None else None
             below = (1 - float(listing.current_price_usd) / avg) * 100 if avg else None
             if not is_plausible_discount(below, settings.bot_max_below_market_percent):
+                continue
+            if args.max_percent and below is not None and below > args.max_percent:
+                continue
+            if args.min_year and (listing.year or 0) < args.min_year:
+                continue
+            if args.min_price and float(listing.current_price_usd) < args.min_price:
                 continue
             if any(
                 filter_matches(listing, item, brand_groups, now=now)
@@ -176,6 +192,9 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=3)
     parser.add_argument("--photo", choices=("keep", "none", "broken"), default="keep")
     parser.add_argument("--brand")
+    parser.add_argument("--max-percent", type=float, default=0, help="отсечь скидки больше этой")
+    parser.add_argument("--min-year", type=int, default=0, help="только не старше этого года выпуска")
+    parser.add_argument("--min-price", type=float, default=0, help="только не дешевле, USD")
     parser.add_argument("--event", choices=("new", "price_changed"), default="new")
     parser.add_argument("--cleanup", action="store_true")
     args = parser.parse_args()

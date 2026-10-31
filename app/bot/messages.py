@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 
+from app.bot.digest import OTHER_BRANDS_LABEL
 from app.bot.matching import PendingNotification, is_foreign
 from app.core.config import get_settings
 from app.services.access_schedule import ScheduleEntry
@@ -756,8 +757,62 @@ def _plural(count: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def format_digest(brand_name: str, notes: list[PendingNotification]) -> str:
-    """Несколько авто одной марки одним сообщением.
+def _digest_item(index: int, note: PendingNotification) -> str:
+    details = []
+    if note.price_usd is not None:
+        details.append(f"💰 ${_fmt_int(round(note.price_usd))}")
+    percent = round(note.below_market_percent) if note.below_market_percent is not None else 0
+    if percent > 0:
+        details.append(f"на {percent}% ниже рынка")
+    if note.mileage_km is not None:
+        details.append(f"{_fmt_int(note.mileage_km)} км")
+    if note.city:
+        details.append(html.escape(note.city))
+    if is_foreign(note.city):
+        details.append("🌍 за рубежом")
+    line = f'{index}. <a href="{note.url}">{html.escape(card_title(note))}</a>'
+    if details:
+        line += f"\n    {' · '.join(details)}"
+    return line
+
+
+def format_digest(
+    notes: list[PendingNotification],
+    *,
+    total: int,
+    start_index: int = 1,
+    brand_counts: dict[str | None, int] | None = None,
+) -> str:
+    """Всё, что сверх топа с фото, одним списком — разделами по маркам.
+
+    `notes` — уже упорядочены (`digest.order_digest`); список длиннее
+    DIGEST_MAX_ITEMS приходит частями: `start_index` продолжает сквозную
+    нумерацию, заголовок «ещё N» — только у первой части, заголовок марки —
+    там, где её раздел начинается или продолжается. Строки — в виде новой
+    карточки; фото — по кнопке «Показать с фото» под последней частью.
+    """
+    lines: list[str] = []
+    if start_index == 1:
+        word = _plural(total, "объявление", "объявления", "объявлений")
+        lines.append(f"📋 <b>Ещё {total} {word} по вашим фильтрам</b>")
+    current: object = object()
+    for index, note in enumerate(notes, start=start_index):
+        if note.brand_name != current:
+            current = note.brand_name
+            label = html.escape(note.brand_name) if note.brand_name else OTHER_BRANDS_LABEL
+            count = (brand_counts or {}).get(note.brand_name)
+            lines.append(f"\n🚗 <b>{label}</b>" + (f" · {count}" if count else ""))
+        lines.append(_digest_item(index, note))
+    return "\n".join(lines)
+
+
+DIGEST_EXPIRED_TEXT = "Список устарел — свежие предложения в «🔥 Лучшее сейчас»"
+DIGEST_GONE_TEXT = "Эти объявления уже сняты с продажи"
+DIGEST_EMPTY_TEXT = "Больше объявлений в этом списке нет"
+
+
+def format_digest_legacy(brand_name: str, notes: list[PendingNotification]) -> str:
+    """Список до 22.10.2026 — вид при `BOT_RICH_CARDS_PER_CYCLE=0` (откат флагом).
 
     Формат намеренно плотнее карточки: цель — чтобы утренний залп читался
     сверху вниз за один экран, а не 30 отдельными пушами. Превью ссылок у
@@ -771,7 +826,7 @@ def format_digest(brand_name: str, notes: list[PendingNotification]) -> str:
         price = f"${_fmt_int(round(note.price_usd))}" if note.price_usd is not None else "—"
         details = [price]
         if note.below_market_percent is not None and note.below_market_percent > 0:
-            details.append(f"на {note.below_market_percent:g}% ниже рынка")
+            details.append(f"на {note.below_market_percent:g}% ниже средней")
         if note.mileage_km is not None:
             details.append(f"{_fmt_int(note.mileage_km)} км")
         if note.city:

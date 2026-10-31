@@ -10,9 +10,9 @@ from app.bot.messages import (
     format_notification,
     format_notification_legacy,
 )
+from app.bot.digest import LEGACY_DIGEST_MAX_ITEMS as DIGEST_MAX_ITEMS
 from app.bot.notifier import (
     CAPTION_MAX_LENGTH,
-    DIGEST_MAX_ITEMS,
     build_outgoing,
     send_notifications,
 )

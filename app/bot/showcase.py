@@ -45,6 +45,41 @@ SHOWCASE_WINDOW_HOURS = 24
 _lock = threading.Lock()
 _cache: tuple[float, list[PendingNotification]] = (0.0, [])
 
+# Что недавно показано чату (витрина в /start, «Лучшее сейчас», превью фильтра).
+# Без этого человек, нажавший /start → триал → «Лучшее сейчас», получал одни и те
+# же три машины трижды: превью и витрина сортируют одно и то же по выгоде.
+# Память процесса, 30 минут: пережил рестарт — просто покажем сначала.
+SEEN_TTL_SECONDS = 1800
+_seen_lock = threading.Lock()
+_seen: dict[int, tuple[float, set[int]]] = {}
+
+
+def mark_seen(chat_id: int, listing_ids) -> None:
+    now = time.monotonic()
+    with _seen_lock:
+        for key in [key for key, (until, _) in _seen.items() if until < now]:
+            del _seen[key]
+        _, current = _seen.get(chat_id, (0.0, set()))
+        _seen[chat_id] = (now + SEEN_TTL_SECONDS, current | set(listing_ids))
+
+
+def seen_ids(chat_id: int) -> set[int]:
+    with _seen_lock:
+        until, ids = _seen.get(chat_id, (0.0, set()))
+        return set(ids) if until >= time.monotonic() else set()
+
+
+def first_unseen_offset(items: list[PendingNotification], chat_id: int) -> int:
+    """С какой позиции витрины начинать для чата: первая ещё не показанная.
+
+    Всё уже показано — сначала (витрина короткая, 12 позиций).
+    """
+    seen = seen_ids(chat_id)
+    for index, item in enumerate(items):
+        if item.listing_id not in seen:
+            return index
+    return 0
+
 
 def market_averages(
     session: Session, listings, *, min_samples: int

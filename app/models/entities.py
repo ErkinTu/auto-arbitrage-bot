@@ -528,6 +528,11 @@ class SentNotification(Base):
     # нельзя, рынок и цена с тех пор сдвинулись.
     below_market_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 1))
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Номер пачки (цикл рассылки, unix-минуты) — ТОЛЬКО у объявлений, ушедших
+    # списком-дайджестом: по нему кнопка «Показать с фото» находит «объявления
+    # этого списка». Карточки (топ с фото, одиночные) и строки до выката — NULL:
+    # вычислять список по близости sent_at и марке было бы хрупко.
+    batch_id: Mapped[int | None] = mapped_column(Integer)
 
 
 class Payment(Base, TimestampMixin):
