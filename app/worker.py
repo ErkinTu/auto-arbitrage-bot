@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.core.logging_setup import setup_logging
 from app.db.session import SessionLocal
 from app.bot.keyboards import base_filter_kb, play_kb, trial_kb
 from app.bot.messages import (
@@ -69,7 +70,7 @@ from app.services.sync import (
     validate_stale_lalafo_listings,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+setup_logging("%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 SATURDAY, SUNDAY = 5, 6

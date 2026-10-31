@@ -17,8 +17,9 @@ from app.bot.poller import polling_loop
 from app.bot.protection import ContentProtectionMiddleware
 from app.bot.wizard import WizardExitMiddleware
 from app.core.config import get_settings
+from app.core.logging_setup import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+setup_logging("%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
 
 

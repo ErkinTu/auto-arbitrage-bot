@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.core.logging_setup import setup_logging
 from app.db.session import SessionLocal, init_db
 from app.models import Brand, NormalizationIssue, Source, SyncTarget
 from app.services.catalog_service import (
@@ -660,7 +660,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    setup_logging("%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parser().parse_args()
     args.func(args)
 

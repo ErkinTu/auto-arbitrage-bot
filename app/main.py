@@ -12,11 +12,15 @@ from app.api.market import router as market_router
 from app.api.payments import router as payments_router
 from app.api.routes import router as analytics_router
 from app.core.config import get_settings
+from app.core.logging_setup import install_token_filter
 
 # Схему БД здесь НЕ трогаем: миграции делает одноразовый сервис `migrate`
 # (docker-compose.yml), API стартует уже после него. Раньше init_db звали все
 # три сервиса разом, и их ALTER-ы толкались за блокировку `listings`.
 settings = get_settings()
+
+# Токен бота уходит в URL запросов к Telegram (вебхук оплаты) — не в логи.
+install_token_filter()
 
 app = FastAPI(
     title="Car Analytics MVP",
