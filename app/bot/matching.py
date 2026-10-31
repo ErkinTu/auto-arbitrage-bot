@@ -65,6 +65,8 @@ class PendingNotification:
     image_url: str | None = None
     # id марки — для кнопки дайджеста (callback_data короткий: id, а не имя).
     brand_id: int | None = None
+    # Сколько фото в галерее; None — галерея ещё не известна (старое объявление).
+    photo_count: int | None = None
 
 
 # База «цены рынка». Рассылка, витрина и превью — на средней; медиана только
@@ -226,6 +228,7 @@ def build_pending(
         market_samples=estimate.samples if estimate is not None else None,
         image_url=listing.image_url,
         brand_id=listing.brand_id,
+        photo_count=len(listing.image_urls) if listing.image_urls else None,
     )
 
 

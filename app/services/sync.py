@@ -22,7 +22,7 @@ from app.models import (
 )
 from app.parsers.base import ParserAdapter
 from app.services.catalog_service import resolve_normalized_listing
-from app.services.images import extract_image_url
+from app.services.images import extract_image_url, extract_image_urls
 from app.services.normalizer import NormalizedListing
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,8 @@ def _set_current_fields(listing: Listing, item: NormalizedListing) -> None:
     # известное: пропажа ссылки из ответа — не пропажа фото у объявления.
     if item.image_url:
         listing.image_url = item.image_url
+    if item.image_urls:
+        listing.image_urls = list(item.image_urls)
     listing.customs_status = item.customs_status
     listing.seller_type = item.seller_type
     listing.is_verified_seller = item.is_verified_seller
@@ -434,6 +436,8 @@ def validate_stale_lalafo_listings(
                 listing.last_seen_at = utcnow()
                 if listing.image_url is None:
                     listing.image_url = extract_image_url(detail)
+                if listing.image_urls is None:
+                    listing.image_urls = extract_image_urls(detail) or None
 
         if commit_every and index % commit_every == 0:
             session.commit()
@@ -494,6 +498,8 @@ def _enrich_or_skip(
             # до появления колонки image_url, получают его без лишних запросов.
             if listing.image_url is None:
                 listing.image_url = extract_image_url(raw)
+            if listing.image_urls is None:
+                listing.image_urls = extract_image_urls(raw) or None
             return None
     try:
         return parser.fetch_details(raw["id"])

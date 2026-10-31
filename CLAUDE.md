@@ -255,7 +255,9 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   `image_url` **вне `payload_hash`** — иначе выкат пометил бы всю базу «updated».
   Текст карточки — `messages.format_notification` (марка+модель · год, цена и %
   в первых строках, «рынок по N похожим» из `matching.market_estimate`),
-  прежний — `format_notification_legacy`. База рынка — по-прежнему средняя;
+  прежний — `format_notification_legacy`. **«📷 Все фото»** (31.10.2026, ждёт
+  выката): галерея — `listings.image_urls` (JSON, тоже вне `payload_hash`), у
+  старых lalafo кнопка дотягивает карточку и дописывает (`bot/photos.py`). База рынка — по-прежнему средняя;
   медиана — решение владельца по замеру `cli.py market-basis`.
 - **Группировка уведомлений** (`BOT_GROUP_MIN_LISTINGS`, по умолчанию 0 =
   выключено). Замер на проде за 14 дней: обычный цикл — 5 сообщений на человека

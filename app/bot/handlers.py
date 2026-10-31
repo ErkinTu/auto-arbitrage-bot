@@ -12,10 +12,11 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 
-from app.bot import db
+from app.bot import db, photos
 from app.bot.keyboards import (
+    PhotosCB,
     PlayCB,
     BlockCB,
     BlockDeleteCB,
@@ -40,6 +41,7 @@ from app.bot.keyboards import (
     blocks_kb,
     brands_kb,
     card_kb,
+    has_photos_button,
     digest_kb,
     hidden_kb,
     markup_url,
@@ -672,6 +674,7 @@ async def hide_cb(query: CallbackQuery, callback_data: HideCB) -> None:
                     result.block_id,
                     callback_data.listing_id,
                     markup_url(query.message.reply_markup),
+                    photos=has_photos_button(query.message.reply_markup),
                 ),
                 more_rows(query.message.reply_markup),
             )
@@ -684,12 +687,74 @@ async def unhide_cb(query: CallbackQuery, callback_data: UnhideCB) -> None:
     deleted = await asyncio.to_thread(db.delete_block, query.from_user.id, callback_data.block_id)
     await query.answer("Вернул в выдачу" if deleted else "Уже возвращено")
     url = markup_url(query.message.reply_markup)
+    had_photos = has_photos_button(query.message.reply_markup)
     with suppress(TelegramAPIError):
         await query.message.edit_reply_markup(
             reply_markup=with_rows(
-                card_kb(callback_data.listing_id, url) if url else None,
+                card_kb(callback_data.listing_id, url, photos=had_photos)
+                if url
+                else None,
                 more_rows(query.message.reply_markup),
             )
+        )
+
+
+PHOTOS_GONE_TEXT = "Объявление снято — фото больше недоступны."
+PHOTOS_MISSING_TEXT = "Других фото у меня нет — все фото на сайте объявления."
+PHOTOS_FAILED_TEXT = "Не удалось загрузить фото с сайта — откройте объявление."
+
+
+@router.callback_query(PhotosCB.filter())
+async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
+    """«📷 Все фото»: альбом(ы) ответом на карточку.
+
+    Галерея — из базы; нет — у lalafo один запрос карточки (и запись в базу,
+    второе нажатие бесплатное). Двойной тап гасит дебаунс.
+    """
+    listing_id = callback_data.listing_id
+    if not photos.debounce(query.from_user.id, listing_id):
+        await query.answer("Уже отправляю")
+        return
+    await query.answer("Загружаю фото…")
+    gallery = await asyncio.to_thread(db.listing_gallery, listing_id)
+    if gallery is None:
+        await query.message.answer(PHOTOS_GONE_TEXT)
+        return
+
+    urls = gallery.urls
+    if not urls and photos.can_fetch(gallery.source_name):
+        try:
+            urls = await asyncio.to_thread(
+                photos.fetch_gallery, gallery.source_name, gallery.external_id
+            )
+        except photos.ListingGone:
+            await query.message.answer(PHOTOS_GONE_TEXT)
+            return
+        except Exception:
+            logger.exception("photos: card fetch failed for listing %s", listing_id)
+            urls = []
+        if urls:
+            await asyncio.to_thread(db.save_gallery, listing_id, urls)
+    if len(urls) <= 1:
+        await query.message.answer(
+            PHOTOS_MISSING_TEXT, reply_markup=pay_kb(gallery.url, "Открыть ↗")
+        )
+        return
+
+    reply_to = query.message.message_id
+    try:
+        for album in photos.albums(urls):
+            if len(album) == 1:  # альбом — минимум 2 фото
+                await query.message.answer_photo(album[0], reply_to_message_id=reply_to)
+                continue
+            await query.message.answer_media_group(
+                [InputMediaPhoto(media=url) for url in album], reply_to_message_id=reply_to
+            )
+    except TelegramAPIError as error:
+        # Чаще всего — фото удалили с CDN или Telegram не смог его скачать.
+        logger.warning("photos: album for listing %s rejected: %s", listing_id, error)
+        await query.message.answer(
+            PHOTOS_FAILED_TEXT, reply_markup=pay_kb(gallery.url, "Открыть ↗")
         )
 
 

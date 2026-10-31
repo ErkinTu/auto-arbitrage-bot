@@ -20,7 +20,13 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.bot.digest import DIGEST_PAGE, DIGEST_TTL_MINUTES, batch_age_minutes, order_digest
-from app.bot.matching import PendingNotification, build_pending, load_model_names, market_estimate
+from app.bot.matching import (
+    PendingNotification,
+    build_pending,
+    build_source_url,
+    load_model_names,
+    market_estimate,
+)
 from app.bot.matching import preview_for_filter as _preview_for_filter
 from app.bot.showcase import get_showcase as _get_showcase
 from app.bot.showcase import first_unseen_offset
@@ -1028,6 +1034,47 @@ def set_paused(telegram_id: int, paused: bool) -> PauseResult | None:
 def _as_aware(value: datetime) -> datetime:
     """SQLite в тестах отдаёт naive-время; Postgres — с зоной."""
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+@dataclass(slots=True)
+class Gallery:
+    """Что нужно кнопке «📷 Все фото»: ссылки и откуда их дотянуть, если нет."""
+
+    listing_id: int
+    urls: list[str]
+    image_url: str | None
+    source_name: str
+    external_id: str
+    url: str
+    is_active: bool
+
+
+def listing_gallery(listing_id: int) -> Gallery | None:
+    with SessionLocal() as session:
+        row = session.execute(
+            select(Listing, Source.name)
+            .join(Source, Listing.source_id == Source.id)
+            .where(Listing.id == listing_id)
+        ).first()
+        if row is None:
+            return None
+        listing, source_name = row
+        return Gallery(
+            listing_id=listing.id,
+            urls=list(listing.image_urls or []),
+            image_url=listing.image_url,
+            source_name=source_name,
+            external_id=listing.external_id,
+            url=build_source_url(listing),
+            is_active=listing.is_active,
+        )
+
+
+def save_gallery(listing_id: int, urls: list[str]) -> None:
+    """Дописывает галерею, дотянутую по нажатию: следующее нажатие — бесплатное."""
+    with SessionLocal() as session:
+        session.execute(update(Listing).where(Listing.id == listing_id).values(image_urls=urls))
+        session.commit()
 
 
 def mark_user_blocked(telegram_id: int) -> None:

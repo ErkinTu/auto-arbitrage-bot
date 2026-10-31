@@ -114,6 +114,8 @@ def _upgrade_postgres_schema() -> None:
         # (safe_payload её отбрасывает), поэтому бэкфилла нет — колонку заполняют
         # парсеры при следующей встрече объявления.
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS image_url TEXT",
+        # Галерея для «📷 Все фото» (31.10.2026): nullable, без бэкфилла.
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS image_urls JSON",
         # Дайджест: номер пачки у строк, ушедших списком (кнопка «Показать с фото»).
         "ALTER TABLE sent_notifications ADD COLUMN IF NOT EXISTS batch_id INTEGER",
         "CREATE INDEX IF NOT EXISTS ix_sent_notifications_user_batch ON sent_notifications (user_id, batch_id)",

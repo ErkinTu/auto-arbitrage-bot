@@ -157,6 +157,10 @@ class Listing(Base, TimestampMixin):
     # Главное фото (ссылка на CDN источника) — для карточки с фото в боте.
     # Отдельной колонкой, потому что raw_payloads галерею не хранят.
     image_url: Mapped[str | None] = mapped_column(Text)
+    # Вся галерея (JSON-список ссылок, главное первым) — для кнопки «📷 Все фото».
+    # NULL = ещё не видели (объявления до 31.10.2026): у lalafo кнопка дотянет
+    # карточку и допишет сюда, у mashina — заполнится при следующей встрече.
+    image_urls: Mapped[list[str] | None] = mapped_column(JSON)
     customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
     seller_type: Mapped[str | None] = mapped_column(String(30))
     is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

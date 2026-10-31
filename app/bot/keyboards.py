@@ -307,25 +307,42 @@ def with_rows(markup: InlineKeyboardMarkup | None, rows: list) -> InlineKeyboard
     return InlineKeyboardMarkup(inline_keyboard=combined) if combined else None
 
 
-def card_kb(listing_id: int, url: str) -> InlineKeyboardMarkup:
-    """Под карточкой: «Не то» и ссылка на объявление.
+class PhotosCB(CallbackData, prefix="ph"):
+    """«📷 Все фото» под карточкой (план 31.10.2026, п. 2.4)."""
+
+    listing_id: int
+
+
+def card_kb(listing_id: int, url: str, *, photos: bool = False) -> InlineKeyboardMarkup:
+    """Под карточкой: «Не то», «Все фото» (у карточек с фото) и ссылка.
 
     Двухшаговое меню «что именно не показывать» живёт в /blacklist: под
     карточкой нужен один тап, а не выбор из трёх.
     """
     builder = InlineKeyboardBuilder()
     builder.button(text="🚫 Не то", callback_data=HideCB(listing_id=listing_id))
+    if photos:
+        builder.button(text="📷 Все фото", callback_data=PhotosCB(listing_id=listing_id))
     builder.button(text="Открыть ↗", url=url)
     return builder.as_markup()
 
 
-def hidden_kb(label: str, block_id: int, listing_id: int, url: str | None) -> InlineKeyboardMarkup:
-    """Карточка после «Не то»: что скрыто и кнопка вернуть. Ссылка остаётся."""
+def has_photos_button(markup: InlineKeyboardMarkup | None) -> bool:
+    return bool(rows_with(markup, PhotosCB.__prefix__))
+
+
+def hidden_kb(
+    label: str, block_id: int, listing_id: int, url: str | None, *, photos: bool = False
+) -> InlineKeyboardMarkup:
+    """Карточка после «Не то»: что скрыто и кнопка вернуть. Ссылка и «Все фото»
+    остаются — на «Вернуть» card_kb их восстановит по этой клавиатуре."""
     builder = InlineKeyboardBuilder()
     builder.button(
         text=f"↩️ Вернуть {label}",
         callback_data=UnhideCB(block_id=block_id, listing_id=listing_id),
     )
+    if photos:
+        builder.button(text="📷 Все фото", callback_data=PhotosCB(listing_id=listing_id))
     if url:
         builder.button(text="Открыть ↗", url=url)
     return builder.as_markup()

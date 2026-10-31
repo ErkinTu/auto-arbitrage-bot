@@ -100,10 +100,13 @@ def _card(note: PendingNotification, *, rich: bool = False, legacy: bool = False
         )
     text = format_notification(note)
     photo_url = note.image_url if rich and len(text) <= CAPTION_MAX_LENGTH else None
+    # «Все фото» — только у карточки с фото и только если фото не одно (None —
+    # галерея неизвестна, кнопка её дотянет).
+    photos = photo_url is not None and (note.photo_count is None or note.photo_count > 1)
     return OutgoingMessage(
         chat_id=note.chat_id,
         text=text,
-        reply_markup=card_kb(note.listing_id, note.url),
+        reply_markup=card_kb(note.listing_id, note.url, photos=photos),
         listing_id=note.listing_id,
         photo_url=photo_url,
     )
