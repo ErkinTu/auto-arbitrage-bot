@@ -23,6 +23,9 @@ EVENT_TRIAL_EXPIRED = "trial_expired"  # пишется, когда ушёл п�
 EVENT_PAYMENT_CREATED = "payment_created"  # нажал «Оплатить», платёж заведён
 EVENT_PAID = "paid"
 EVENT_REFERRAL_BONUS = "referral_bonus"
+EVENT_PAUSED = "paused"  # /pause — кто и надолго ли уходит
+EVENT_RESUMED = "resumed"  # /play (payload: сколько часов был на паузе)
+EVENT_PAUSE_REMINDER = "pause_reminder"  # ежедневное «вы на паузе»
 
 # Порядок = порядок воронки в отчёте.
 FUNNEL_EVENTS = (

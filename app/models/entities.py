@@ -345,6 +345,15 @@ class BotUser(Base, TimestampMixin):
     # Пейвол-сообщение об окончании триала — ровно одно на пользователя.
     trial_expired_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # --- Пауза (/pause, /play) ---------------------------------------------
+    # NULL = не на паузе. Отдельно от is_active: тот значит «чат жив» (ставит
+    # False блокировка бота), и смешав их, мы бы не отличили паузу от ухода.
+    # Доступ на паузе идёт как обычно — заморозки срока нет.
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Локальная дата последнего напоминания «вы на паузе» — не больше одного в
+    # день, и рестарт worker второго не пошлёт.
+    pause_reminded_on: Mapped[date | None] = mapped_column(Date)
+
     # --- Рефералка ----------------------------------------------------------
     # Код в deep-link t.me/<bot>?start=ref_<code>; выдаётся лениво, при первом
     # /invite (у существующей базы иначе понадобился бы бэкфилл).

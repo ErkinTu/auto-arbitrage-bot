@@ -39,6 +39,18 @@ def plans_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+class PlayCB(CallbackData, prefix="play"):
+    """«▶️ Включить» под ежедневным напоминанием о паузе (= /play)."""
+
+    action: str  # "resume"
+
+
+def play_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="▶️ Включить уведомления", callback_data=PlayCB(action="resume"))
+    return builder.as_markup()
+
+
 class TrialCB(CallbackData, prefix="trial"):
     action: str  # "start"
 
