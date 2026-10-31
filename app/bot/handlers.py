@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
-import re
 import time
 from contextlib import suppress
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 
 from app.bot import db, photos
+from app.bot import filter_panel as fp
 from app.bot.keyboards import (
+    FilterEditCB,
+    filter_pick_kb,
     PhotosCB,
     PlayCB,
     BlockCB,
@@ -39,7 +42,6 @@ from app.bot.keyboards import (
     best_more_kb,
     block_choice_kb,
     blocks_kb,
-    brands_kb,
     card_kb,
     has_photos_button,
     digest_kb,
@@ -50,18 +52,14 @@ from app.bot.keyboards import (
     without_best_rows,
     without_digest_rows,
     filters_kb,
-    models_kb,
     pay_kb,
-    percent_kb,
     plans_kb,
     presets_kb,
-    region_kb,
     share_kb,
-    skip_kb,
     trial_kb,
-    yes_no_kb,
 )
 from app.bot.messages import (
+    filter_updated_text,
     pause_already_text,
     pause_on_text,
     play_already_text,
@@ -119,31 +117,16 @@ from app.bot.menu import (
 )
 from app.bot.notifier import send_notifications
 from app.bot.showcase import mark_seen, seen_ids
-from app.bot.states import AddFilter
+from app.bot.states import FilterPanel
 from app.core.config import get_settings
 from app.services.blocklist import MAX_BLOCKS_PER_USER
 from app.services.filter_presets import base_preset, find_preset
 from app.services.finik import init_payment
 from app.services.plans import find_plan
-from app.services.regions import ALL_CARS_CODE, is_valid_region
 
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-YEAR_RANGE_RE = re.compile(r"^\s*(\d{4})(?:\s*[-–—]\s*(\d{4}))?\s*$")
-MIN_YEAR, MAX_YEAR = 1950, 2035
-MAX_MILEAGE_KM = 1_500_000
-MAX_PRICE_USD = 5_000_000
-
-
-def _parse_positive_int(text: str) -> int | None:
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if not digits or len(digits) > 9:
-        return None
-    value = int(digits)
-    return value if value > 0 else None
-
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject | None = None) -> None:
@@ -862,7 +845,7 @@ async def cmd_add_filter(message: Message, state: FSMContext) -> None:
 @router.callback_query(PresetCB.filter())
 async def cb_preset(query: CallbackQuery, callback_data: PresetCB, state: FSMContext) -> None:
     if callback_data.code == CUSTOM_PRESET:
-        await _start_wizard(query, state)
+        await _start_panel(query, state)
         return
     if find_preset(callback_data.code) is None:
         # Кнопка из истории чата после смены реестра пресетов.
@@ -892,314 +875,264 @@ async def cb_preset(query: CallbackQuery, callback_data: PresetCB, state: FSMCon
     await _send_filter_preview(query.message, created.id)
 
 
-async def _start_wizard(query: CallbackQuery, state: FSMContext) -> None:
+# --- Панель фильтра (план 31.10.2026, п. 2.7) ----------------------------------
+# Одно сообщение, которое перерисовывается на месте. В FSM: черновик, текущий
+# шаг, id сообщения-панели, id фильтра (при правке) и страница моделей.
+# Отрисовка и разбор ввода — чистые функции `bot/filter_panel.py`.
+
+
+async def _panel_markup(data: dict) -> tuple[str, object]:
+    """Текст и кнопки панели по данным FSM (марки/модели — из базы по шагу)."""
+    draft, step = data["draft"], data["step"]
+    editing = data.get("filter_id") is not None
+    brands = models = ()
+    if step == fp.STEP_BRAND:
+        brands = await asyncio.to_thread(db.list_brands)
+    elif step == fp.STEP_MODEL and draft.get("brand_id"):
+        models = await asyncio.to_thread(db.list_models, draft["brand_id"])
+    text = fp.render_text(draft, step, editing=editing, notice=data.get("notice"))
+    markup = fp.render_keyboard(
+        draft,
+        step,
+        editing=editing,
+        brands=brands,
+        models=models,
+        model_page=data.get("model_page", 0),
+    )
+    return text, markup
+
+
+async def _redraw(bot, chat_id: int, state: FSMContext) -> None:
+    """Перерисовать панель на месте. «message is not modified» — не ошибка."""
+    data = await state.get_data()
+    text, markup = await _panel_markup(data)
+    try:
+        await bot.edit_message_text(
+            text, chat_id=chat_id, message_id=data["panel_id"], reply_markup=markup
+        )
+    except TelegramBadRequest as error:
+        if "message is not modified" not in str(error):
+            raise
+
+
+async def _open_panel(message: Message, state: FSMContext, draft: dict, *, filter_id=None,
+                      edit_message: bool = False) -> None:
+    """Новая панель: правкой текущего сообщения (из кнопки) или новым сообщением."""
+    data = {
+        "draft": draft,
+        "step": fp.STEP_BRAND,
+        "filter_id": filter_id,
+        "model_page": 0,
+        "notice": None,
+    }
+    text, markup = await _panel_markup(data)
+    if edit_message:
+        await message.edit_text(text, reply_markup=markup)
+        panel_id = message.message_id
+    else:
+        panel_id = (await message.answer(text, reply_markup=markup)).message_id
+    await state.set_state(FilterPanel.active)
+    await state.set_data({**data, "panel_id": panel_id})
+
+
+async def _start_panel(query: CallbackQuery, state: FSMContext) -> None:
+    """«Свой фильтр» из экрана пресетов: панель на месте этого сообщения."""
     quota = await asyncio.to_thread(db.filters_quota, query.from_user.id)
     if not quota.can_add:
         await query.answer()
         await query.message.answer(filters_limit_text(quota.used, quota.limit))
         return
-    brands = await asyncio.to_thread(db.list_brands)
-    if not brands:
-        await query.answer()
-        await query.message.answer(
-            "Каталог марок пока пуст — база еще наполняется. Попробуйте позже."
-        )
-        return
-    await state.set_state(AddFilter.brand)
-    await state.update_data(prompt_id=query.message.message_id)
     await query.answer()
-    await query.message.edit_text("Шаг 1/7. Выберите марку:", reply_markup=brands_kb(brands))
+    await _open_panel(query.message, state, fp.new_draft(), edit_message=True)
 
 
-# Текстовые шаги (годы, пробег, цена) отвечают НОВЫМ сообщением — иначе ответ
-# человека оказался бы выше вопроса. Но предыдущий вопрос с кнопкой
-# «Пропустить» тогда висел бы в чате мёртвым. Поэтому id текущего вопроса
-# храним в FSM и при переходе дальше превращаем его в строку-итог без кнопок
-# («✅ Пробег: до 150 000 км»): история настройки читается, неактивных кнопок нет.
-
-
-async def _ask(message: Message, state: FSMContext, text: str, reply_markup=None) -> None:
-    """Задаёт вопрос новым сообщением и запоминает его как текущий."""
-    sent = await message.answer(text, reply_markup=reply_markup)
-    await state.update_data(prompt_id=sent.message_id)
-
-
-async def _close_prompt(message: Message, state: FSMContext, summary: str | None = None) -> None:
-    """Гасит кнопки текущего вопроса; summary — заменить текст итогом шага.
-
-    Best-effort: вопрос могли удалить, а Telegram не даёт править сообщения
-    старше 48 ч — ошибка здесь не повод ломать визард.
-    """
-    prompt_id = (await state.get_data()).get("prompt_id")
-    if prompt_id is None:
-        return
-    with suppress(TelegramAPIError):
-        if summary is None:
-            await message.bot.edit_message_reply_markup(
-                chat_id=message.chat.id, message_id=prompt_id, reply_markup=None
-            )
-        else:
-            await message.bot.edit_message_text(
-                summary, chat_id=message.chat.id, message_id=prompt_id
-            )
-
-
-async def _reask(message: Message, state: FSMContext, text: str, reply_markup=None) -> None:
-    """Неверный ввод: старый вопрос без кнопок, подсказка с кнопками — новым."""
-    await _close_prompt(message, state)
-    await _ask(message, state, text, reply_markup)
-
-
-def _years_label(year_from: int, year_to: int) -> str:
-    return str(year_from) if year_from == year_to else f"{year_from}–{year_to}"
-
-
-@router.callback_query(AddFilter.brand, BrandCB.filter())
-async def wizard_brand(query: CallbackQuery, callback_data: BrandCB, state: FSMContext) -> None:
-    # brand_id=0 - пункт "Все марки": фильтр без ограничения по марке и модели.
-    if callback_data.brand_id == 0:
-        await state.update_data(
-            brand_id=None, brand_name=None, car_model_id=None, model_name=None
-        )
-        await state.set_state(AddFilter.years)
-        await query.answer()
-        await query.message.edit_text(
-            "Выбрано: все марки.\n\n"
-            "Шаг 3/7. Укажите годы выпуска, например `2015-2020` или `2018`:",
-            reply_markup=skip_kb("years"),
-        )
-        return
-
-    brands = await asyncio.to_thread(db.list_brands)
-    brand = next((item for item in brands if item.id == callback_data.brand_id), None)
-    if brand is None:
-        await query.answer("Марка не найдена, начните заново: /add_filter", show_alert=True)
-        await state.clear()
-        return
-    await state.update_data(brand_id=brand.id, brand_name=brand.name)
-    await query.answer()
-
-    models = await asyncio.to_thread(db.list_models, brand.id)
-    if not models:
-        await state.update_data(car_model_id=None, model_name=None)
-        await state.set_state(AddFilter.years)
-        await query.message.edit_text(
-            f"Марка: {brand.name} (все модели).\n\n"
-            "Шаг 3/7. Укажите годы выпуска, например `2015-2020` или `2018`:",
-            reply_markup=skip_kb("years"),
-        )
-        return
-    await state.set_state(AddFilter.model)
-    await query.message.edit_text(
-        f"Марка: {brand.name}.\n\nШаг 2/7. Выберите модель:",
-        reply_markup=models_kb(models),
+async def _start_edit(message: Message, state: FSMContext, telegram_id: int, filter_id: int,
+                      *, edit_message: bool = False) -> bool:
+    item = await asyncio.to_thread(db.get_filter, telegram_id, filter_id)
+    if item is None:
+        return False
+    await _open_panel(
+        message, state, fp.draft_from_filter(item), filter_id=filter_id, edit_message=edit_message
     )
+    return True
 
 
-@router.callback_query(AddFilter.model, ModelCB.filter())
-async def wizard_model(query: CallbackQuery, callback_data: ModelCB, state: FSMContext) -> None:
-    data = await state.get_data()
-    model_name: str | None = None
-    model_id: int | None = None
-    if callback_data.model_id:
-        models = await asyncio.to_thread(db.list_models, data["brand_id"])
-        model = next((item for item in models if item.id == callback_data.model_id), None)
-        if model is None:
-            await query.answer("Модель не найдена, начните заново: /add_filter", show_alert=True)
-            await state.clear()
-            return
-        model_id, model_name = model.id, model.name
-    await state.update_data(car_model_id=model_id, model_name=model_name)
-    await state.set_state(AddFilter.years)
-    await query.answer()
-    chosen = f"{data['brand_name']} {model_name}" if model_name else f"{data['brand_name']} (все модели)"
-    await query.message.edit_text(
-        f"Выбрано: {chosen}.\n\n"
-        "Шаг 3/7. Укажите годы выпуска, например `2015-2020` или `2018`:",
-        reply_markup=skip_kb("years"),
-    )
-
-
-@router.callback_query(AddFilter.years, SkipCB.filter(F.step == "years"))
-async def wizard_years_skip(query: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(year_from=None, year_to=None)
-    await state.set_state(AddFilter.mileage)
-    await query.answer()
-    await query.message.edit_text(
-        "Шаг 4/7. Максимальный пробег в км, например `150000`:",
-        reply_markup=skip_kb("mileage"),
-    )
-
-
-@router.message(AddFilter.years, F.text, ~F.text.startswith("/"))
-async def wizard_years(message: Message, state: FSMContext) -> None:
-    match = YEAR_RANGE_RE.match(message.text or "")
-    if match is None:
-        await _reask(
-            message,
-            state,
-            "Не понял 🤔 Напишите диапазон, например `2015-2020`, один год `2018` "
-            "или нажмите «Пропустить».",
-            skip_kb("years"),
-        )
-        return
-    year_from = int(match.group(1))
-    year_to = int(match.group(2)) if match.group(2) else year_from
-    if not (MIN_YEAR <= year_from <= MAX_YEAR) or not (MIN_YEAR <= year_to <= MAX_YEAR):
-        await _reask(
-            message,
-            state,
-            f"Год должен быть между {MIN_YEAR} и {MAX_YEAR}. Попробуйте еще раз:",
-            skip_kb("years"),
-        )
-        return
-    if year_from > year_to:
-        year_from, year_to = year_to, year_from
-    await state.update_data(year_from=year_from, year_to=year_to)
-    await state.set_state(AddFilter.mileage)
-    await _close_prompt(message, state, f"✅ Годы: {_years_label(year_from, year_to)}")
-    await _ask(
-        message,
-        state,
-        "Шаг 4/7. Максимальный пробег в км, например `150000`:",
-        skip_kb("mileage"),
-    )
-
-
-@router.callback_query(AddFilter.mileage, SkipCB.filter(F.step == "mileage"))
-async def wizard_mileage_skip(query: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(mileage_max_km=None)
-    await state.set_state(AddFilter.price)
-    await query.answer()
-    await query.message.edit_text(
-        "Шаг 5/7. Максимальная цена в долларах, например `20000`:",
-        reply_markup=skip_kb("price"),
-    )
-
-
-@router.message(AddFilter.mileage, F.text, ~F.text.startswith("/"))
-async def wizard_mileage(message: Message, state: FSMContext) -> None:
-    value = _parse_positive_int(message.text or "")
-    if value is None or value > MAX_MILEAGE_KM:
-        await _reask(
-            message,
-            state,
-            "Нужно число в км, например `150000` (или «Пропустить»):",
-            skip_kb("mileage"),
-        )
-        return
-    await state.update_data(mileage_max_km=value)
-    await state.set_state(AddFilter.price)
-    await _close_prompt(message, state, f"✅ Пробег: до {value:,} км".replace(",", " "))
-    await _ask(
-        message,
-        state,
-        "Шаг 5/7. Максимальная цена в долларах, например `20000`:",
-        skip_kb("price"),
-    )
-
-
-@router.callback_query(AddFilter.price, SkipCB.filter(F.step == "price"))
-async def wizard_price_skip(query: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(price_max_usd=None)
-    await state.set_state(AddFilter.below_avg)
-    await query.answer()
-    await query.message.edit_text(
-        "Шаг 6/7. Присылать только авто с ценой ниже средней по рынку?",
-        reply_markup=yes_no_kb("below_avg"),
-    )
-
-
-@router.message(AddFilter.price, F.text, ~F.text.startswith("/"))
-async def wizard_price(message: Message, state: FSMContext) -> None:
-    value = _parse_positive_int(message.text or "")
-    if value is None or value > MAX_PRICE_USD:
-        await _reask(
-            message,
-            state,
-            "Нужно число в долларах, например `20000` (или «Пропустить»):",
-            skip_kb("price"),
-        )
-        return
-    await state.update_data(price_max_usd=float(value))
-    await state.set_state(AddFilter.below_avg)
-    await _close_prompt(message, state, f"✅ Цена: до ${value:,}".replace(",", " "))
-    await _ask(
-        message,
-        state,
-        "Шаг 6/7. Присылать только авто с ценой ниже средней по рынку?",
-        yes_no_kb("below_avg"),
-    )
-
-
-REGION_STEP_TEXT = (
-    "Шаг 7/7. Из какого региона показывать авто?\n\n"
-    "Выберите область, город или «Зарубежные авто». "
-    "«Все авто» — без ограничения по региону.\n"
-    "⚠️ У зарубежных цены обычно без растаможки и доставки — выглядят ниже рынка."
-)
-
-
-@router.callback_query(AddFilter.below_avg, BoolCB.filter(F.step == "below_avg"))
-async def wizard_below_avg(query: CallbackQuery, callback_data: BoolCB, state: FSMContext) -> None:
-    await state.update_data(below_market_only=callback_data.value)
-    await query.answer()
-    if callback_data.value:
-        await state.set_state(AddFilter.below_percent)
-        await query.message.edit_text(
-            "Насколько ниже средней по рынку должна быть цена?",
-            reply_markup=percent_kb("below_percent"),
-        )
-        return
-    await state.update_data(below_market_percent=None)
-    await state.set_state(AddFilter.region)
-    await query.message.edit_text(REGION_STEP_TEXT, reply_markup=region_kb())
-
-
-@router.callback_query(AddFilter.below_percent, PercentCB.filter(F.step == "below_percent"))
-async def wizard_below_percent(
-    query: CallbackQuery, callback_data: PercentCB, state: FSMContext
-) -> None:
-    await state.update_data(below_market_percent=callback_data.value)
-    await state.set_state(AddFilter.region)
-    await query.answer()
-    await query.message.edit_text(REGION_STEP_TEXT, reply_markup=region_kb())
-
-
-@router.callback_query(AddFilter.region, RegionCB.filter())
-async def wizard_region(query: CallbackQuery, callback_data: RegionCB, state: FSMContext) -> None:
-    region = None if callback_data.code == ALL_CARS_CODE else callback_data.code
-    if not is_valid_region(region):
-        await query.answer("Неизвестный регион, начните заново: /add_filter", show_alert=True)
-        await state.clear()
-        return
-    data = await state.get_data()
+@router.message(Command("edit_filter"))
+async def cmd_edit_filter(message: Message, state: FSMContext) -> None:
+    """Список фильтров на выбор; один фильтр — сразу панель."""
     await state.clear()
-    try:
-        created = await asyncio.to_thread(
-            db.create_filter,
-            query.from_user.id,
-            brand_id=data["brand_id"],
-            car_model_id=data.get("car_model_id"),
-            year_from=data.get("year_from"),
-            year_to=data.get("year_to"),
-            mileage_max_km=data.get("mileage_max_km"),
-            price_max_usd=data.get("price_max_usd"),
-            below_market_only=data["below_market_only"],
-            below_market_percent=data.get("below_market_percent"),
-            region=region,
+    filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
+    if not filters:
+        await message.answer(
+            "Фильтров пока нет — менять нечего.\n\n" + PRESETS_PROMPT_TEXT,
+            reply_markup=presets_kb(),
         )
+        return
+    if len(filters) == 1:
+        await _start_edit(message, state, message.from_user.id, filters[0].id)
+        return
+    await message.answer(
+        "Какой фильтр изменить?\n\n" + _filters_text(filters).split("\n", 1)[1],
+        reply_markup=filter_pick_kb(filters),
+    )
+
+
+@router.callback_query(FilterEditCB.filter())
+async def cb_edit_filter(query: CallbackQuery, callback_data: FilterEditCB, state: FSMContext) -> None:
+    """✏️ в «Мои фильтры» и выбор в /edit_filter — панель НОВЫМ сообщением
+    (список фильтров остаётся в чате: по нему видно, что было до правки)."""
+    await state.clear()
+    opened = await _start_edit(query.message, state, query.from_user.id, callback_data.filter_id)
+    if opened:
+        await query.answer()
+    else:
+        await query.answer("Этот фильтр уже удалён", show_alert=True)
+
+
+async def _stale_panel(query: CallbackQuery) -> None:
+    await query.answer("Эта панель устарела — начните заново: /add_filter", show_alert=True)
+    with suppress(TelegramAPIError):
+        await query.message.edit_reply_markup(reply_markup=None)
+
+
+@router.callback_query(FilterPanel.active, fp.PanelCB.filter())
+async def cb_panel(query: CallbackQuery, callback_data: fp.PanelCB, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("panel_id") != query.message.message_id:
+        # Нажали в старой панели, пока открыта другая.
+        await _stale_panel(query)
+        return
+    action, value = callback_data.action, callback_data.value
+    if action == "save":
+        await _save_panel(query, state, data)
+        return
+    if action == "cancel":
+        await state.clear()
+        await query.answer("Отменено")
+        with suppress(TelegramAPIError):
+            await query.message.edit_text(
+                "✖ Отменено — фильтр не сохранён." if data.get("filter_id") is None
+                else "✖ Отменено — фильтр остался прежним."
+            )
+        return
+    if action == "noop":
+        await query.answer()
+        return
+    if action == "input":
+        await query.answer("Напишите значение сообщением в чат", show_alert=False)
+        return
+
+    updates: dict = {"notice": None}
+    if action == "step" and value.isdigit() and int(value) in fp.STEPS:
+        updates["step"] = int(value)
+    elif action == "mpage" and value.lstrip("-").isdigit():
+        updates["model_page"] = int(value)
+    else:
+        draft, advance = fp.apply_choice(data["draft"], action, value)
+        if action == "brand" and draft.get("brand_id"):
+            brands = await asyncio.to_thread(db.list_brands)
+            brand = next((b for b in brands if b.id == draft["brand_id"]), None)
+            if brand is None:
+                await query.answer("Такой марки больше нет", show_alert=True)
+                return
+            draft["brand_name"] = brand.name
+            updates["model_page"] = 0
+        if action == "model" and draft.get("car_model_id"):
+            models = await asyncio.to_thread(db.list_models, draft.get("brand_id") or 0)
+            model = next((m for m in models if m.id == draft["car_model_id"]), None)
+            if model is None:
+                await query.answer("Такой модели нет", show_alert=True)
+                return
+            draft["model_name"] = model.name
+        updates["draft"] = draft
+        if advance:
+            step = data["step"]
+            # «Все марки» и группа марок — модель выбирать не из чего, сразу к годам.
+            if action in ("brand", "group") and not draft.get("brand_id"):
+                step = fp.STEP_MODEL
+            updates["step"] = fp.next_step(step)
+    await state.update_data(**updates)
+    await query.answer()
+    await _redraw(query.bot, query.message.chat.id, state)
+
+
+async def _save_panel(query: CallbackQuery, state: FSMContext, data: dict) -> None:
+    fields = fp.filter_fields(data["draft"])
+    filter_id = data.get("filter_id")
+    try:
+        if filter_id is None:
+            saved = await asyncio.to_thread(db.create_filter, query.from_user.id, **fields)
+        else:
+            saved = await asyncio.to_thread(
+                db.update_filter, query.from_user.id, filter_id, **fields
+            )
+    except db.DuplicateFilterError:
+        # Панель не закрываем: человек поправит шаг и сохранит снова.
+        await state.update_data(notice="Такой фильтр у вас уже есть — измените что-нибудь.")
+        await query.answer("Такой фильтр уже есть")
+        await _redraw(query.bot, query.message.chat.id, state)
+        return
     except db.FilterLimitError as exc:
+        await state.clear()
         await query.answer()
         await query.message.edit_text(filters_limit_text(exc.used, exc.limit))
         return
-    except db.DuplicateFilterError:
-        await query.answer()
-        await query.message.edit_text(duplicate_filter_text())
+    except LookupError:
+        await state.clear()
+        await query.answer("Фильтр не найден — возможно, его уже удалили", show_alert=True)
+        with suppress(TelegramAPIError):
+            await query.message.edit_reply_markup(reply_markup=None)
         return
+    await state.clear()
     await query.answer("Фильтр сохранен")
-    await query.message.edit_text(filter_created_text(_filter_summary(created)))
-    await _send_filter_preview(query.message, created.id)
+    if filter_id is None:
+        await query.message.edit_text(filter_created_text(html.escape(_filter_summary(saved))))
+        await _send_filter_preview(query.message, saved.id)
+    else:
+        await query.message.edit_text(filter_updated_text(html.escape(_filter_summary(saved))))
+
+
+@router.message(FilterPanel.active, F.text, ~F.text.startswith("/"))
+async def panel_text(message: Message, state: FSMContext) -> None:
+    """Ручной ввод (годы, пробег, цена): разобрать, удалить сообщение, перерисовать.
+
+    Сообщение человека удаляем, чтобы чат не засорялся — панель остаётся
+    единственным следом настройки. Удалить можно не всегда (старше 48 ч,
+    нет прав) — тогда просто оставляем.
+    """
+    data = await state.get_data()
+    draft, notice = fp.apply_text(data["draft"], data["step"], message.text)
+    updates = {"draft": draft, "notice": notice}
+    if notice is None:
+        updates["step"] = fp.next_step(data["step"])
+    await state.update_data(**updates)
+    with suppress(TelegramAPIError):
+        await message.delete()
+    try:
+        await _redraw(message.bot, message.chat.id, state)
+    except TelegramAPIError:
+        # Панель удалили или она слишком старая для правки — откроем новую.
+        fresh = await state.get_data()
+        text, markup = await _panel_markup(fresh)
+        sent = await message.answer(text, reply_markup=markup)
+        await state.update_data(panel_id=sent.message_id)
+
+
+@router.message(FilterPanel.active)
+async def panel_other_message(message: Message, state: FSMContext) -> None:
+    """Фото, стикер и т.п. внутри панели — подсказка в самой панели."""
+    await state.update_data(notice="Выберите вариант кнопкой или напишите значение текстом.")
+    with suppress(TelegramAPIError):
+        await _redraw(message.bot, message.chat.id, state)
+
+
+@router.callback_query(fp.PanelCB.filter())
+async def cb_panel_stale(query: CallbackQuery) -> None:
+    """Кнопка панели без активной панели: рестарт бота (FSM в памяти), выход
+    командой, уже сохранённый фильтр."""
+    await _stale_panel(query)
+
+
 
 
 async def _send_filter_preview(message: Message, filter_id: int) -> None:
@@ -1231,50 +1164,6 @@ async def _send_filter_preview(message: Message, filter_id: int) -> None:
         interactive=True,
     )
     mark_seen(message.chat.id, [note.listing_id for note in preview])
-
-
-# --- Fallback: неожиданный ввод внутри визарда ------------------------------
-# Зарегистрированы последними: срабатывают, только если шаг выше не подошел
-# (не тот тип сообщения, фото/стикер, неизвестная команда и т.п.).
-
-
-@router.message(AddFilter.brand)
-@router.message(AddFilter.model)
-@router.message(AddFilter.below_avg)
-@router.message(AddFilter.below_percent)
-@router.message(AddFilter.region)
-async def wizard_expect_buttons(message: Message) -> None:
-    await message.answer("Пожалуйста, выберите вариант кнопкой в сообщении выше. Отмена: /cancel")
-
-
-@router.message(AddFilter.years)
-async def wizard_years_fallback(message: Message, state: FSMContext) -> None:
-    await _reask(
-        message,
-        state,
-        "Отправьте годы текстом, например `2015-2020`, или нажмите «Пропустить».",
-        skip_kb("years"),
-    )
-
-
-@router.message(AddFilter.mileage)
-async def wizard_mileage_fallback(message: Message, state: FSMContext) -> None:
-    await _reask(
-        message,
-        state,
-        "Отправьте число в км, например `150000`, или нажмите «Пропустить».",
-        skip_kb("mileage"),
-    )
-
-
-@router.message(AddFilter.price)
-async def wizard_price_fallback(message: Message, state: FSMContext) -> None:
-    await _reask(
-        message,
-        state,
-        "Отправьте число в долларах, например `20000`, или нажмите «Пропустить».",
-        skip_kb("price"),
-    )
 
 
 # Кнопки шагов визарда без активного шага: визард бросили (команда, кнопка

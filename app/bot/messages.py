@@ -38,7 +38,8 @@ HELP_TEXT = (
     "и присылаю сюда те, что вам подходят.\n\n"
     "Команды\n"
     "/add_filter — создать фильтр (готовый или свой)\n"
-    "/filters — мои фильтры и удаление\n"
+    "/filters — мои фильтры: изменить или удалить\n"
+    "/edit_filter — изменить фильтр\n"
     "/best — лучшие предложения прямо сейчас\n"
     "/blacklist — что не показывать\n"
     "/invite — пригласить друзей и получить дни бесплатно\n"
@@ -335,6 +336,13 @@ def base_filter_set_text(summary: str) -> str:
 PRESETS_PROMPT_TEXT = (
     "Выберите готовый фильтр — или настройте свой по марке, году, пробегу и цене:"
 )
+
+
+def filter_updated_text(summary: str) -> str:
+    return (
+        f"✅ Фильтр изменён:\n{summary}\n\n"
+        "Новые объявления буду подбирать уже по нему. Все фильтры: /filters"
+    )
 
 
 def filter_created_text(summary: str) -> str:

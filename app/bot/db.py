@@ -157,6 +157,9 @@ class FilterDTO:
     region: str | None
     brand_group: str | None = None
     max_age_years: int | None = None
+    # id — для панели редактирования (предзаполнить выбор марки/модели).
+    brand_id: int | None = None
+    car_model_id: int | None = None
 
 
 def _utcnow() -> datetime:
@@ -635,6 +638,8 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
         region=user_filter.region,
         brand_group=user_filter.brand_group,
         max_age_years=user_filter.max_age_years,
+        brand_id=user_filter.brand_id,
+        car_model_id=user_filter.car_model_id,
     )
 
 
@@ -712,28 +717,24 @@ def create_filter(
         current = _count_filters(session, user.id)
         if current >= limit:
             raise FilterLimitError(limit, current)
-        existing = session.scalars(
-            select(UserFilter).where(
-                UserFilter.user_id == user.id, UserFilter.enabled.is_(True)
-            )
-        ).all()
-        candidate = (
-            brand_id,
-            car_model_id,
-            year_from,
-            year_to,
-            mileage_max_km,
-            float(price_max_usd) if price_max_usd is not None else None,
-            below_market_only,
-            below_market_percent,
-            skip_foreign,
-            region,
-            brand_group,
-            max_age_years,
+        _check_duplicate(
+            session,
+            user.id,
+            (
+                brand_id,
+                car_model_id,
+                year_from,
+                year_to,
+                mileage_max_km,
+                float(price_max_usd) if price_max_usd is not None else None,
+                below_market_only,
+                below_market_percent,
+                skip_foreign,
+                region,
+                brand_group,
+                max_age_years,
+            ),
         )
-        for item in existing:
-            if _filter_signature(item) == candidate:
-                raise DuplicateFilterError(item.id)
         user_filter = UserFilter(
             user_id=user.id,
             brand_id=brand_id,
@@ -750,6 +751,103 @@ def create_filter(
             max_age_years=max_age_years,
         )
         session.add(user_filter)
+        session.commit()
+        return _filter_dto(session, user_filter)
+
+
+def _check_duplicate(session, user_id: int, candidate: tuple, exclude_id: int | None = None) -> None:
+    existing = session.scalars(
+        select(UserFilter).where(UserFilter.user_id == user_id, UserFilter.enabled.is_(True))
+    ).all()
+    for item in existing:
+        if item.id != exclude_id and _filter_signature(item) == candidate:
+            raise DuplicateFilterError(item.id)
+
+
+def get_filter(telegram_id: int, filter_id: int) -> FilterDTO | None:
+    """Свой фильтр по id; None — нет такого (удалён) или чужой."""
+    with SessionLocal() as session:
+        user_filter = session.scalar(
+            select(UserFilter)
+            .join(BotUser, UserFilter.user_id == BotUser.id)
+            .where(
+                BotUser.telegram_id == telegram_id,
+                UserFilter.id == filter_id,
+                UserFilter.enabled.is_(True),
+            )
+        )
+        return _filter_dto(session, user_filter) if user_filter is not None else None
+
+
+def update_filter(
+    telegram_id: int,
+    filter_id: int,
+    *,
+    brand_id: int | None,
+    car_model_id: int | None,
+    year_from: int | None,
+    year_to: int | None,
+    mileage_max_km: int | None,
+    price_max_usd: float | None,
+    below_market_only: bool,
+    below_market_percent: int | None = None,
+    skip_foreign: bool = False,
+    region: str | None = None,
+    brand_group: str | None = None,
+    max_age_years: int | None = None,
+) -> FilterDTO:
+    """Правка готового фильтра (панель, /edit_filter) — UPDATE той же строки.
+
+    Не удалить+создать: так сохраняются `sent_notifications` (повторно то же
+    объявление не придёт) и `created_at` — точка отсчёта фильтра, иначе правка
+    фильтра обрушила бы на человека всё, что лежит в окне. Лимит фильтров тут не
+    проверяется (слот уже занят), дубль — проверяется, кроме самого фильтра.
+    LookupError — фильтра нет (удалили в другом окне) или он чужой.
+    """
+    with SessionLocal() as session:
+        user_filter = session.scalar(
+            select(UserFilter)
+            .join(BotUser, UserFilter.user_id == BotUser.id)
+            .where(
+                BotUser.telegram_id == telegram_id,
+                UserFilter.id == filter_id,
+                UserFilter.enabled.is_(True),
+            )
+        )
+        if user_filter is None:
+            raise LookupError(f"filter {filter_id} of {telegram_id} not found")
+        price = float(price_max_usd) if price_max_usd is not None else None
+        _check_duplicate(
+            session,
+            user_filter.user_id,
+            (
+                brand_id,
+                car_model_id,
+                year_from,
+                year_to,
+                mileage_max_km,
+                price,
+                below_market_only,
+                below_market_percent,
+                skip_foreign,
+                region,
+                brand_group,
+                max_age_years,
+            ),
+            exclude_id=user_filter.id,
+        )
+        user_filter.brand_id = brand_id
+        user_filter.car_model_id = car_model_id
+        user_filter.year_from = year_from
+        user_filter.year_to = year_to
+        user_filter.mileage_max_km = mileage_max_km
+        user_filter.price_max_usd = Decimal(str(price)) if price is not None else None
+        user_filter.below_market_only = below_market_only
+        user_filter.below_market_percent = below_market_percent
+        user_filter.skip_foreign = skip_foreign
+        user_filter.region = region
+        user_filter.brand_group = brand_group
+        user_filter.max_age_years = max_age_years
         session.commit()
         return _filter_dto(session, user_filter)
 
