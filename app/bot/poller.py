@@ -22,7 +22,8 @@ import logging
 import time
 from datetime import timedelta
 
-from app.bot.db import mark_user_blocked, refresh_showcase
+from app.bot.db import mark_user_blocked, refresh_showcase, tag_digest_rows
+from app.bot.digest import batch_id_for
 from app.bot.matching import PendingNotification, match_new_listings
 from app.bot.notifier import BotLike, send_notifications
 from app.core.config import get_settings
@@ -132,6 +133,10 @@ async def _on_blocked(chat_id: int) -> None:
     await asyncio.to_thread(mark_user_blocked, chat_id)
 
 
+async def _on_digest(batch_id: int, groups: list[tuple[int, list[int]]]) -> bool:
+    return await asyncio.to_thread(tag_digest_rows, batch_id, groups)
+
+
 def _log_task_error(task: asyncio.Task) -> None:
     """Забирает исключение у завершённой задачи обхода.
 
@@ -223,6 +228,9 @@ async def polling_loop(bot: BotLike) -> None:
                     pending,
                     on_blocked=_on_blocked,
                     group_min=settings.bot_group_min_listings,
+                    rich_cards=settings.bot_rich_cards_per_cycle,
+                    batch_id=batch_id_for(utcnow()),
+                    on_digest=_on_digest,
                 )
                 logger.info("notifications: %s message(s) for %s listing(s)", sent, len(pending))
             else:

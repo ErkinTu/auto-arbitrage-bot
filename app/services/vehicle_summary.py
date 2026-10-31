@@ -3,13 +3,14 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean, median
-from typing import Any, Literal
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Brand, CarModel, DailyMarketStat, Generation, Listing, RawPayload
 from app.services.analytics import select_by_mileage
+from app.services.images import extract_image_url as _extract_image_url
 from app.services.sources import listing_public_url
 
 
@@ -28,28 +29,6 @@ def _build_source_url(listing: Listing) -> str:
     return listing_public_url(listing.source_slug, listing.external_id)
 
 
-def _extract_image_url(payload: dict[str, Any] | None) -> str | None:
-    if not payload:
-        return None
-    # mashina.kg payloads keep galleries under a few possible keys; we probe all of them.
-    for key in ("photo", "preview_image"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.startswith(("http://", "https://")):
-            return value
-    for key in ("photos", "images"):
-        gallery = payload.get(key)
-        if isinstance(gallery, list) and gallery:
-            first = gallery[0]
-            if isinstance(first, str) and first.startswith(("http://", "https://")):
-                return first
-            if isinstance(first, dict):
-                for url_key in ("url", "src", "image", "large", "medium", "small"):
-                    candidate = first.get(url_key)
-                    if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
-                        return candidate
-    return None
-
-
 def _representative_listing(
     session: Session,
     listings: list[Listing],
@@ -62,12 +41,14 @@ def _representative_listing(
         listings,
         key=lambda item: abs(float(item.current_price_usd or 0) - market_median),
     )
-    payload_row = session.scalar(
-        select(RawPayload)
-        .where(RawPayload.listing_id == chosen.id)
-        .order_by(RawPayload.observed_at.desc())
-    )
-    image_url = _extract_image_url(payload_row.payload if payload_row else None)
+    image_url = chosen.image_url
+    if image_url is None:
+        payload_row = session.scalar(
+            select(RawPayload)
+            .where(RawPayload.listing_id == chosen.id)
+            .order_by(RawPayload.observed_at.desc())
+        )
+        image_url = _extract_image_url(payload_row.payload if payload_row else None)
     title = chosen.title or "Без названия"
     return {
         "id": chosen.id,

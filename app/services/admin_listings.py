@@ -244,7 +244,8 @@ def get_listing(session: Session, listing_id: int) -> dict:
         "source": source_name,
         "external_id": listing.external_id,
         "source_url": listing_public_url(listing.source_slug, listing.external_id),
-        "image_url": _extract_image_url(payload.payload if payload else None),
+        "image_url": listing.image_url
+        or _extract_image_url(payload.payload if payload else None),
         "price_usd": price,
         "price_currency": listing.current_price_currency,
         "market_average_usd": round(average, 2) if average else None,

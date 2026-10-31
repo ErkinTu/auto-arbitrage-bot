@@ -154,6 +154,9 @@ class Listing(Base, TimestampMixin):
     drive_type: Mapped[str | None] = mapped_column(String(80))
     steering_wheel: Mapped[str | None] = mapped_column(String(40))
     city: Mapped[str | None] = mapped_column(String(80), index=True)
+    # Главное фото (ссылка на CDN источника) — для карточки с фото в боте.
+    # Отдельной колонкой, потому что raw_payloads галерею не хранят.
+    image_url: Mapped[str | None] = mapped_column(Text)
     customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
     seller_type: Mapped[str | None] = mapped_column(String(30))
     is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -525,6 +528,11 @@ class SentNotification(Base):
     # нельзя, рынок и цена с тех пор сдвинулись.
     below_market_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 1))
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Номер пачки (цикл рассылки, unix-минуты) — ТОЛЬКО у объявлений, ушедших
+    # списком-дайджестом: по нему кнопка «Показать с фото» находит «объявления
+    # этого списка». Карточки (топ с фото, одиночные) и строки до выката — NULL:
+    # вычислять список по близости sent_at и марке было бы хрупко.
+    batch_id: Mapped[int | None] = mapped_column(Integer)
 
 
 class Payment(Base, TimestampMixin):

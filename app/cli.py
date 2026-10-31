@@ -425,6 +425,22 @@ def command_preset_volume(args: argparse.Namespace) -> None:
         print(f"{row.per_day:>8.1f}/сутки  {row.label}")
 
 
+def command_market_basis(args: argparse.Namespace) -> None:
+    """Средняя против медианы как база «ниже рынка» (п. 1.5 плана 22.10.2026).
+
+    Только чтение, на проде безопасен. Решение о смене базы — владельца по
+    этим цифрам; сама рассылка остаётся на средней.
+    """
+    from app.bot.campaigns import market_basis_volume
+
+    with SessionLocal() as session:
+        total, rows = market_basis_volume(session, days=args.days)
+    print(f"Местных за {args.days} дн.: {total} ({total / args.days:.0f}/сутки)\n")
+    print(f"{'средняя':>10} {'медиана':>10}  в сутки")
+    for row in rows:
+        print(f"{row.avg_per_day:>10.1f} {row.median_per_day:>10.1f}  {row.label}")
+
+
 def command_broadcast(args: argparse.Namespace) -> None:
     """Разовая рассылка сегменту. Без --send — сухой прогон: размер и примеры."""
     from app.bot.campaigns import recipients_for, send_campaign
@@ -446,6 +462,69 @@ def command_broadcast(args: argparse.Namespace) -> None:
             raise SystemExit("Сейчас ночная пауза бота — рассылку делаем днём.")
         outcomes = send_campaign(session, args.segment, recipients)
     print(f"\nИтог: {dict(outcomes)}")
+
+
+def command_preview_cards(args: argparse.Namespace) -> None:
+    """Карточки нового вида на реальных свежих объявлениях — в чат, без запуска бота.
+
+    Берёт верх витрины (то же, что /best и /start) и отправляет тем же
+    `send_notifications`, что и рассылка: фото, подпись, кнопки, откат на текст
+    при битом фото, protect_content. Без --send — сухой прогон: что и куда уйдёт.
+    getUpdates не вызывается, поэтому работающему боту с тем же токеном это не
+    мешает (TelegramConflictError бывает только у двух поллеров). Кнопки под
+    карточками обрабатывает тот бот, что сейчас работает с этим токеном.
+    """
+    import asyncio
+    from dataclasses import replace
+
+    from app.bot.notifier import build_outgoing
+    from app.bot.showcase import compute_showcase
+
+    settings = get_settings()
+    with SessionLocal() as session:
+        items = compute_showcase(
+            session,
+            min_samples=settings.bot_below_avg_min_samples,
+            max_below_percent=settings.bot_max_below_market_percent,
+            size=args.count,
+        )
+    notes = [replace(item, chat_id=args.chat_id) for item in items]
+    if not notes:
+        raise SystemExit("Витрина пуста: нет свежих объявлений ниже рынка за сутки.")
+
+    for message in build_outgoing(notes, rich_cards=args.count):
+        kind = f"фото {message.photo_url}" if message.photo_url else "текст (фото нет)"
+        buttons = [
+            button.text for row in message.reply_markup.inline_keyboard for button in row
+        ]
+        print(f"\n--- {kind}\nкнопки: {buttons}\n{message.text}")
+    if not args.send:
+        print(f"\nСухой прогон, {len(notes)} карточк(и). Отправить в чат {args.chat_id}: --send")
+        return
+    sent = asyncio.run(_send_preview_cards(notes, rich_cards=args.count))
+    print(f"\nОтправлено сообщений: {sent}")
+
+
+async def _send_preview_cards(notes, *, rich_cards: int) -> int:
+    from aiogram import Bot
+    from aiogram.client.default import DefaultBotProperties
+    from aiogram.enums import ParseMode
+
+    from app.bot.notifier import send_notifications
+    from app.bot.protection import ContentProtectionMiddleware
+
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN не задан.")
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    bot.session.middleware(ContentProtectionMiddleware())
+    try:
+        return await send_notifications(bot, notes, rich_cards=rich_cards)
+    finally:
+        await bot.session.close()
 
 
 def parser() -> argparse.ArgumentParser:
@@ -551,6 +630,12 @@ def parser() -> argparse.ArgumentParser:
 
     from app.bot.campaigns import SEGMENTS
 
+    basis = sub.add_parser(
+        "market-basis", help="Below-market volume per day: mean vs median as market price (read only)"
+    )
+    basis.add_argument("--days", type=int, default=7)
+    basis.set_defaults(func=command_market_basis)
+
     broadcast = sub.add_parser(
         "broadcast", help="One-off message to a user segment (dry run unless --send)"
     )
@@ -558,6 +643,15 @@ def parser() -> argparse.ArgumentParser:
     broadcast.add_argument("--limit", type=int, default=0, help="Send to the first N only")
     broadcast.add_argument("--send", action="store_true", help="Actually send (default: dry run)")
     broadcast.set_defaults(func=command_broadcast)
+
+    preview = sub.add_parser(
+        "preview-cards",
+        help="Send new-style listing cards (photo + caption) to one chat (dry run unless --send)",
+    )
+    preview.add_argument("--chat-id", type=int, required=True, help="Telegram chat id to send to")
+    preview.add_argument("--count", type=int, default=3, help="How many cards (all with photo)")
+    preview.add_argument("--send", action="store_true", help="Actually send (default: dry run)")
+    preview.set_defaults(func=command_preview_cards)
 
     funnel = sub.add_parser("funnel", help="Bot funnel: starts -> trials -> payments -> paid")
     funnel.add_argument("--days", type=int, default=30)

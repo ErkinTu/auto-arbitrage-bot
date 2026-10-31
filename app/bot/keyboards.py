@@ -91,8 +91,10 @@ class BestCB(CallbackData, prefix="best"):
 
 
 def best_more_kb(offset: int) -> InlineKeyboardMarkup:
+    """«Ещё 3» витрины: строка под ПОСЛЕДНЕЙ карточкой, а не отдельным сообщением —
+    кнопка принимает ширину своего сообщения, а у короткой подводки она узкая."""
     builder = InlineKeyboardBuilder()
-    builder.button(text="Ещё 3 ▶️", callback_data=BestCB(offset=offset))
+    builder.button(text="▶️ Показать ещё 3 лучших", callback_data=BestCB(offset=offset))
     return builder.as_markup()
 
 
@@ -208,6 +210,122 @@ def block_menu_kb(listing_id: int) -> InlineKeyboardMarkup:
         text="🚫 Не показывать такие", callback_data=BlockMenuCB(listing_id=listing_id)
     )
     return builder.as_markup()
+
+
+class HideCB(CallbackData, prefix="hide"):
+    """«🚫 Не то» под карточкой: одним тапом скрыть модель (нет модели — марку)."""
+
+    listing_id: int
+
+
+class UnhideCB(CallbackData, prefix="unhide"):
+    """«↩️ Вернуть» после «Не то»: снять только что поставленный запрет."""
+
+    block_id: int
+    listing_id: int
+
+
+class DigestCB(CallbackData, prefix="dg"):
+    """«📷 Показать с фото ▶️»: пачка (дайджест цикла) и с какой позиции."""
+
+    batch: int  # sent_notifications.batch_id — unix-минуты цикла
+    offset: int
+
+
+def digest_kb(batch: int, offset: int, remaining: int | None = None) -> InlineKeyboardMarkup:
+    """Одна кнопка дайджеста; `remaining` — сколько ещё не показано с фото.
+
+    Живёт под последним сообщением дайджеста, после нажатия переезжает строкой
+    под последнюю присланную карточку (`with_rows`), чтобы всегда быть внизу.
+    """
+    label = "📷 Показать с фото ▶️" if remaining is None else f"📷 Ещё с фото ▶️ (осталось {remaining})"
+    builder = InlineKeyboardBuilder()
+    builder.button(text=label, callback_data=DigestCB(batch=batch, offset=offset))
+    return builder.as_markup()
+
+
+def _row_has_prefix(row, prefixes: tuple[str, ...]) -> bool:
+    return any(
+        (button.callback_data or "").startswith(tuple(f"{prefix}:" for prefix in prefixes))
+        for button in row
+    )
+
+
+def rows_with(markup: InlineKeyboardMarkup | None, *prefixes: str) -> list:
+    """Строки клавиатуры с кнопками данного типа (префикс callback_data)."""
+    return [
+        row
+        for row in (markup.inline_keyboard if markup is not None else ())
+        if _row_has_prefix(row, prefixes)
+    ]
+
+
+def without_rows(markup: InlineKeyboardMarkup | None, *prefixes: str) -> InlineKeyboardMarkup | None:
+    """Та же клавиатура без кнопок данного типа (None — если больше ничего нет)."""
+    rows = [
+        row
+        for row in (markup.inline_keyboard if markup is not None else ())
+        if not _row_has_prefix(row, prefixes)
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+def digest_rows(markup: InlineKeyboardMarkup | None) -> list:
+    """Строки с кнопкой дайджеста — чтобы «Не то»/«Вернуть» их не потеряли."""
+    return rows_with(markup, DigestCB.__prefix__)
+
+
+def without_digest_rows(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    return without_rows(markup, DigestCB.__prefix__)
+
+
+def without_best_rows(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    return without_rows(markup, BestCB.__prefix__)
+
+
+def more_rows(markup: InlineKeyboardMarkup | None) -> list:
+    """Строки «Показать ещё» любого вида (дайджест, витрина): «Не то» и «Вернуть»
+    на карточке, под которой такая кнопка стоит, обязаны её сохранить."""
+    return rows_with(markup, DigestCB.__prefix__, BestCB.__prefix__)
+
+
+def with_rows(markup: InlineKeyboardMarkup | None, rows: list) -> InlineKeyboardMarkup | None:
+    """Клавиатура с дописанными снизу строками."""
+    combined = list(markup.inline_keyboard if markup is not None else ()) + list(rows)
+    return InlineKeyboardMarkup(inline_keyboard=combined) if combined else None
+
+
+def card_kb(listing_id: int, url: str) -> InlineKeyboardMarkup:
+    """Под карточкой: «Не то» и ссылка на объявление.
+
+    Двухшаговое меню «что именно не показывать» живёт в /blacklist: под
+    карточкой нужен один тап, а не выбор из трёх.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🚫 Не то", callback_data=HideCB(listing_id=listing_id))
+    builder.button(text="Открыть ↗", url=url)
+    return builder.as_markup()
+
+
+def hidden_kb(label: str, block_id: int, listing_id: int, url: str | None) -> InlineKeyboardMarkup:
+    """Карточка после «Не то»: что скрыто и кнопка вернуть. Ссылка остаётся."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"↩️ Вернуть {label}",
+        callback_data=UnhideCB(block_id=block_id, listing_id=listing_id),
+    )
+    if url:
+        builder.button(text="Открыть ↗", url=url)
+    return builder.as_markup()
+
+
+def markup_url(markup: InlineKeyboardMarkup | None) -> str | None:
+    """Ссылка из URL-кнопки клавиатуры — чтобы перерисовать её без запроса к БД."""
+    for row in (markup.inline_keyboard if markup is not None else ()):
+        for button in row:
+            if button.url:
+                return button.url
+    return None
 
 
 def block_choice_kb(

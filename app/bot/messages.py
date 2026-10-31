@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 
+from app.bot.digest import OTHER_BRANDS_LABEL
 from app.bot.matching import PendingNotification, is_foreign
 from app.core.config import get_settings
 from app.services.access_schedule import ScheduleEntry
@@ -243,7 +244,9 @@ def onboarding_text(trial_days: int) -> str:
     )
 
 
-DEMO_INTRO_TEXT = "Вот пример объявления, которое я нашёл сегодня:"
+START_SHOWCASE_INTRO_TEXT = "Вот что я нашёл за сутки — дешевле всего относительно рынка:"
+
+START_TRIAL_PROMPT_TEXT = "Хотите получать такие, как только они появятся?"
 
 DEMO_UNAVAILABLE_TEXT = (
     "Сейчас нет свежего примера под рукой — как только появится машина ниже рынка, "
@@ -626,7 +629,73 @@ def _fmt_int(value: int) -> str:
     return f"{value:,}".replace(",", " ")
 
 
+def card_title(p: PendingNotification) -> str:
+    """«Toyota Camry · 2018»: марка и модель из каталога, иначе заголовок источника.
+
+    Заголовок lalafo — «Toyota Camry: 2016 г., 2.5 л, …», от него берём часть до
+    двоеточия. Поколение не добавляем: у mashina в нём спеки двигателя
+    («V (XA50) 2.5hyb AT 4WD»), в первой строке пуша это шум.
+    """
+    if p.brand_name and p.model_name:
+        name = f"{p.brand_name} {p.model_name}"
+    else:
+        name = (p.title or "").split(":", 1)[0].strip() or "Объявление"
+    return f"{name} · {p.year}" if p.year is not None else name
+
+
+def _round_hundred(value: float) -> int:
+    return int(round(value / 100.0)) * 100
+
+
 def format_notification(p: PendingNotification) -> str:
+    """Карточка объявления — подпись к фото или отдельное сообщение.
+
+    Название, цена и скидка — в первых строках: только они попадают в
+    push-превью, поэтому служебной фразы «Новое объявление…» больше нет.
+    Строка без значения не выводится вовсе (никаких «—»). «Похожие» — та же
+    модель, год и диапазон пробега (так считает `market_estimate`); при
+    неизвестном пробеге — все пробеги, и это сказано прямо.
+    """
+    lines = [f"<b>{html.escape(card_title(p))}</b>"]
+
+    if p.price_usd is not None:
+        price_line = f"💰 ${_fmt_int(round(p.price_usd))}"
+        # Целые проценты: десятые в push-превью — шум («на 14.9%» → «на 15%»).
+        percent = round(p.below_market_percent) if p.below_market_percent is not None else 0
+        if percent > 0:
+            price_line += f" · на {percent}% ниже рынка"
+            if p.market_avg_usd is not None:
+                saving = _round_hundred(p.market_avg_usd - p.price_usd)
+                if saving > 0:
+                    price_line += f" (выгода ≈ ${_fmt_int(saving)})"
+        lines.append(price_line)
+
+    if p.market_avg_usd is not None:
+        market_line = f"Рынок: ${_fmt_int(_round_hundred(p.market_avg_usd))}"
+        if p.market_samples:
+            similar = _plural(p.market_samples, "похожей машине", "похожим машинам", "похожим машинам")
+            market_line += f" — по {p.market_samples} {similar}"
+        if p.mileage_km is None:
+            market_line += " (пробег не указан — по всем пробегам)"
+        lines.append(market_line)
+
+    details = []
+    if p.mileage_km is not None:
+        details.append(f"{_fmt_int(p.mileage_km)} км")
+    if p.city:
+        details.append(html.escape(p.city))
+    if details:
+        lines.append(" · ".join(details))
+
+    if is_foreign(p.city):
+        lines.append("🌍 <b>Внимание: авто находится за рубежом</b>")
+
+    lines.append(f'<a href="{p.url}">Открыть на {html.escape(p.source_name)}</a>')
+    return "\n".join(lines)
+
+
+def format_notification_legacy(p: PendingNotification) -> str:
+    """Карточка до 22.10.2026 — вид при `BOT_RICH_CARDS_PER_CYCLE=0` (откат флагом)."""
     title = html.escape(p.title) if p.title else "Объявление"
     year = str(p.year) if p.year is not None else "—"
     mileage = f"{_fmt_int(p.mileage_km)} км" if p.mileage_km is not None else "—"
@@ -688,8 +757,62 @@ def _plural(count: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def format_digest(brand_name: str, notes: list[PendingNotification]) -> str:
-    """Несколько авто одной марки одним сообщением.
+def _digest_item(index: int, note: PendingNotification) -> str:
+    details = []
+    if note.price_usd is not None:
+        details.append(f"💰 ${_fmt_int(round(note.price_usd))}")
+    percent = round(note.below_market_percent) if note.below_market_percent is not None else 0
+    if percent > 0:
+        details.append(f"на {percent}% ниже рынка")
+    if note.mileage_km is not None:
+        details.append(f"{_fmt_int(note.mileage_km)} км")
+    if note.city:
+        details.append(html.escape(note.city))
+    if is_foreign(note.city):
+        details.append("🌍 за рубежом")
+    line = f'{index}. <a href="{note.url}">{html.escape(card_title(note))}</a>'
+    if details:
+        line += f"\n    {' · '.join(details)}"
+    return line
+
+
+def format_digest(
+    notes: list[PendingNotification],
+    *,
+    total: int,
+    start_index: int = 1,
+    brand_counts: dict[str | None, int] | None = None,
+) -> str:
+    """Всё, что сверх топа с фото, одним списком — разделами по маркам.
+
+    `notes` — уже упорядочены (`digest.order_digest`); список длиннее
+    DIGEST_MAX_ITEMS приходит частями: `start_index` продолжает сквозную
+    нумерацию, заголовок «ещё N» — только у первой части, заголовок марки —
+    там, где её раздел начинается или продолжается. Строки — в виде новой
+    карточки; фото — по кнопке «Показать с фото» под последней частью.
+    """
+    lines: list[str] = []
+    if start_index == 1:
+        word = _plural(total, "объявление", "объявления", "объявлений")
+        lines.append(f"📋 <b>Ещё {total} {word} по вашим фильтрам</b>")
+    current: object = object()
+    for index, note in enumerate(notes, start=start_index):
+        if note.brand_name != current:
+            current = note.brand_name
+            label = html.escape(note.brand_name) if note.brand_name else OTHER_BRANDS_LABEL
+            count = (brand_counts or {}).get(note.brand_name)
+            lines.append(f"\n🚗 <b>{label}</b>" + (f" · {count}" if count else ""))
+        lines.append(_digest_item(index, note))
+    return "\n".join(lines)
+
+
+DIGEST_EXPIRED_TEXT = "Список устарел — свежие предложения в «🔥 Лучшее сейчас»"
+DIGEST_GONE_TEXT = "Эти объявления уже сняты с продажи"
+DIGEST_EMPTY_TEXT = "Больше объявлений в этом списке нет"
+
+
+def format_digest_legacy(brand_name: str, notes: list[PendingNotification]) -> str:
+    """Список до 22.10.2026 — вид при `BOT_RICH_CARDS_PER_CYCLE=0` (откат флагом).
 
     Формат намеренно плотнее карточки: цель — чтобы утренний залп читался
     сверху вниз за один экран, а не 30 отдельными пушами. Превью ссылок у

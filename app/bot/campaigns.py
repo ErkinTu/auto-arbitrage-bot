@@ -19,18 +19,21 @@ from sqlalchemy.orm import Session
 
 from app.bot.keyboards import base_filter_kb
 from app.bot.matching import (
+    BASIS_AVG,
+    BASIS_MEDIAN,
     filter_matches,
     is_complete_listing,
     is_plausible_discount,
     passes_below_market,
 )
 from app.bot.messages import burned_broadcast_text, nudge_filter_text
-from app.bot.showcase import market_averages
+from app.bot.showcase import market_averages, market_estimates
 from app.core.config import get_settings
 from app.models import BotUser, Listing, Payment, UserEvent, UserFilter
 from app.services.blocklist import load_block_sets
 from app.services.events import log_event
 from app.services.filter_presets import load_brand_groups, presets
+from app.services.regions import is_foreign
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.regions import LOCAL
 from app.services.sync import utcnow
@@ -132,6 +135,84 @@ def preset_volume(session: Session, *, days: int) -> tuple[int, list[VolumeRow]]
             and _plausible(listing, avg)
         )
         rows.append(VolumeRow(f"пресет «{preset.summary}»", count / days))
+    return len(listings), rows
+
+
+@dataclass(slots=True)
+class BasisRow:
+    label: str
+    avg_per_day: float
+    median_per_day: float
+
+
+def market_basis_volume(session: Session, *, days: int) -> tuple[int, list[BasisRow]]:
+    """Средняя против медианы: сколько «ниже рынка» в сутки по КР при каждой базе.
+
+    Замер к решению п. 1.5 плана 22.10.2026 — только чтение. Строки порогов —
+    как в `preset_volume`; «мусор» — скидка выше BOT_MAX_BELOW_MARKET_PERCENT
+    (её бот не шлёт ни при какой базе); «меняют ответ» — объявления, которые
+    проходят базовый порог при одной базе и не проходят при другой.
+    """
+    settings = get_settings()
+    since = utcnow() - timedelta(days=days)
+    listings = [item for item in _listings_published(session, since) if not is_foreign(item.city)]
+    min_samples = settings.bot_below_avg_min_samples
+    by_basis = {
+        basis: {
+            listing: estimate.avg_usd if estimate is not None else None
+            for listing, estimate in market_estimates(
+                session, listings, min_samples=min_samples, basis=basis
+            ).items()
+        }
+        for basis in (BASIS_AVG, BASIS_MEDIAN)
+    }
+
+    def below(listing: Listing, price: float | None) -> float | None:
+        if price is None or price <= 0:
+            return None
+        return (1 - float(listing.current_price_usd) / price) * 100
+
+    def count(basis: str, predicate) -> float:
+        return sum(
+            1 for listing, price in by_basis[basis].items() if predicate(below(listing, price))
+        ) / days
+
+    max_percent = settings.bot_max_below_market_percent
+    rows: list[BasisRow] = []
+    for percent in (5, 10, 15, 20, 25):
+        def passes(value, percent=percent):
+            return value is not None and percent <= value <= max_percent
+
+        rows.append(
+            BasisRow(
+                f"ниже рынка на {percent}%+",
+                count(BASIS_AVG, passes),
+                count(BASIS_MEDIAN, passes),
+            )
+        )
+
+    def junk(value):
+        return value is not None and value > max_percent
+
+    rows.append(BasisRow(f"мусор: скидка > {max_percent:g}%", count(BASIS_AVG, junk), count(BASIS_MEDIAN, junk)))
+    base = settings.bot_base_filter_percent
+
+    def base_passes(value):
+        return value is not None and base <= value <= max_percent
+
+    only_avg = sum(
+        1
+        for listing in listings
+        if base_passes(below(listing, by_basis[BASIS_AVG].get(listing)))
+        and not base_passes(below(listing, by_basis[BASIS_MEDIAN].get(listing)))
+    )
+    only_median = sum(
+        1
+        for listing in listings
+        if base_passes(below(listing, by_basis[BASIS_MEDIAN].get(listing)))
+        and not base_passes(below(listing, by_basis[BASIS_AVG].get(listing)))
+    )
+    rows.append(BasisRow(f"порог {base}%: только при этой базе", only_avg / days, only_median / days))
     return len(listings), rows
 
 

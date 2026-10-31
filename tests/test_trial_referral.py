@@ -608,17 +608,17 @@ def test_demo_listing_is_a_real_below_market_car(demo_db) -> None:
         )
         s.commit()
 
-    demo = botdb.get_demo_listing(chat_id=42)
-    assert demo is not None
+    # Первое место витрины — бывший демо-лот /start.
+    [demo], _ = botdb.get_showcase(42, 0)
     assert demo.chat_id == 42
     assert demo.below_market_percent == 20.0  # 8000 против средней 10000
 
     # Второй вызов идёт из кэша, но адресуется уже другому чату.
-    assert botdb.get_demo_listing(chat_id=43).chat_id == 43
+    assert botdb.get_showcase(43, 0)[0][0].chat_id == 43
 
 
 def test_demo_listing_absent_on_empty_base(demo_db) -> None:
-    assert botdb.get_demo_listing(chat_id=1) is None
+    assert botdb.get_showcase(1, 0) == ([], None)
 
 
 # --- бонусные дни и тариф ----------------------------------------------------
