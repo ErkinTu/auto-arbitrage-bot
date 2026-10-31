@@ -49,7 +49,7 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   Реестр источников/фабрика парсеров — `app/services/sources.py`; нормализатор
   диспетчеризуется через `parser.normalize()`. Детали lalafo-объявления
   дотягиваются только для новых/подешевевших (`_enrich_or_skip` в sync).
-  Паузы lalafo раздельные: лента 5с, карточки 0.5с с удвоением при 429
+  Паузы lalafo раздельные: лента 3с (было 5с, 31.10.2026, **в коде, ждёт выката**), карточки 0.5с с удвоением при 429
   (`lalafo_feed_delay_seconds`/`lalafo_detail_delay_seconds`).
   **На проде lalafo требует `LALAFO_PROXY_URL`** (Cloudflare режет
   датацентровые IP; WARP не помогает). Детали и прод-чеклист — `docs/sources/LALAFO.md`.
@@ -271,6 +271,11 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   `sent_notifications.batch_id` (ставится только строкам списка, до отправки);
   порядок — общий `bot/digest.py::order_digest`. У самого списка нет «Не то».
   Прежние списки на марку — только при `BOT_RICH_CARDS_PER_CYCLE=0`.
+- **Пуши волнами по источникам** (31.10.2026, **в коде, ждёт выката**):
+  `poller._run_sources` зовёт волну (подбор + рассылка) сразу по завершении
+  каждого обхода — mashina не ждёт lalafo. Потолок пушей — ОДИН на цикл
+  (`match_new_listings(cycle_counts=…)`), топ с фото и дайджест — на волну;
+  номера пачек дайджеста строго растут (`_BatchClock`).
 - **Потолок пушей за цикл — по тарифу, внутри — приоритет фильтра**
   (`matching.py::match_new_listings`, **на проде с 06.09.2026**, разбор —
   `docs/CHANGELOG.md`). `BOT_MAX_NOTIFICATIONS_PER_USER_PER_CYCLE_FULL=50` /

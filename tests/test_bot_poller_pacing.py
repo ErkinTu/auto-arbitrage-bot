@@ -58,11 +58,16 @@ def _run_one_cycle(monkeypatch, *, cycle_seconds: float) -> list[float]:
 
 
 def test_sleep_is_interval_minus_elapsed(monkeypatch) -> None:
-    """Цикл длиной 4 мин при интервале 10 → спим 6, а не 10."""
-    interval = poller.get_settings().bot_fresh_interval_minutes * 60
-    slept = _run_one_cycle(monkeypatch, cycle_seconds=240)
+    """Цикл длиной 4 мин при интервале 10 → спим 6, а не 10.
 
-    assert slept == [pytest.approx(interval - 240)]
+    Длительность — доля интервала, а не 240 с: локальный `.env` может держать
+    интервал короче 4 мин, и тест не должен от него зависеть.
+    """
+    interval = poller.get_settings().bot_fresh_interval_minutes * 60
+    cycle = interval * 0.4
+    slept = _run_one_cycle(monkeypatch, cycle_seconds=cycle)
+
+    assert slept == [pytest.approx(interval - cycle)]
 
 
 def test_overrun_falls_back_to_min_pause(monkeypatch) -> None:

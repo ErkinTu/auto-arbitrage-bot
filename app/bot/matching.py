@@ -524,6 +524,7 @@ def match_new_listings(
     flush_deadline: datetime | None = None,
     require_complete: bool = False,
     max_below_percent: float = 0,
+    cycle_counts: dict[int, int] | None = None,
 ) -> list[PendingNotification]:
     """Подбирает пары (пользователь, новое объявление), фиксирует отправку, возвращает DTO.
 
@@ -560,6 +561,12 @@ def match_new_listings(
     успевают снять или продать, а уведомление на мёртвую страницу читается как
     сломанный бот, а не как дешёвый тариф. Один час из шестнадцати активных —
     осознанная цена за живые ссылки.
+
+    cycle_counts — сколько пушей юзер (по `BotUser.id`) уже получил в ЭТОМ
+    цикле. Цикл рассылает волнами (по волне на источник, `poller.py`), а потолок
+    тарифа — один на цикл (решение владельца 31.10.2026): волна получает только
+    остаток. Словарь дополняется отобранным здесь, чтобы следующая волна видела
+    расход. None — потолок считается только по этому вызову.
     """
     listings = find_new_listings(session, since, max_age_hours=max_age_hours)
     now = utcnow()
@@ -736,8 +743,14 @@ def match_new_listings(
         cap = (
             max_per_user_delayed if tier_by_user.get(user_id) == TIER_DELAYED else max_per_user_full
         )
+        if cap > 0 and cycle_counts is not None:
+            cap -= cycle_counts.get(user_id, 0)
+            if cap <= 0:
+                continue  # потолок цикла выбран прошлыми волнами
         user_candidates.sort(key=_candidate_rank)
         selected = user_candidates[:cap] if cap > 0 else user_candidates
+        if cycle_counts is not None:
+            cycle_counts[user_id] = cycle_counts.get(user_id, 0) + len(selected)
         for candidate in selected:
             already_sent.add((user_id, candidate.listing.id))
             session.add(

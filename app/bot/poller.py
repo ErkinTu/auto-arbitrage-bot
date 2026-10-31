@@ -13,6 +13,12 @@
   «что этот цикл только что скачал». Отсюда правило: **застрявший источник
   рассылку не держит**. Что он докоммитит с опозданием, подберёт следующий цикл
   — окно в 18 раз шире интервала, а `sent_notifications` не даст дубля.
+
+Рассылка идёт **волнами**: как только доехал очередной источник, подбираем и
+шлём то, что уже в базе (план 31.10.2026, `docs/planning/PUSH_PIPELINE_PLAN.md`).
+Иначе находка mashina (обход ~2.5 мин) ждала бы lalafo (~6 мин) просто так.
+Потолок пушей на человека при этом общий на цикл (`cycle_counts`): вторая
+волна получает только остаток.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
 from app.bot.db import mark_user_blocked, refresh_showcase, tag_digest_rows
@@ -96,12 +103,15 @@ def sync_source(source_name: str) -> None:
             parser.close()
 
 
-def collect_matches() -> list[PendingNotification]:
+def collect_matches(cycle_counts: dict[int, int] | None = None) -> list[PendingNotification]:
     """Подбор уведомлений по тому, что УЖЕ лежит в базе.
 
     Намеренно не принимает результат синка: окно `BOT_NEW_LOOKBACK_MINUTES`
     шире интервала во много раз, поэтому отставший источник ничего не теряет —
     его находки подберёт следующий цикл.
+
+    `cycle_counts` — расход потолка пушей прошлыми волнами этого цикла
+    (см. `match_new_listings`); дополняется на месте.
     """
     settings = get_settings()
     with SessionLocal() as session:
@@ -126,6 +136,7 @@ def collect_matches() -> list[PendingNotification]:
             flush_deadline=flush_deadline,
             require_complete=settings.bot_require_complete_listings,
             max_below_percent=settings.bot_max_below_market_percent,
+            cycle_counts=cycle_counts,
         )
 
 
@@ -135,6 +146,58 @@ async def _on_blocked(chat_id: int) -> None:
 
 async def _on_digest(batch_id: int, groups: list[tuple[int, list[int]]]) -> bool:
     return await asyncio.to_thread(tag_digest_rows, batch_id, groups)
+
+
+class _BatchClock:
+    """Номера пачек дайджеста: по минуте отправки, но строго возрастающие.
+
+    Две волны могут уложиться в одну минуту, а кнопка «Показать с фото» берёт
+    строки по (юзер, batch_id) — с общим номером вторая волна подмешалась бы в
+    список первой.
+    """
+
+    def __init__(self) -> None:
+        self.last: int | None = None
+
+    def next(self) -> int:
+        batch_id = batch_id_for(utcnow())
+        if self.last is not None and batch_id <= self.last:
+            batch_id = self.last + 1
+        self.last = batch_id
+        return batch_id
+
+
+async def _send_wave(
+    bot: BotLike,
+    sources: list[str],
+    *,
+    cycle_counts: dict[int, int],
+    batches: _BatchClock,
+) -> None:
+    """Одна волна: подбор по базе + рассылка. Падение волны не роняет цикл.
+
+    `sources` — что доехало перед волной (только для лога); пусто — финальная
+    волна по дедлайну или без свежих обходов.
+    """
+    settings = get_settings()
+    label = "+".join(sources) or "final"
+    try:
+        pending = await asyncio.to_thread(collect_matches, cycle_counts)
+        if not pending:
+            logger.info("wave %s: no matching new listings", label)
+            return
+        sent = await send_notifications(
+            bot,
+            pending,
+            on_blocked=_on_blocked,
+            group_min=settings.bot_group_min_listings,
+            rich_cards=settings.bot_rich_cards_per_cycle,
+            batch_id=batches.next(),
+            on_digest=_on_digest,
+        )
+        logger.info("wave %s: %s message(s) for %s listing(s)", label, sent, len(pending))
+    except Exception:
+        logger.exception("notification wave %s failed", label)
 
 
 def _log_task_error(task: asyncio.Task) -> None:
@@ -150,8 +213,22 @@ def _log_task_error(task: asyncio.Task) -> None:
         logger.error("source sync task %s failed: %r", task.get_name(), error)
 
 
-async def _run_sources(inflight: dict[str, asyncio.Task], *, deadline_seconds: float) -> None:
+async def _run_sources(
+    inflight: dict[str, asyncio.Task],
+    *,
+    deadline_seconds: float,
+    on_progress: Callable[[list[str]], Awaitable[None]] | None = None,
+) -> bool:
     """Запускает обход всех источников параллельно и ждёт их — но не бесконечно.
+
+    `on_progress(names)` зовётся сразу, как доехал очередной источник (или
+    несколько разом), — это волна рассылки. Волны идут строго по очереди: пока
+    шлётся первая, второй источник продолжает обход в своём потоке, а его
+    завершение подхватит следующий `asyncio.wait`. Время волны входит в дедлайн.
+
+    Возвращает True, если волна по завершению источника не прошла ни разу или
+    кто-то не уложился в дедлайн: тогда вызывающему нужна финальная волна «по
+    тому, что уже в базе» — как было до волн.
 
     Два правила, оба выведены из замеров на проде:
 
@@ -165,6 +242,7 @@ async def _run_sources(inflight: dict[str, asyncio.Task], *, deadline_seconds: f
        свою сессию. Ничего не теряется: `collect_matches` смотрит в базу по
        окну `BOT_NEW_LOOKBACK_MINUTES`, которое много шире интервала.
     """
+    started: list[str] = []
     for source_name in SOURCE_NAMES:
         task = inflight.get(source_name)
         if task is not None and not task.done():
@@ -181,19 +259,37 @@ async def _run_sources(inflight: dict[str, asyncio.Task], *, deadline_seconds: f
         inflight[source_name] = asyncio.create_task(
             asyncio.to_thread(sync_source, source_name), name=f"sync:{source_name}"
         )
+        started.append(source_name)
 
-    running = {task for task in inflight.values() if not task.done()}
-    if not running:
-        return
-    done, still_running = await asyncio.wait(running, timeout=deadline_seconds)
-    for task in done:
-        _log_task_error(task)
-    if still_running:
+    # Задачи, начатые прошлым циклом и ещё живые, сюда не входят: их завершение
+    # волну не даёт (их находки подберёт финальная волна или следующий цикл).
+    running = {inflight[name] for name in started}
+    waves = 0
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_seconds
+    while running:
+        timeout = deadline - loop.time()
+        if timeout <= 0:
+            break
+        done, running = await asyncio.wait(
+            running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in done:
+            _log_task_error(task)
+        if done and on_progress is not None:
+            await on_progress(sorted(_source_of(task) for task in done))
+            waves += 1
+    if running:
         logger.warning(
             "still syncing after %.0f s: %s; sending what is already in the database",
             deadline_seconds,
-            ", ".join(sorted(task.get_name() for task in still_running)),
+            ", ".join(sorted(task.get_name() for task in running)),
         )
+    return waves == 0 or bool(running)
+
+
+def _source_of(task: asyncio.Task) -> str:
+    return task.get_name().removeprefix("sync:")
 
 
 async def polling_loop(bot: BotLike) -> None:
@@ -201,6 +297,7 @@ async def polling_loop(bot: BotLike) -> None:
     interval_seconds = settings.bot_fresh_interval_minutes * 60
     # Живые (или только что завершившиеся) задачи обхода, по одной на источник.
     inflight: dict[str, asyncio.Task] = {}
+    batches = _BatchClock()
     logger.info(
         "bot poller started: every %s min within %02d:00-%02d:00 (%s)",
         settings.bot_fresh_interval_minutes,
@@ -219,22 +316,18 @@ async def polling_loop(bot: BotLike) -> None:
             await asyncio.sleep(wait_seconds)
 
         started = time.monotonic()
+        # Расход потолка пушей по юзерам за этот цикл — общий для всех волн.
+        cycle_counts: dict[int, int] = {}
+
+        async def wave(sources: list[str]) -> None:
+            await _send_wave(bot, sources, cycle_counts=cycle_counts, batches=batches)
+
         try:
-            await _run_sources(inflight, deadline_seconds=interval_seconds)
-            pending = await asyncio.to_thread(collect_matches)
-            if pending:
-                sent = await send_notifications(
-                    bot,
-                    pending,
-                    on_blocked=_on_blocked,
-                    group_min=settings.bot_group_min_listings,
-                    rich_cards=settings.bot_rich_cards_per_cycle,
-                    batch_id=batch_id_for(utcnow()),
-                    on_digest=_on_digest,
-                )
-                logger.info("notifications: %s message(s) for %s listing(s)", sent, len(pending))
-            else:
-                logger.info("cycle complete, no matching new listings")
+            needs_final_wave = await _run_sources(
+                inflight, deadline_seconds=interval_seconds, on_progress=wave
+            )
+            if needs_final_wave:
+                await wave([])
         except Exception:
             logger.exception("bot poll cycle failed")
         try:
