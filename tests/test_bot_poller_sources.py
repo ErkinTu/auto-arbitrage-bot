@@ -112,13 +112,14 @@ def test_failed_source_is_logged_not_raised(monkeypatch, caplog) -> None:
 
 
 def test_collect_matches_is_independent_of_sync(monkeypatch) -> None:
-    """`collect_matches` не принимает результат обхода — только окно из базы.
+    """`collect_matches` не принимает результат обхода — только окно из базы
+    (и расход потолка прошлыми волнами цикла).
 
     Это и есть причина, по которой отставший источник ничего не теряет.
     """
     import inspect
 
-    assert list(inspect.signature(poller.collect_matches).parameters) == []
+    assert list(inspect.signature(poller.collect_matches).parameters) == ["cycle_counts"]
     assert list(inspect.signature(poller.sync_source).parameters) == ["source_name"]
 
 
@@ -139,3 +140,131 @@ def test_sync_source_opens_its_own_session(monkeypatch, name: str) -> None:
     with pytest.raises(RuntimeError):
         poller.sync_source(name)
     assert opened == [1]
+
+
+# --- волны рассылки (план 31.10.2026) -----------------------------------------
+# Рассылка — сразу по завершении каждого источника, а не после самого медленного.
+
+
+def test_wave_per_source_in_completion_order(monkeypatch) -> None:
+    """mashina доехала — её волна уходит, пока lalafo ещё обходит ленту."""
+    mashina_wave_sent = threading.Event()
+    waves: list[list[str]] = []
+
+    def fake_sync(source_name: str) -> None:
+        if source_name == LALAFO:
+            # lalafo заканчивает только ПОСЛЕ волны mashina: доказывает, что
+            # волна не ждёт самого медленного источника.
+            assert mashina_wave_sent.wait(timeout=5)
+
+    async def on_progress(names: list[str]) -> None:
+        waves.append(names)
+        if names == [MASHINA]:
+            mashina_wave_sent.set()
+
+    monkeypatch.setattr(poller, "sync_source", fake_sync)
+    inflight: dict[str, asyncio.Task] = {}
+    needs_final = asyncio.run(
+        poller._run_sources(inflight, deadline_seconds=5, on_progress=on_progress)
+    )
+
+    assert waves == [[MASHINA], [LALAFO]]
+    assert needs_final is False  # всё доехало, обе волны прошли
+
+
+def test_deadline_asks_for_a_final_wave(monkeypatch) -> None:
+    """Застрявший lalafo: волна mashina прошла, по дедлайну нужна финальная."""
+    release = threading.Event()
+    waves: list[list[str]] = []
+
+    def fake_sync(source_name: str) -> None:
+        if source_name == LALAFO:
+            release.wait(timeout=5)
+
+    async def on_progress(names: list[str]) -> None:
+        waves.append(names)
+
+    monkeypatch.setattr(poller, "sync_source", fake_sync)
+    inflight: dict[str, asyncio.Task] = {}
+    try:
+        needs_final = asyncio.run(
+            poller._run_sources(inflight, deadline_seconds=0.2, on_progress=on_progress)
+        )
+    finally:
+        release.set()
+
+    assert waves == [[MASHINA]]
+    assert needs_final is True
+
+
+def test_source_left_over_from_previous_cycle_gives_no_wave(monkeypatch) -> None:
+    """Обход, начатый прошлым циклом, этот цикл не ждёт и волну за него не шлёт."""
+    release = threading.Event()
+    waves: list[list[str]] = []
+
+    def fake_sync(source_name: str) -> None:
+        if source_name == LALAFO:
+            release.wait(timeout=5)
+
+    async def on_progress(names: list[str]) -> None:
+        waves.append(names)
+
+    monkeypatch.setattr(poller, "sync_source", fake_sync)
+    inflight: dict[str, asyncio.Task] = {}
+    results: list[bool] = []
+
+    async def two_cycles() -> None:
+        results.append(await poller._run_sources(inflight, deadline_seconds=0.1))
+        results.append(
+            await poller._run_sources(inflight, deadline_seconds=5, on_progress=on_progress)
+        )
+
+    try:
+        asyncio.run(two_cycles())
+    finally:
+        release.set()
+
+    assert waves == [[MASHINA]]  # второй цикл: только свежий обход mashina
+    assert results == [True, False]
+
+
+def test_failed_wave_does_not_break_the_cycle(monkeypatch, caplog) -> None:
+    """Упала подборка/рассылка одной волны — следующая волна всё равно идёт."""
+    calls: list[int] = []
+
+    def fake_collect(cycle_counts):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("db hiccup")
+        return []
+
+    monkeypatch.setattr(poller, "collect_matches", fake_collect)
+    batches = poller._BatchClock()
+
+    async def two_waves() -> None:
+        await poller._send_wave(object(), [MASHINA], cycle_counts={}, batches=batches)
+        await poller._send_wave(object(), [LALAFO], cycle_counts={}, batches=batches)
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(two_waves())
+
+    assert len(calls) == 2
+    assert "db hiccup" in caplog.text
+
+
+def test_batch_ids_of_waves_never_collide(monkeypatch) -> None:
+    """Две волны в одну минуту получают разные номера пачки дайджеста.
+
+    Кнопка «Показать с фото» читает строки по (юзер, batch_id): с общим
+    номером вторая волна подмешалась бы в список первой.
+    """
+    from datetime import UTC, datetime
+
+    moment = datetime(2026, 10, 31, 12, 0, 30, tzinfo=UTC)
+    monkeypatch.setattr(poller, "utcnow", lambda: moment)
+    clock = poller._BatchClock()
+
+    first, second, third = clock.next(), clock.next(), clock.next()
+    assert first == poller.batch_id_for(moment)
+    assert second == first + 1
+    assert third == first + 2

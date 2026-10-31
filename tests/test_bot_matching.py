@@ -563,6 +563,48 @@ def test_match_caps_notifications_per_user_per_cycle() -> None:
     assert len(pending3) == 1
 
 
+def test_cap_is_shared_between_waves_of_one_cycle() -> None:
+    """Волны цикла (mashina, затем lalafo) делят ОДИН потолок (решение 31.10.2026).
+
+    Вторая волна получает только остаток; выбравший потолок юзер ждёт
+    следующего цикла, остальные — нет.
+    """
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _add_user_with_filter(session, telegram_id=42)
+    _add_user_with_filter(session, telegram_id=43)
+    for i in range(2):
+        _add_listing(session, external_id=f"wave1-{i}")
+
+    counts: dict[int, int] = {}
+    wave1 = match_new_listings(
+        session, since, factor=0.95, min_samples=5, max_per_user_full=3, cycle_counts=counts
+    )
+    assert len(wave1) == 4  # по 2 каждому
+    assert sorted(counts.values()) == [2, 2]
+
+    for i in range(3):
+        _add_listing(session, external_id=f"wave2-{i}")
+    wave2 = match_new_listings(
+        session, since, factor=0.95, min_samples=5, max_per_user_full=3, cycle_counts=counts
+    )
+    assert len(wave2) == 2  # остаток потолка — по 1 каждому, а не по 3
+    assert sorted(counts.values()) == [3, 3]
+
+    # Третья волна того же цикла — потолок выбран, ничего не уходит и не фиксируется.
+    wave3 = match_new_listings(
+        session, since, factor=0.95, min_samples=5, max_per_user_full=3, cycle_counts=counts
+    )
+    assert wave3 == []
+    assert session.scalar(select(func.count()).select_from(SentNotification)) == 6
+
+    # Новый цикл — новый счётчик: недоставленное всплывает.
+    next_cycle = match_new_listings(
+        session, since, factor=0.95, min_samples=5, max_per_user_full=3, cycle_counts={}
+    )
+    assert len(next_cycle) == 4
+
+
 def test_delayed_tier_has_its_own_cap() -> None:
     """Потолок на цикл — по тарифу: медленному свой, независимо от выдержки."""
     session = _session()
