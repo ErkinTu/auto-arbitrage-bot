@@ -177,10 +177,10 @@ async def _send_wave(
     """Одна волна: подбор по базе + рассылка. Падение волны не роняет цикл.
 
     `sources` — что доехало перед волной (только для лога); пусто — финальная
-    волна по дедлайну или без свежих обходов.
+    (единственная) волна: первый цикл дня, дедлайн или нет свежих обходов.
     """
     settings = get_settings()
-    label = "+".join(sources) or "final"
+    label = "+".join(sources) or "all"
     try:
         pending = await asyncio.to_thread(collect_matches, cycle_counts)
         if not pending:
@@ -298,6 +298,12 @@ async def polling_loop(bot: BotLike) -> None:
     # Живые (или только что завершившиеся) задачи обхода, по одной на источник.
     inflight: dict[str, asyncio.Task] = {}
     batches = _BatchClock()
+    # Первый цикл после ночной паузы (и после старта бота — простой даёт тот же
+    # залп) идёт ОДНОЙ рассылкой, а не волнами: за ночь у человека в среднем 28
+    # находок (максимум 55), и волнами он получил бы два списка и 6 фото подряд.
+    # Ночным объявлениям лишние ~3 мин ожидания lalafo ничего не стоят, а лучшие
+    # фото так выбираются по выгоде из обоих источников, а не «кто первый».
+    single_wave = True
     logger.info(
         "bot poller started: every %s min within %02d:00-%02d:00 (%s)",
         settings.bot_fresh_interval_minutes,
@@ -314,6 +320,7 @@ async def polling_loop(bot: BotLike) -> None:
         if wait_seconds > 0:
             logger.info("outside active window, sleeping %.0f min", wait_seconds / 60)
             await asyncio.sleep(wait_seconds)
+            single_wave = True
 
         started = time.monotonic()
         # Расход потолка пушей по юзерам за этот цикл — общий для всех волн.
@@ -324,12 +331,15 @@ async def polling_loop(bot: BotLike) -> None:
 
         try:
             needs_final_wave = await _run_sources(
-                inflight, deadline_seconds=interval_seconds, on_progress=wave
+                inflight,
+                deadline_seconds=interval_seconds,
+                on_progress=None if single_wave else wave,
             )
             if needs_final_wave:
                 await wave([])
         except Exception:
             logger.exception("bot poll cycle failed")
+        single_wave = False
         try:
             # Прогрев витрины («лучшие сейчас», демо в /start) после свежего
             # парса: на проде пересчёт — несколько секунд, и пусть их ждёт цикл,
