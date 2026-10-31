@@ -7,7 +7,10 @@
 сообщение.
 
 Черновик — обычный dict (лежит в данных FSM): ключи = поля `user_filters`, плюс
-имена марки/модели для показа. Отсутствующее поле = «любой».
+имена марки/модели для показа и `done` — пройденные шаги. Отсутствующее поле =
+«любой». ✅ ставится за ПРОЙДЕННЫЙ шаг, а не за непустое значение: «Все марки»
+и «вся КР» — тоже ответ (проверка владельцем 01.11.2026: выбранное «Все марки»
+оставалось ⬜ и читалось как «не сработало»).
 
 Решения владельца (31.10.2026): «ниже рынка» с процентом — один шаг (5/10/20/не
 важно); фильтр без марки разрешён, но с подсказкой про низкий приоритет;
@@ -73,7 +76,17 @@ class PanelCB(CallbackData, prefix="fp"):
 
 def new_draft() -> dict:
     """Новый фильтр: всё «любое», регион — вся КР (зарубежные без растаможки шумят)."""
-    return {"region": LOCAL, "below_market_only": False}
+    return {"region": LOCAL, "below_market_only": False, "done": []}
+
+
+def mark_done(draft: dict, *steps: int) -> dict:
+    done = set(draft.get("done") or ())
+    done.update(steps)
+    return {**draft, "done": sorted(done)}
+
+
+def is_done(draft: dict, step: int) -> bool:
+    return step in (draft.get("done") or ()) or step_value(draft, step) is not None
 
 
 def draft_from_filter(item) -> dict:
@@ -93,6 +106,8 @@ def draft_from_filter(item) -> dict:
         "below_market_percent": item.below_market_percent,
         "region": item.region,
         "skip_foreign": item.skip_foreign,
+        # Сохранённый фильтр — каждый шаг уже решён, «любой» тоже.
+        "done": list(STEPS),
     }
 
 
@@ -215,7 +230,7 @@ def render_text(draft: dict, step: int, *, editing: bool = False, notice: str | 
         if number == step:
             mark, tail = "✏️", "  ← сейчас"
         else:
-            mark, tail = ("✅" if value else "⬜"), ""
+            mark, tail = ("✅" if is_done(draft, number) else "⬜"), ""
         lines.append(f"{mark} {number} {STEP_TITLES[number]}: {shown}{tail}")
     lines.append(LINE)
     lines.append(f"Итог: {html.escape(summary(draft))}")
@@ -336,11 +351,35 @@ def next_step(step: int) -> int:
     return min(step + 1, STEP_REGION)
 
 
+_ACTION_STEPS = {
+    "brand": STEP_BRAND,
+    "group": STEP_BRAND,
+    "model": STEP_MODEL,
+    "years": STEP_YEARS,
+    "mileage": STEP_MILEAGE,
+    "price": STEP_PRICE,
+    "market": STEP_MARKET,
+    "region": STEP_REGION,
+}
+
+
 def apply_choice(draft: dict, action: str, value: str) -> tuple[dict, bool]:
     """Применяет кнопку выбора; возвращает (черновик, перейти ли к следующему шагу).
 
-    Неизвестное значение (старая кнопка, подделанный callback) не меняет черновик.
+    Принятый выбор отмечает шаг пройденным; «Все марки» и группа — ещё и шаг
+    модели (выбирать её не из чего). Неизвестное значение (старая кнопка,
+    подделанный callback) не меняет черновик.
     """
+    new, advance = _apply_choice(draft, action, value)
+    if not advance:
+        return draft, False
+    steps = [_ACTION_STEPS[action]]
+    if action in ("brand", "group") and not new.get("brand_id"):
+        steps.append(STEP_MODEL)
+    return mark_done(new, *steps), True
+
+
+def _apply_choice(draft: dict, action: str, value: str) -> tuple[dict, bool]:
     draft = dict(draft)
     if action == "brand":
         brand_id = int(value) if value.isdigit() else -1
@@ -459,17 +498,17 @@ def apply_text(draft: dict, step: int, text: str) -> tuple[dict, str | None]:
         if years is None:
             return draft, f"Не понял годы. Пример: 2015-2022, от 2018, до 2012 (с {MIN_YEAR} по {_max_year()})."
         draft.update(years)
-        return draft, None
+        return mark_done(draft, step), None
     if step == STEP_MILEAGE:
         value = parse_amount(text, MAX_MILEAGE_KM)
         if value is None:
             return draft, "Не понял пробег. Пример: 150000 или 150к."
         draft["mileage_max_km"] = value
-        return draft, None
+        return mark_done(draft, step), None
     if step == STEP_PRICE:
         value = parse_amount(text, MAX_PRICE_USD)
         if value is None:
             return draft, "Не понял цену. Пример: 15000 или 15к."
         draft["price_max_usd"] = float(value)
-        return draft, None
+        return mark_done(draft, step), None
     return draft, "На этом шаге выберите вариант кнопкой."

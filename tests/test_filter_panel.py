@@ -530,3 +530,49 @@ def test_cancel_closes_panel(flow) -> None:
     _press(panel, state, "cancel")
     assert asyncio.run(state.get_state()) is None
     assert "Отменено" in panel.edited[-1] and calls["create"] == []
+
+
+# --- статусы шагов: ✅ = шаг пройден (проверка владельцем 01.11.2026) ------------------
+
+
+def _marks(text: str) -> dict[int, str]:
+    """Номер шага -> значок: строки вида «✅ 1 Марка: …»."""
+    import re
+
+    return {
+        int(match.group(2)): match.group(1)
+        for match in re.finditer(r"^(\S+) (\d) \w+:", text, re.M)
+    }
+
+
+def test_choosing_all_brands_marks_brand_and_skipped_model_done() -> None:
+    """Регрессия: «Все марки» оставалось ⬜, авто-пропуск модели — тоже."""
+    draft, _ = fp.apply_choice(fp.new_draft(), "brand", "0")
+    marks = _marks(fp.render_text(draft, fp.STEP_YEARS))
+    assert marks[1] == "✅" and marks[2] == "✅"
+    assert marks[4] == "⬜"  # до пробега ещё не дошли
+
+
+def test_default_region_turns_done_once_chosen() -> None:
+    draft = fp.new_draft()
+    assert _marks(fp.render_text(draft, fp.STEP_BRAND))[7] == "⬜"
+    draft, _ = fp.apply_choice(draft, "region", LOCAL)  # «вся КР» — тоже ответ
+    assert _marks(fp.render_text(draft, fp.STEP_BRAND))[7] == "✅"
+
+
+def test_any_choice_counts_as_done() -> None:
+    draft, _ = fp.apply_choice(fp.new_draft(), "mileage", "any")
+    draft, _ = fp.apply_choice(draft, "market", "off")
+    marks = _marks(fp.render_text(draft, fp.STEP_BRAND))
+    assert marks[4] == "✅" and marks[6] == "✅" and marks[5] == "⬜"
+
+
+def test_typed_value_marks_step_done() -> None:
+    draft, _ = fp.apply_text(fp.new_draft(), fp.STEP_YEARS, "2015-2020")
+    assert fp.STEP_YEARS in draft["done"]
+
+
+def test_saved_filter_opens_with_every_step_done() -> None:
+    draft = fp.draft_from_filter(_dto(brand_id=None, brand_name=None, car_model_id=None, model_name=None, region=LOCAL))
+    marks = _marks(fp.render_text(draft, fp.STEP_PRICE, editing=True))
+    assert all(marks[n] == "✅" for n in fp.STEPS if n != fp.STEP_PRICE)
