@@ -250,6 +250,7 @@ def burned_recipients(session: Session) -> list[Recipient]:
         session.scalars(
             select(BotUser).where(
                 BotUser.is_active.is_(True),
+                BotUser.paused_at.is_(None),  # на паузе — только напоминание о паузе и о продлении
                 BotUser.access_status == "revoked",
                 BotUser.trial_expired_notified_at.is_not(None),
                 BotUser.id.not_in(select(Payment.user_id)),
@@ -309,6 +310,7 @@ def no_filter_recipients(session: Session) -> list[Recipient]:
     users = session.scalars(
         select(BotUser).where(
             BotUser.is_active.is_(True),
+            BotUser.paused_at.is_(None),  # на паузе — только напоминание о паузе и о продлении
             BotUser.id.not_in(has_filter),
             (BotUser.trial_expires_at > now) | (BotUser.subscription_expires_at > now),
             _not_yet_sent(SEGMENT_NO_FILTER),

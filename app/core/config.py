@@ -210,6 +210,10 @@ class Settings(BaseSettings):
     scheduler_timezone: str = "Asia/Bishkek"
     bot_active_start_hour: int = 8  # fresh-циклы бота только в окне [start, end)
     bot_active_end_hour: int = 24  # 24 = до полуночи
+    # Ежедневное напоминание «вы на паузе, включить?» — не раньше этого часа
+    # (локальное время, по умолчанию обед), одно в день, пока человек сам не
+    # нажмёт /play (решение владельца 31.10.2026).
+    bot_pause_reminder_hour: int = 13
     full_scan_hour: int = 2  # полная сверка по выходным не раньше этого часа
     full_scan_brand_pause_seconds: int = 60
     full_scan_page_size: int = 100

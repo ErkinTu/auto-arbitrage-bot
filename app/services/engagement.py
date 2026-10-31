@@ -80,6 +80,7 @@ def trial_nudge_candidates(session: Session, step: int, now: datetime) -> list[B
         .join(started_at, started_at.c.user_id == BotUser.id)
         .where(
             BotUser.is_active.is_(True),
+            BotUser.paused_at.is_(None),  # на паузе — только напоминание о паузе и о продлении
             BotUser.trial_started_at.is_(None),
             _no_paid_access(now),
             _step_window(started_at.c.started_at, step, now),
@@ -100,6 +101,7 @@ def filter_nudge_candidates(session: Session, step: int, now: datetime) -> list[
     has_filter = select(UserFilter.user_id).where(UserFilter.enabled.is_(True))
     query = select(BotUser).where(
         BotUser.is_active.is_(True),
+        BotUser.paused_at.is_(None),  # на паузе — только напоминание о паузе и о продлении
         BotUser.trial_expires_at > now,
         _no_paid_access(now),
         _step_window(BotUser.trial_started_at, step, now),
@@ -117,6 +119,7 @@ def trial_summary_candidates(session: Session, now: datetime) -> list[BotUser]:
         session.scalars(
             select(BotUser).where(
                 BotUser.is_active.is_(True),
+                BotUser.paused_at.is_(None),  # на паузе — только напоминание о паузе и о продлении
                 BotUser.trial_expires_at > now,
                 BotUser.trial_expires_at <= now + TRIAL_SUMMARY_BEFORE,
                 _no_paid_access(now),

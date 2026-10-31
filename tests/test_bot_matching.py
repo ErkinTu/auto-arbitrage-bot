@@ -774,6 +774,27 @@ def test_match_skips_blocked_and_revoked_users() -> None:
     assert match_new_listings(session, since, factor=0.95, min_samples=5) == []
 
 
+def test_paused_user_gets_nothing_and_backlog_does_not_pile_up() -> None:
+    """/pause: пушей нет и в sent_notifications ничего не копится; после /play —
+    то, что ещё в окне (решение 31.10.2026: пропущенное не накапливаем)."""
+    session = _session()
+    since = _now() - timedelta(minutes=60)
+    _, brand_id, _ = _ids(session)
+    paused = BotUser(telegram_id=1, paused_at=_now() - timedelta(hours=1))
+    session.add(paused)
+    session.flush()
+    session.add(UserFilter(user_id=paused.id, brand_id=brand_id))
+    session.commit()
+
+    _add_listing(session, external_id="1")
+    assert match_new_listings(session, since, factor=0.95, min_samples=5) == []
+    assert session.scalar(select(func.count()).select_from(SentNotification)) == 0
+
+    paused.paused_at = None  # /play
+    session.commit()
+    assert len(match_new_listings(session, since, factor=0.95, min_samples=5)) == 1
+
+
 def test_trial_user_receives_until_trial_expires() -> None:
     """Пейвол на 4-й день: истёк trial_expires_at — юзер просто выпадает из выборки."""
     session = _session()

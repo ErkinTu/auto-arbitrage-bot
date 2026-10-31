@@ -54,7 +54,13 @@ from app.services.access_schedule import (
     schedule_for_user,
     tail_end,
 )
-from app.services.events import EVENT_PAYMENT_CREATED, EVENT_START, log_event
+from app.services.events import (
+    EVENT_PAUSED,
+    EVENT_PAYMENT_CREATED,
+    EVENT_RESUMED,
+    EVENT_START,
+    log_event,
+)
 from app.services.filter_presets import base_preset, find_preset
 from app.services.plans import TIER_FULL, effective_tier, find_plan
 from app.services.referral import (
@@ -256,6 +262,7 @@ class SubscriptionInfo:
     tier: str = TIER_FULL
     schedule: tuple[ScheduleEntry, ...] = ()
     full_speed_from: datetime | None = None
+    paused_at: datetime | None = None
 
 
 def get_subscription_info(telegram_id: int) -> SubscriptionInfo | None:
@@ -278,6 +285,7 @@ def get_subscription_info(telegram_id: int) -> SubscriptionInfo | None:
             tier=effective_tier(user, active_block_tier, now),
             schedule=tuple(entries),
             full_speed_from=full_speed_starts_at(entries),
+            paused_at=user.paused_at,
         )
 
 
@@ -974,6 +982,52 @@ def issue_admin_login_token(telegram_id: int) -> str | None:
         session.commit()
         logger.info("Админ-вход: выдана ссылка пользователю %s", telegram_id)
         return token
+
+
+@dataclass(slots=True)
+class PauseResult:
+    """Итог /pause или /play.
+
+    `changed=False` — повтор команды (уже на паузе / уже включено): события не
+    пишем и время паузы не сдвигаем, иначе повторный /pause «обнулял» бы
+    давность, а журнал врал бы о числе уходов.
+    `paused_at` — начало паузы (для /play — той, что сейчас закончилась).
+    """
+
+    changed: bool
+    paused_at: datetime | None = None
+
+
+def set_paused(telegram_id: int, paused: bool) -> PauseResult | None:
+    """Ставит или снимает паузу. None — юзера нет в базе (не нажимал /start).
+
+    Доступ и срок подписки пауза не трогает: оплаченное время идёт.
+    """
+    now = _utcnow()
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            return None
+        if paused:
+            if user.paused_at is not None:
+                return PauseResult(changed=False, paused_at=user.paused_at)
+            user.paused_at = now
+            log_event(session, user.id, EVENT_PAUSED)
+            session.commit()
+            return PauseResult(changed=True, paused_at=now)
+        if user.paused_at is None:
+            return PauseResult(changed=False)
+        started = user.paused_at
+        user.paused_at = None
+        hours = (now - _as_aware(started)).total_seconds() / 3600
+        log_event(session, user.id, EVENT_RESUMED, {"paused_hours": round(hours, 1)})
+        session.commit()
+        return PauseResult(changed=True, paused_at=started)
+
+
+def _as_aware(value: datetime) -> datetime:
+    """SQLite в тестах отдаёт naive-время; Postgres — с зоной."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def mark_user_blocked(telegram_id: int) -> None:

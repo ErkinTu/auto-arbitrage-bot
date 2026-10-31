@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import html
+from datetime import timezone
+from zoneinfo import ZoneInfo
 
 from app.bot.digest import OTHER_BRANDS_LABEL
 from app.bot.matching import PendingNotification, is_foreign
@@ -41,6 +43,7 @@ HELP_TEXT = (
     "/blacklist — что не показывать\n"
     "/invite — пригласить друзей и получить дни бесплатно\n"
     "/status — мой доступ\n"
+    "/pause — поставить уведомления на паузу, /play — включить снова\n"
     "/cancel — отменить текущее действие\n\n"
     "Полезно знать\n"
     "• В фильтре любой шаг можно пропустить — тогда ограничения по нему не будет.\n"
@@ -122,6 +125,57 @@ SUBSCRIPTION_MEMBER_TEXT = (
 def _d(value) -> str:
     """Дата для человека: 17.09.2026."""
     return value.strftime("%d.%m.%Y") if value is not None else "—"
+
+
+def _local_dt(value) -> str:
+    """Дата и время по часовому поясу бота: «31.10 14:05» (паузу ставят ночью тоже)."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(ZoneInfo(get_settings().scheduler_timezone)).strftime("%d.%m %H:%M")
+
+
+# --- Пауза (/pause, /play) ----------------------------------------------------
+# Решения владельца 31.10.2026: пауза — до /play, без сроков; раз в день в обед
+# напоминание; доступ на паузе идёт (заморозки срока нет — иначе пауза стала бы
+# обходом оплаты). Что пропущено, не копится: после /play — только свежее окна.
+
+
+def _lookback_hours() -> int:
+    return max(1, round(get_settings().bot_new_lookback_minutes / 60))
+
+
+def pause_on_text() -> str:
+    return (
+        "⏸ Пауза включена. Новые объявления не присылаю, фильтры сохранены.\n\n"
+        "• Срок доступа на паузе идёт как обычно — пауза его не продлевает.\n"
+        f"• После /play пришлю только свежее — за последние ~{_lookback_hours()} ч, "
+        "а не всё, что вышло за паузу.\n"
+        "• Раз в день напомню, что вы на паузе.\n\n"
+        "Включить снова: /play"
+    )
+
+
+def pause_already_text(paused_at) -> str:
+    return f"⏸ Уведомления и так на паузе с {_local_dt(paused_at)}. Включить: /play"
+
+
+def play_on_text() -> str:
+    return (
+        "▶️ Уведомления снова включены. Пришлю подходящие объявления по вашим "
+        f"фильтрам — начиная с вышедших за последние ~{_lookback_hours()} ч."
+    )
+
+
+def play_already_text() -> str:
+    return "▶️ Уведомления и так включены. Поставить на паузу: /pause"
+
+
+def pause_reminder_text(paused_at) -> str:
+    return (
+        f"⏸ Напоминаю: уведомления на паузе с {_local_dt(paused_at)} — новые "
+        "объявления я не присылаю, а срок доступа идёт.\n"
+        "Включить — кнопкой ниже или командой /play."
+    )
 
 
 def _speed_label(delayed: bool) -> str:
@@ -568,6 +622,7 @@ def status_text(
     trial_expires_at=None,
     schedule: tuple[ScheduleEntry, ...] | list[ScheduleEntry] = (),
     tier: str | None = None,
+    paused_at=None,
 ) -> str:
     """Мой доступ. Подписчику показываем РАСПИСАНИЕ, а не только дату.
 
@@ -575,7 +630,34 @@ def status_text(
     скорости и есть то, за что он доплатил. `tier` — фолбэк для доступа без
     блоков (бонусные дни на базе, где бэкфилл не проходил): скорость назвать
     надо всё равно, иначе строка просто исчезает и выглядит как «неизвестно».
+
+    `paused_at` — пауза (/pause): строка о ней идёт ПЕРВОЙ, это и есть ответ на
+    «почему тихо».
     """
+    text = _access_status_text(
+        access_status=access_status,
+        expires_at=expires_at,
+        active=active,
+        trial_active=trial_active,
+        trial_expires_at=trial_expires_at,
+        schedule=schedule,
+        tier=tier,
+    )
+    if paused_at is not None:
+        return f"⏸ Уведомления на паузе с {_local_dt(paused_at)}. Включить: /play\n\n{text}"
+    return text
+
+
+def _access_status_text(
+    *,
+    access_status: str,
+    expires_at,
+    active: bool,
+    trial_active: bool,
+    trial_expires_at,
+    schedule,
+    tier: str | None,
+) -> str:
     if access_status == "member":
         return "✅ У вас доступ участника закрытой группы — подписка не требуется."
     if active and expires_at is not None:

@@ -7,6 +7,29 @@
 
 ---
 
+## 2026-10-31 — пауза бота: /pause и /play
+
+План — `docs/planning/PUSH_PIPELINE_PLAN.md § Пауза`, ветка `feature/pause`
+(от `feature/push-waves`).
+
+- `bot_users.paused_at` (NULL = не на паузе) — отдельно от `is_active` («чат
+  жив»): иначе пауза и блокировка бота неразличимы. Миграция — два `ALTER … ADD
+  COLUMN IF NOT EXISTS` (`paused_at`, `pause_reminded_on`).
+- На паузе НЕ уходят: пуши (`matching.py`), напоминания и итоги триала
+  (`engagement.py`), разовые рассылки (`campaigns.py`). Уходят: напоминание о
+  продлении, пейвол триала и **ежедневное «вы на паузе»** с кнопкой «▶️ Включить»
+  (`worker.send_pause_reminders`, не раньше `BOT_PAUSE_REMINDER_HOUR=13`, не в
+  день постановки, только с доступом; одно в день по `pause_reminded_on`).
+- Превью фильтра и `/best` на паузе работают — это ответ на действие человека.
+- Пропущенное не копится: на паузе в `sent_notifications` ничего не пишется, после
+  `/play` придёт только то, что ещё в окне `BOT_NEW_LOOKBACK_MINUTES`.
+- Доступ на паузе идёт (заморозки нет — иначе пауза стала бы обходом оплаты).
+- Журнал: `paused`, `resumed` (`paused_hours`), `pause_reminder`. `/status`
+  первой строкой показывает паузу. Команды — в меню, `/help`, входные в
+  `AccessMiddleware` (и callback `play:`).
+
+---
+
 ## 2026-10-31 — пуши волнами по источникам, пауза ленты lalafo 3 с
 
 План — `docs/planning/PUSH_PIPELINE_PLAN.md` (п. 1–2), ветка `feature/push-waves`.

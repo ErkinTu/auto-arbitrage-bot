@@ -29,10 +29,11 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.bot.keyboards import base_filter_kb, trial_kb
+from app.bot.keyboards import base_filter_kb, play_kb, trial_kb
 from app.bot.messages import (
     nudge_filter_text,
     nudge_trial_text,
+    pause_reminder_text,
     renewal_reminder_text,
     trial_paywall_text,
     trial_summary_market_text,
@@ -50,7 +51,7 @@ from app.services.engagement import (
     trial_stats,
     trial_summary_candidates,
 )
-from app.services.events import EVENT_TRIAL_EXPIRED, log_event
+from app.services.events import EVENT_PAUSE_REMINDER, EVENT_TRIAL_EXPIRED, log_event
 from app.services.telegram import SendOutcome, send_message
 from app.services.access_schedule import tail_tier
 from app.services.plans import TIER_FULL
@@ -467,6 +468,51 @@ def send_trial_summaries() -> int:
     return sent
 
 
+def send_pause_reminders() -> int:
+    """Раз в день, начиная с обеда: «вы на паузе — включить?» (решение 31.10.2026).
+
+    Каждый день, пока человек сам не нажмёт /play: автоснятия паузы нет, а без
+    напоминания поставивший паузу «на вечер» молча теряет продукт. Не в день
+    постановки (напоминать через час после /pause — назойливо) и не тем, у кого
+    доступа нет (на паузе или нет — уведомлений им и так не будет).
+
+    Каждый цикл worker-а, а не «раз в сутки»: идемпотентность — по
+    `pause_reminded_on` (локальная дата), рестарт второго сообщения не даст.
+    """
+    settings = get_settings()
+    local = local_now(settings.scheduler_timezone)
+    if local.hour < settings.bot_pause_reminder_hour or not _within_bot_window():
+        return 0
+    today = local.date()
+    today_start_utc = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc
+    )
+    markup = play_kb().model_dump(exclude_none=True)
+    sent = 0
+    with SessionLocal() as session:
+        users = session.scalars(
+            select(BotUser).where(
+                BotUser.is_active.is_(True),
+                BotUser.paused_at.is_not(None),
+                BotUser.paused_at < today_start_utc,
+                BotUser.access_status != "revoked",
+                (BotUser.pause_reminded_on.is_(None)) | (BotUser.pause_reminded_on < today),
+            )
+        ).all()
+        for user in users:
+            outcome = send_message(
+                user.telegram_id, pause_reminder_text(user.paused_at), reply_markup=markup
+            )
+            if outcome is SendOutcome.FAILED:
+                continue  # 429/сеть — попробуем следующим циклом
+            user.pause_reminded_on = today
+            sent += _record_touch(session, user, EVENT_PAUSE_REMINDER, outcome)
+        session.commit()
+    if sent:
+        logger.info("pause reminders sent: %s", sent)
+    return sent
+
+
 def expire_stale_payments() -> int:
     """Гасит незавершённые платежи: pending старше PAYMENT_PENDING_TTL_HOURS.
 
@@ -547,6 +593,10 @@ def main() -> None:
             send_nudges()
         except Exception:
             logger.exception("nudges failed")
+        try:
+            send_pause_reminders()
+        except Exception:
+            logger.exception("pause reminders failed")
         try:
             expire_stale_payments()
         except Exception:

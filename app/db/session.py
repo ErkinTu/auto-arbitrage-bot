@@ -81,6 +81,9 @@ def _upgrade_postgres_schema() -> None:
         # безопасный старт, а права выдаются вручную (`docs/admin/ADMIN.md`). Таблицу
         # admin_login_tokens create_all создаёт сам.
         "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_superuser BOOLEAN NOT NULL DEFAULT FALSE",
+        # Пауза бота (/pause, /play): nullable, правка метаданных без перезаписи.
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS paused_at TIMESTAMPTZ",
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS pause_reminded_on DATE",
         # Тарифная сетка (4 плана): payments.plan_code — колонка на существующей
         # таблице, поэтому ALTER обязателен. Таблицу access_blocks (вместе с её
         # partial unique index по payment_id) создаёт create_all.

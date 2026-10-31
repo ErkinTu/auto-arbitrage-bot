@@ -583,6 +583,8 @@ def match_new_listings(
         .where(
             UserFilter.enabled.is_(True),
             BotUser.is_active.is_(True),
+            # Пауза (/pause) — не «заблокировал бота»: отдельная колонка.
+            BotUser.paused_at.is_(None),
             # Получатели: суперюзеры-члены группы (access_status='member', как
             # раньше — при выключенном гейте по группе все тоже 'member') ИЛИ
             # платные подписчики с ещё не истёкшей подпиской ИЛИ юзеры на

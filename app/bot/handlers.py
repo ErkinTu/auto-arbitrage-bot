@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot import db
 from app.bot.keyboards import (
+    PlayCB,
     BlockCB,
     BlockDeleteCB,
     BestCB,
@@ -59,6 +60,10 @@ from app.bot.keyboards import (
     yes_no_kb,
 )
 from app.bot.messages import (
+    pause_already_text,
+    pause_on_text,
+    play_already_text,
+    play_on_text,
     BLOCK_LIST_EMPTY_TEXT,
     DIGEST_EMPTY_TEXT,
     DIGEST_EXPIRED_TEXT,
@@ -417,7 +422,46 @@ def _status_text(info) -> str:
         trial_expires_at=info.trial_expires_at,
         schedule=info.schedule,
         tier=info.tier,
+        paused_at=info.paused_at,
     )
+
+
+NOT_STARTED_TEXT = "Сначала отправьте /start."
+
+
+@router.message(Command("pause"))
+async def cmd_pause(message: Message) -> None:
+    """Пауза пушей до /play (решение владельца 31.10.2026: без сроков)."""
+    result = await asyncio.to_thread(db.set_paused, message.from_user.id, True)
+    if result is None:
+        await message.answer(NOT_STARTED_TEXT)
+    elif result.changed:
+        await message.answer(pause_on_text())
+    else:
+        await message.answer(pause_already_text(result.paused_at))
+
+
+async def _resume(telegram_id: int) -> str:
+    result = await asyncio.to_thread(db.set_paused, telegram_id, False)
+    if result is None:
+        return NOT_STARTED_TEXT
+    return play_on_text() if result.changed else play_already_text()
+
+
+@router.message(Command("play"))
+async def cmd_play(message: Message) -> None:
+    await message.answer(await _resume(message.from_user.id))
+
+
+@router.callback_query(PlayCB.filter(F.action == "resume"))
+async def cb_play(callback: CallbackQuery) -> None:
+    """Кнопка под напоминанием о паузе. Кнопку снимаем: второе нажатие не нужно."""
+    text = await _resume(callback.from_user.id)
+    await callback.answer()
+    if callback.message is not None:
+        with suppress(TelegramAPIError):
+            await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(text)
 
 
 @router.message(Command("cancel"))
