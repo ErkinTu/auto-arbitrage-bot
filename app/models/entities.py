@@ -160,7 +160,9 @@ class Listing(Base, TimestampMixin):
     # Вся галерея (JSON-список ссылок, главное первым) — для кнопки «📷 Все фото».
     # NULL = ещё не видели (объявления до 31.10.2026): у lalafo кнопка дотянет
     # карточку и допишет сюда, у mashina — заполнится при следующей встрече.
-    image_urls: Mapped[list[str] | None] = mapped_column(JSON)
+    # none_as_null: иначе None пишется JSON-литералом `null`, и `IS NULL` в SQL
+    # его не видит.
+    image_urls: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True))
     customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
     seller_type: Mapped[str | None] = mapped_column(String(30))
     is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

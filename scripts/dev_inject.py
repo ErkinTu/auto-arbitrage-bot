@@ -55,6 +55,7 @@ COPIED = (
     "body_type", "engine_volume", "fuel_type", "gearbox", "drive_type",
     "steering_wheel", "city", "customs_status", "seller_type", "current_price_amount",
     "current_price_currency", "current_price_kgs", "current_price_usd", "image_url",
+    "image_urls",
 )
 
 

@@ -218,7 +218,7 @@ def _patch_parser(monkeypatch, fake: _FakeLalafo) -> None:
 def test_fetch_gallery_reads_lalafo_card(monkeypatch) -> None:
     fake = _FakeLalafo(detail={"id": 101, "images": [LALAFO_OTHER, LALAFO_MAIN]})
     _patch_parser(monkeypatch, fake)
-    assert photos.fetch_gallery("lalafo.kg", "101")[0] == LALAFO_MAIN["original_url"]
+    assert photos.fetch_gallery("lalafo.kg", "101", URL)[0] == LALAFO_MAIN["original_url"]
     assert fake.closed
 
 
@@ -226,11 +226,62 @@ def test_fetch_gallery_reads_lalafo_card(monkeypatch) -> None:
 def test_fetch_gallery_maps_dead_card_to_gone(monkeypatch, status: int) -> None:
     _patch_parser(monkeypatch, _FakeLalafo(status=status))
     with pytest.raises(photos.ListingGone):
-        photos.fetch_gallery("lalafo.kg", "101")
+        photos.fetch_gallery("lalafo.kg", "101", URL)
 
 
-def test_fetch_gallery_does_nothing_for_mashina() -> None:
-    assert photos.fetch_gallery("mashina.kg", "1") == []
+def _mashina_page(images: list[dict]) -> str:
+    """Как на живой странице 01.11.2026: массив внутри JS-строки данных Next.js."""
+    import json
+
+    escaped = json.dumps({"images": images}, separators=(",", ":")).replace('"', '\\"')
+    return f'<script>self.__next_f.push([1,"{{\\"ad\\":{escaped}}}"])</script>'
+
+
+def test_mashina_gallery_is_parsed_from_the_listing_page() -> None:
+    html = _mashina_page(MASHINA_IMAGES)
+    assert photos.mashina_gallery_from_page(html) == [i["medium"] for i in MASHINA_IMAGES]
+    assert photos.mashina_gallery_from_page("<html>нет галереи</html>") == []
+    assert photos.mashina_gallery_from_page('\\"images\\":[{broken') == []
+
+
+class _FakeResponse:
+    def __init__(self, url: str, status: int = 200, text: str = "") -> None:
+        self.url = url
+        self.status_code = status
+        self.text = text
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+
+def _patch_mashina_http(monkeypatch, response: _FakeResponse) -> None:
+    class _Client:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url):
+            return response
+
+    monkeypatch.setattr(photos.httpx, "Client", _Client)
+
+
+def test_fetch_gallery_reads_mashina_page(monkeypatch) -> None:
+    page = "https://mashina.kg/details/toyota-camry-1"
+    _patch_mashina_http(monkeypatch, _FakeResponse(page, text=_mashina_page(MASHINA_IMAGES)))
+    assert len(photos.fetch_gallery("mashina.kg", "1", page)) == len(MASHINA_IMAGES)
+
+
+def test_removed_mashina_ad_redirects_home_and_counts_as_gone(monkeypatch) -> None:
+    _patch_mashina_http(monkeypatch, _FakeResponse("https://mashina.kg/", text="<html/>"))
+    with pytest.raises(photos.ListingGone):
+        photos.fetch_gallery("mashina.kg", "1", "https://mashina.kg/details/gone-1")
 
 
 # --- хендлер ---------------------------------------------------------------------
@@ -272,7 +323,7 @@ def _press(monkeypatch, gallery, fetched=None, gone=False):
     monkeypatch.setattr(handlers.db, "listing_gallery", lambda listing_id: gallery)
     monkeypatch.setattr(handlers.db, "save_gallery", lambda listing_id, urls: saved.append(urls))
 
-    def fake_fetch(source_name, external_id):
+    def fake_fetch(source_name, external_id, url):
         fetch_calls.append(external_id)
         if gone:
             raise photos.ListingGone
@@ -308,9 +359,21 @@ def test_handler_reports_removed_listing(monkeypatch) -> None:
     assert message.albums == [] and saved == []
 
 
-def test_handler_mashina_without_gallery_points_to_site(monkeypatch) -> None:
+def test_handler_fetches_missing_mashina_gallery_from_the_page(monkeypatch) -> None:
+    """Регрессия 01.11.2026: у старых mashina кнопка отвечала «других фото нет»,
+    хотя на сайте их 12 — запасного пути для mashina не было."""
+    fetched = ["https://s3.mashina.kg/a.webp", "https://s3.mashina.kg/b.webp"]
+    message, _, saved, fetch_calls = _press(
+        monkeypatch, _gallery([], source_name="mashina.kg"), fetched=fetched
+    )
+    assert fetch_calls == ["101"]
+    assert saved == [fetched]
+    assert message.albums == [fetched]
+
+
+def test_handler_without_any_photos_points_to_site(monkeypatch) -> None:
     message, _, _, fetch_calls = _press(monkeypatch, _gallery([], source_name="mashina.kg"))
-    assert fetch_calls == []
+    assert fetch_calls == ["101"]  # попытались, но фото нет
     text, markup = message.answers[0]
     assert text == handlers.PHOTOS_MISSING_TEXT
     assert markup.inline_keyboard[0][0].url == URL

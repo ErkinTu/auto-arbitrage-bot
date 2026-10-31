@@ -725,7 +725,7 @@ async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
     if not urls and photos.can_fetch(gallery.source_name):
         try:
             urls = await asyncio.to_thread(
-                photos.fetch_gallery, gallery.source_name, gallery.external_id
+                photos.fetch_gallery, gallery.source_name, gallery.external_id, gallery.url
             )
         except photos.ListingGone:
             await query.message.answer(PHOTOS_GONE_TEXT)
