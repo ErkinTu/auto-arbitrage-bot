@@ -96,6 +96,7 @@ def sessions(monkeypatch):
     monkeypatch.setattr(botdb, "SessionLocal", factory)
     monkeypatch.setattr(worker, "SessionLocal", factory)
     monkeypatch.setattr(showcase, "_cache", (0.0, []))
+    monkeypatch.setattr(showcase, "_cache_ready", False)
     return factory
 
 
@@ -143,6 +144,7 @@ def _listing(
         analytics_eligible=True,
         source_created_at=_now() - timedelta(hours=published_hours_ago),
         payload_hash="x" * 8,
+        image_url=f"https://s3.mashina.kg/images/2026-11-01/{external_id}/a_medium.webp",
     )
     session.add(listing)
     session.flush()
@@ -306,6 +308,63 @@ def test_showcase_sorted_and_drops_implausible_or_stale(sessions) -> None:
     page, next_offset = showcase.page_for_chat(items, chat_id=5, offset=0, page=1)
     assert page[0].chat_id == 5 and next_offset == 1
     assert showcase.page_for_chat(items, chat_id=5, offset=1, page=1)[1] is None
+
+
+def test_showcase_drops_placeholder_old_cars_and_duplicates(sessions) -> None:
+    """Проверка владельца 01.11.2026: «без фото, устаревшие, повторы»."""
+    with sessions() as s:
+        ids = _catalog(s)
+        _stat(s, ids["Toyota"])
+        _listing(s, ids["Toyota"], external_id="30", price="7000")
+        twin = _listing(s, ids["Toyota"], external_id="31", price="7000")  # та же машина
+        twin.city = "Бишкек"
+        stub = _listing(s, ids["Toyota"], external_id="32", price="6500")
+        stub.image_url = "https://s3.mashina.kg/assets/preview.png"  # заглушка mashina
+        no_photo = _listing(s, ids["Toyota"], external_id="33", price="6600")
+        no_photo.image_url = None
+        s.commit()
+        items = showcase.compute_showcase(s, min_samples=2)
+    assert [item.title for item in items] == ["car 30"]
+
+
+def test_showcase_drops_too_old_cars(sessions) -> None:
+    with sessions() as s:
+        ids = _catalog(s)
+        _stat(s, ids["Toyota"], year=1995)
+        _listing(s, ids["Toyota"], external_id="40", price="7000", year=1995)
+        s.commit()
+        assert showcase.compute_showcase(s, min_samples=2, max_age_years=20) == []
+        assert len(showcase.compute_showcase(s, min_samples=2, max_age_years=0)) == 1
+
+
+def test_showcase_drops_republished_old_listing(sessions) -> None:
+    """lalafo при переподаче ставит новую дату создания, номер — старый."""
+    with sessions() as s:
+        ids = _catalog(s)
+        _stat(s, ids["Toyota"])
+        known = _listing(s, ids["Toyota"], external_id="117000000", price="20000")
+        known.first_seen_at = _now() - timedelta(days=2)  # самый новый номер сутки назад
+        _listing(s, ids["Toyota"], external_id="113638420", price="7000")  # переподано
+        _listing(s, ids["Toyota"], external_id="117780000", price="7100")  # новое
+        s.commit()
+        items = showcase.compute_showcase(s, min_samples=2)
+    assert [item.title for item in items] == ["car 117780000"]
+
+
+def test_verified_drops_gone_and_remembers_verdict() -> None:
+    showcase._verdicts.clear()
+    items = [SimpleNamespace(listing_id=n) for n in (1, 2, 3)]
+    calls: list[int] = []
+
+    def verify(item):
+        calls.append(item.listing_id)
+        return {1: True, 2: False, 3: None}[item.listing_id]
+
+    assert [i.listing_id for i in showcase.verified(items, verify, size=12)] == [1, 3]
+    assert [i.listing_id for i in showcase.verified(items, None, size=12)] == [1, 3]  # кэш
+    showcase.verified(items, verify, size=12)
+    assert calls == [1, 2, 3, 3]  # живое и снятое не перепроверяем, «не знаем» — да
+    assert [i.listing_id for i in showcase.verified(items, None, size=1)] == [1]
 
 
 # --------------------------------------------------------------------------

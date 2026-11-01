@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.core.logging_setup import setup_logging
 from app.db.session import SessionLocal, init_db
 from app.models import Brand, NormalizationIssue, Source, SyncTarget
 from app.services.catalog_service import (
@@ -410,6 +410,26 @@ def command_lalafo_maintenance(_: argparse.Namespace) -> None:
     run_lalafo_maintenance()
 
 
+def command_fuel_backfill(args: argparse.Namespace) -> None:
+    """Группа топлива для старых объявлений (план 01.11.2026, п. Е) — один раз
+    после выката. lalafo — из `fuel_type` (секунды), mashina — полная разметка
+    через API (~550 запросов, ~20 мин; то же делает worker еженощно).
+    Запускать синхронно с `</dev/null`, не фоном поверх ssh."""
+    from app.services.fuel_labeling import backfill_lalafo_fuel_groups
+    from app.services.sources import LALAFO, MASHINA
+    from app.worker import run_mashina_fuel_labeling
+
+    if args.source in (None, LALAFO):
+        with SessionLocal() as session:
+            source = get_or_create_source(session, LALAFO, source_base_url(LALAFO))
+            session.commit()
+            counts = backfill_lalafo_fuel_groups(session, source.id)
+        print(f"lalafo: обновлено по группам {counts}")
+    if args.source in (None, MASHINA):
+        run_mashina_fuel_labeling()
+        print("mashina: разметка завершена (итог — в логе)")
+
+
 def command_preset_volume(args: argparse.Namespace) -> None:
     """Объём «ниже рынка» в сутки по КР при разных порогах и по пресетам.
 
@@ -621,6 +641,13 @@ def parser() -> argparse.ArgumentParser:
     )
     maintenance.set_defaults(func=command_lalafo_maintenance)
 
+    fuel = sub.add_parser(
+        "fuel-backfill",
+        help="Fill listings.fuel_group: lalafo from fuel_type, mashina via API fuel lists",
+    )
+    fuel.add_argument("--source", choices=list(SOURCE_NAMES), default=None)
+    fuel.set_defaults(func=command_fuel_backfill)
+
     volume = sub.add_parser(
         "preset-volume",
         help="Below-market listings/day across KG at 5..25%% and per filter preset (read-only)",
@@ -660,7 +687,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    setup_logging("%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parser().parse_args()
     args.func(args)
 

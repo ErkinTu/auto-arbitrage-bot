@@ -3,17 +3,12 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.bot.db import BrandDTO, FilterDTO, ModelDTO
+from app.bot.db import FilterDTO
 from app.services.filter_presets import BASE_PRESET_CODE, presets
 from app.services.plans import PLANS
-from app.services.regions import ALL_CARS_CODE, ALL_CARS_LABEL, REGION_CHOICES
-
-# Telegram ограничивает inline-клавиатуру ~100 кнопками.
-MAX_MODEL_BUTTONS = 96
-
 
 def pay_kb(url: str, label: str) -> InlineKeyboardMarkup:
     """Одна кнопка-ссылка на страницу оплаты Finik (QR / банковское приложение)."""
@@ -120,6 +115,9 @@ def share_kb(link: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+# Кнопки прежнего пошагового визарда (до 01.11.2026). Клавиатур с ними бот
+# больше не строит, но старые сообщения в чатах могут их прислать — классы
+# нужны хендлеру устаревших кнопок (`wizard_stale_button`).
 class BrandCB(CallbackData, prefix="brand"):
     brand_id: int
 
@@ -148,56 +146,6 @@ class PercentCB(CallbackData, prefix="pct"):
 
 class RegionCB(CallbackData, prefix="region"):
     code: str  # код региона из regions.REGION_CHOICES или ALL_CARS_CODE («Все авто»)
-
-
-def brands_kb(brands: list[BrandDTO]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🌐 Все марки", callback_data=BrandCB(brand_id=0))
-    for brand in brands:
-        builder.button(text=brand.name, callback_data=BrandCB(brand_id=brand.id))
-    builder.adjust(2)
-    return builder.as_markup()
-
-
-def models_kb(models: list[ModelDTO]) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔓 Любая модель", callback_data=ModelCB(model_id=0))
-    for model in models[:MAX_MODEL_BUTTONS]:
-        builder.button(text=model.name, callback_data=ModelCB(model_id=model.id))
-    builder.adjust(2)
-    return builder.as_markup()
-
-
-def skip_kb(step: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="⏭ Пропустить", callback_data=SkipCB(step=step))
-    return builder.as_markup()
-
-
-def yes_no_kb(step: str, yes: str = "✅ Да", no: str = "❌ Нет") -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text=yes, callback_data=BoolCB(step=step, value=True))
-    builder.button(text=no, callback_data=BoolCB(step=step, value=False))
-    builder.adjust(2)
-    return builder.as_markup()
-
-
-def percent_kb(step: str, values: tuple[int, ...] = (5, 10, 15, 20)) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for value in values:
-        builder.button(text=f"{value}%", callback_data=PercentCB(step=step, value=value))
-    builder.adjust(4)
-    return builder.as_markup()
-
-
-def region_kb() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"🌐 {ALL_CARS_LABEL}", callback_data=RegionCB(code=ALL_CARS_CODE))
-    for code, label in REGION_CHOICES:
-        builder.button(text=label, callback_data=RegionCB(code=code))
-    # «Все авто» и «Местный рынок» — отдельными строками, остальные регионы по два.
-    builder.adjust(1, 1, 2)
-    return builder.as_markup()
 
 
 class BlockMenuCB(CallbackData, prefix="blkm"):
@@ -307,25 +255,42 @@ def with_rows(markup: InlineKeyboardMarkup | None, rows: list) -> InlineKeyboard
     return InlineKeyboardMarkup(inline_keyboard=combined) if combined else None
 
 
-def card_kb(listing_id: int, url: str) -> InlineKeyboardMarkup:
-    """Под карточкой: «Не то» и ссылка на объявление.
+class PhotosCB(CallbackData, prefix="ph"):
+    """«📷 Все фото» под карточкой (план 31.10.2026, п. 2.4)."""
+
+    listing_id: int
+
+
+def card_kb(listing_id: int, url: str, *, photos: bool = False) -> InlineKeyboardMarkup:
+    """Под карточкой: «Не то», «Все фото» (у карточек с фото) и ссылка.
 
     Двухшаговое меню «что именно не показывать» живёт в /blacklist: под
     карточкой нужен один тап, а не выбор из трёх.
     """
     builder = InlineKeyboardBuilder()
     builder.button(text="🚫 Не то", callback_data=HideCB(listing_id=listing_id))
+    if photos:
+        builder.button(text="📷 Все фото", callback_data=PhotosCB(listing_id=listing_id))
     builder.button(text="Открыть ↗", url=url)
     return builder.as_markup()
 
 
-def hidden_kb(label: str, block_id: int, listing_id: int, url: str | None) -> InlineKeyboardMarkup:
-    """Карточка после «Не то»: что скрыто и кнопка вернуть. Ссылка остаётся."""
+def has_photos_button(markup: InlineKeyboardMarkup | None) -> bool:
+    return bool(rows_with(markup, PhotosCB.__prefix__))
+
+
+def hidden_kb(
+    label: str, block_id: int, listing_id: int, url: str | None, *, photos: bool = False
+) -> InlineKeyboardMarkup:
+    """Карточка после «Не то»: что скрыто и кнопка вернуть. Ссылка и «Все фото»
+    остаются — на «Вернуть» card_kb их восстановит по этой клавиатуре."""
     builder = InlineKeyboardBuilder()
     builder.button(
         text=f"↩️ Вернуть {label}",
         callback_data=UnhideCB(block_id=block_id, listing_id=listing_id),
     )
+    if photos:
+        builder.button(text="📷 Все фото", callback_data=PhotosCB(listing_id=listing_id))
     if url:
         builder.button(text="Открыть ↗", url=url)
     return builder.as_markup()
@@ -377,12 +342,30 @@ def blocks_kb(blocks: list) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+class FilterEditCB(CallbackData, prefix="fedit"):
+    filter_id: int
+
+
+class FilterAddCB(CallbackData, prefix="fadd"):
+    """«➕ Добавить фильтр» под списком — тот же экран, что /add_filter."""
+
+
 def filters_kb(filters: list[FilterDTO]) -> InlineKeyboardMarkup:
+    """«Мои фильтры»: на каждый фильтр — «✏️ Изменить N» и «🗑 Удалить N» в ряд,
+    последней строкой — «➕ Добавить фильтр» (план 01.11.2026, п. Б)."""
     builder = InlineKeyboardBuilder()
     for index, item in enumerate(filters, start=1):
-        builder.button(
-            text=f"🗑 Удалить фильтр {index}",
-            callback_data=FilterDeleteCB(filter_id=item.id),
-        )
-    builder.adjust(1)
+        builder.button(text=f"✏️ Изменить {index}", callback_data=FilterEditCB(filter_id=item.id))
+        builder.button(text=f"🗑 Удалить {index}", callback_data=FilterDeleteCB(filter_id=item.id))
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="➕ Добавить фильтр", callback_data=FilterAddCB().pack()))
+    return builder.as_markup()
+
+
+def filter_pick_kb(filters: list[FilterDTO]) -> InlineKeyboardMarkup:
+    """/edit_filter: какой фильтр открыть в панели."""
+    builder = InlineKeyboardBuilder()
+    for index, item in enumerate(filters, start=1):
+        builder.button(text=f"✏️ Фильтр {index}", callback_data=FilterEditCB(filter_id=item.id))
+    builder.adjust(3)
     return builder.as_markup()

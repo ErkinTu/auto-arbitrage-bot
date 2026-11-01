@@ -114,9 +114,19 @@ def _upgrade_postgres_schema() -> None:
         # (safe_payload её отбрасывает), поэтому бэкфилла нет — колонку заполняют
         # парсеры при следующей встрече объявления.
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS image_url TEXT",
+        # Галерея для «📷 Все фото» (31.10.2026): nullable, без бэкфилла.
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS image_urls JSON",
         # Дайджест: номер пачки у строк, ушедших списком (кнопка «Показать с фото»).
         "ALTER TABLE sent_notifications ADD COLUMN IF NOT EXISTS batch_id INTEGER",
         "CREATE INDEX IF NOT EXISTS ix_sent_notifications_user_batch ON sent_notifications (user_id, batch_id)",
+        # Фильтр по топливу (план 01.11.2026, п. Е): группа объявления и выбор
+        # в фильтре. Nullable; бэкфилл — `cli.py fuel-backfill` (lalafo из
+        # fuel_type, mashina — разметкой через API).
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS fuel_group VARCHAR(16)",
+        "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS fuel_groups VARCHAR(64)",
+        # Телефон продавца для «WhatsApp» под альбомом (01.11.2026); nullable,
+        # без бэкфилла — lalafo заполнит лента, mashina — нажатия.
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_phone VARCHAR(20)",
     )
     for statement in statements:
         _apply(statement)

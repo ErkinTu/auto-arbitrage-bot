@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 from app.bot.digest import OTHER_BRANDS_LABEL
 from app.bot.matching import PendingNotification, is_foreign
 from app.core.config import get_settings
+from app.services.fuel import fuel_groups_label
+from app.services.phones import display_phone
 from app.services.access_schedule import ScheduleEntry
 from app.services.filter_presets import brand_group_label
 from app.services.plans import PLANS, TIER_DELAYED, Plan
@@ -38,7 +40,8 @@ HELP_TEXT = (
     "и присылаю сюда те, что вам подходят.\n\n"
     "Команды\n"
     "/add_filter — создать фильтр (готовый или свой)\n"
-    "/filters — мои фильтры и удаление\n"
+    "/filters — мои фильтры: изменить или удалить\n"
+    "/edit_filter — изменить фильтр\n"
     "/best — лучшие предложения прямо сейчас\n"
     "/blacklist — что не показывать\n"
     "/invite — пригласить друзей и получить дни бесплатно\n"
@@ -335,6 +338,13 @@ def base_filter_set_text(summary: str) -> str:
 PRESETS_PROMPT_TEXT = (
     "Выберите готовый фильтр — или настройте свой по марке, году, пробегу и цене:"
 )
+
+
+def filter_updated_text(summary: str) -> str:
+    return (
+        f"✅ Фильтр изменён:\n{summary}\n\n"
+        "Новые объявления буду подбирать уже по нему. Все фильтры: /filters"
+    )
 
 
 def filter_created_text(summary: str) -> str:
@@ -725,6 +735,47 @@ def card_title(p: PendingNotification) -> str:
     return f"{name} · {p.year}" if p.year is not None else name
 
 
+def photos_limit_text(limit: int, wait_minutes: int) -> str:
+    """Лимит альбомов «Все фото» исчерпан (п. Г плана 01.11.2026)."""
+    albums = _plural(limit, "альбом", "альбома", "альбомов")
+    minutes = _plural(wait_minutes, "минуту", "минуты", "минут")
+    return (
+        f"За час можно открыть {limit} {albums} с фото — лимит исчерпан. "
+        f"Следующий — через {wait_minutes} {minutes}. "
+        "Пока все фото — на сайте объявления."
+    )
+
+
+def _listing_line(listing) -> str:
+    """«Toyota Camry · 2018 · $15 000» — без HTML-экранирования."""
+    text = card_title(listing)
+    if listing.price_usd is not None:
+        text += f" · ${_fmt_int(round(listing.price_usd))}"
+    return text
+
+
+def photos_contact_text(listing, *, phone: str | None = None) -> str:
+    """Сообщение под альбомом «Все фото»: «Toyota Camry · 2018 · $15 000».
+
+    С номером — вторая строка «📞 номер» под спойлером (для звонка; номер
+    кликабелен у клиента), а переписка — кнопкой «Написать в WhatsApp» (п. Ж
+    плана 01.11.2026). Имя продавца и название организации не показываем. Без
+    номера — только первая строка, а «Связаться на сайте» — кнопкой.
+    `listing` — что угодно с полями `card_title` и `price_usd` (`db.Gallery`).
+    """
+    text = html.escape(_listing_line(listing))
+    if phone:
+        text += f"\n📞 <tg-spoiler>{display_phone(phone)}</tg-spoiler>"
+    return text
+
+
+def whatsapp_greeting(listing) -> str:
+    """Готовый первый текст в WhatsApp: продавец сразу видит, о какой машине речь."""
+    source = getattr(listing, "source_name", None)
+    where = f" на {source}" if source else ""
+    return f"Здравствуйте! Пишу по объявлению {_listing_line(listing)}{where}. Ещё продаётся?"
+
+
 def _round_hundred(value: float) -> int:
     return int(round(value / 100.0)) * 100
 
@@ -772,7 +823,11 @@ def format_notification(p: PendingNotification) -> str:
     if is_foreign(p.city):
         lines.append("🌍 <b>Внимание: авто находится за рубежом</b>")
 
-    lines.append(f'<a href="{p.url}">Открыть на {html.escape(p.source_name)}</a>')
+    # Ссылки «Открыть на …» в тексте нет (01.11.2026): она дублировала кнопку
+    # «Открыть ↗» под карточкой. Кнопку оставили — по ней «Не то»/«Вернуть»
+    # восстанавливают клавиатуру, и в неё удобнее попасть пальцем. Источник —
+    # последней строкой, простым текстом (решение владельца 01.11.2026).
+    lines.append(html.escape(p.source_name))
     return "\n".join(lines)
 
 
@@ -933,6 +988,7 @@ def format_filter_line(
     region: str | None = None,
     brand_group: str | None = None,
     max_age_years: int | None = None,
+    fuel_groups: str | None = None,
 ) -> str:
     if brand_name is not None:
         parts = [f"{brand_name} {model_name}" if model_name else f"{brand_name} (все модели)"]
@@ -944,6 +1000,8 @@ def format_filter_line(
         parts.append(f"{year_from or '…'}–{year_to or '…'} г.")
     if max_age_years is not None:
         parts.append(f"не старше {max_age_years} лет")
+    if fuel_groups_label(fuel_groups):
+        parts.append(fuel_groups_label(fuel_groups).lower())
     if mileage_max_km is not None:
         parts.append(f"до {_fmt_int(mileage_max_km)} км")
     if price_max_usd is not None:

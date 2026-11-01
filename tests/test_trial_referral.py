@@ -51,6 +51,7 @@ def _settings(**overrides) -> SimpleNamespace:
         subscription_enabled=True,
         subscription_testing=False,
         bot_max_below_market_percent=50.0,
+        bot_showcase_max_age_years=20,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -557,6 +558,7 @@ def demo_db(sessions, monkeypatch):
     import app.bot.showcase as showcase
 
     monkeypatch.setattr(showcase, "_cache", (0.0, []))
+    monkeypatch.setattr(showcase, "_cache_ready", False)
     return sessions
 
 
@@ -590,6 +592,7 @@ def test_demo_listing_is_a_real_below_market_car(demo_db) -> None:
                     analytics_eligible=True,
                     source_created_at=_now(),
                     payload_hash="x" * 8,
+                    image_url="https://s3.mashina.kg/images/2026-11-01/1/a_medium.webp",
                 ),
                 DailyMarketStat(
                     stat_date=date.today(),

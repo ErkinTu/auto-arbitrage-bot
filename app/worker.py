@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.core.logging_setup import setup_logging
 from app.db.session import SessionLocal
 from app.bot.keyboards import base_filter_kb, play_kb, trial_kb
 from app.bot.messages import (
@@ -58,6 +59,7 @@ from app.services.plans import TIER_FULL
 from app.services.trial import paywall_candidates
 from app.parsers.mashina import MashinaParser
 from app.services.lookup import ensure_brand_targets, get_or_create_source
+from app.services.fuel_labeling import label_mashina_fuel
 from app.services.schedule import local_now, last_slot_start, split_brands_for_weekend
 from app.services.sources import LALAFO, build_parser, source_base_url
 from app.services.stats import rebuild_daily_market_stats
@@ -69,7 +71,7 @@ from app.services.sync import (
     validate_stale_lalafo_listings,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+setup_logging("%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 SATURDAY, SUNDAY = 5, 6
@@ -176,6 +178,48 @@ def rebuild_stats_if_due(last_rebuild_at: datetime | None) -> datetime | None:
         session.commit()
     logger.info("daily market stats rebuilt: %s rows (slot %s)", rows, slot_start.isoformat())
     return now
+
+
+def mashina_fuel_labeling_if_due(last_run_date: date | None) -> date | None:
+    """Раз в локальные сутки, ночью: полная разметка топлива mashina.
+
+    Только между `full_scan_hour` и началом окна бота: прогон ~20 минут, и
+    рестарт worker-а днём не должен на столько задерживать напоминания.
+    Возвращает дату запуска (или None — не время / уже было сегодня).
+    """
+    settings = get_settings()
+    if not settings.mashina_fuel_full_enabled:
+        return None
+    now = local_now(settings.scheduler_timezone)
+    today = now.date()
+    if last_run_date == today:
+        return None
+    if not settings.full_scan_hour <= now.hour < settings.bot_active_start_hour:
+        return None
+    run_mashina_fuel_labeling()
+    return today
+
+
+def run_mashina_fuel_labeling() -> None:
+    """Полная разметка топлива mashina (worker раз в сутки, `cli.py fuel-backfill`)."""
+    settings = get_settings()
+    with SessionLocal() as session:
+        source = get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
+        session.commit()
+        parser = MashinaParser()
+        try:
+            report = label_mashina_fuel(session, parser, source.id, max_pages=None)
+        finally:
+            parser.close()
+    level = logging.WARNING if report.failed else logging.INFO
+    logger.log(
+        level,
+        "mashina fuel labeling (full): requests=%s seen=%s updated=%s failed=%s",
+        report.requests,
+        report.seen,
+        report.updated,
+        report.failed,
+    )
 
 
 def lalafo_maintenance_if_due(last_run_date: date | None) -> date | None:
@@ -554,6 +598,7 @@ def main() -> None:
     )
     last_rebuild_at: datetime | None = None
     last_maintenance_date: date | None = None
+    last_fuel_label_date: date | None = None
     last_reminder_date: date | None = None
     while True:
         try:
@@ -562,6 +607,12 @@ def main() -> None:
                 logger.info("weekend full scans completed: %s", scans)
         except Exception:
             logger.exception("weekend full scan cycle failed")
+        try:
+            fuel_date = mashina_fuel_labeling_if_due(last_fuel_label_date)
+            if fuel_date is not None:
+                last_fuel_label_date = fuel_date
+        except Exception:
+            logger.exception("mashina fuel labeling failed")
         try:
             # До пересчета статистики, чтобы дневные агрегаты не включали зависшие.
             ran_date = lalafo_maintenance_if_due(last_maintenance_date)

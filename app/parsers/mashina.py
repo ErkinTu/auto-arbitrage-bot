@@ -57,7 +57,36 @@ class MashinaParser(ParserAdapter):
         }
         if created_period:
             params["created_period"] = created_period
+        return self._get_page(params, page)
 
+    def fetch_fuel_page(
+        self,
+        fuel_value: str,
+        *,
+        page: int,
+        size: int = 100,
+        sort_by: str = "created_at",
+        order: str = "desc",
+    ) -> FetchPage:
+        """Страница объявлений ОДНОГО типа топлива, без фильтра по марке.
+
+        В ленте mashina атрибута топлива нет, но API по нему фильтрует
+        (`fuel_type: {"in": "гибрид"}`, значения — `services/fuel.py::
+        MASHINA_FUEL_VALUES`). Так размечаем `listings.fuel_group`
+        (`services/fuel_labeling.py`). `size` у API — не больше 100 (200 → 422).
+        """
+        attributes = {"fuel_type": {"in": fuel_value}}
+        params: dict[str, Any] = {
+            "category_id": 1,
+            "groups": json.dumps([{"attributes": attributes}], ensure_ascii=False, separators=(",", ":")),
+            "sort_by": sort_by,
+            "order": order,
+            "page": page,
+            "size": size,
+        }
+        return self._get_page(params, page)
+
+    def _get_page(self, params: dict[str, Any], page: int) -> FetchPage:
         response: httpx.Response | None = None
         attempts = max(1, self.settings.request_retry_attempts)
         for attempt in range(1, attempts + 1):

@@ -335,6 +335,7 @@ def get_user(session: Session, user_id: int) -> dict:
                     region=item.region,
                     brand_group=item.brand_group,
                     max_age_years=item.max_age_years,
+                    fuel_groups=item.fuel_groups,
                 ),
             }
             for item in filters

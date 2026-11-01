@@ -157,6 +157,22 @@ class Listing(Base, TimestampMixin):
     # Главное фото (ссылка на CDN источника) — для карточки с фото в боте.
     # Отдельной колонкой, потому что raw_payloads галерею не хранят.
     image_url: Mapped[str | None] = mapped_column(Text)
+    # Вся галерея (JSON-список ссылок, главное первым) — для кнопки «📷 Все фото».
+    # NULL = ещё не видели (объявления до 31.10.2026): у lalafo кнопка дотянет
+    # карточку и допишет сюда, у mashina — заполнится при следующей встрече.
+    # none_as_null: иначе None пишется JSON-литералом `null`, и `IS NULL` в SQL
+    # его не видит.
+    image_urls: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True))
+    # Каноническая группа топлива (services/fuel.py): petrol | petrol_gas |
+    # hybrid | electric | diesel, NULL = неизвестно. Вне `payload_hash` — у
+    # mashina её ставит отдельная разметка (services/fuel_labeling.py), а не
+    # нормализатор: в ленте mashina топлива нет.
+    fuel_group: Mapped[str | None] = mapped_column(String(16))
+    # Телефон продавца, только цифры («996500328668») — для «WhatsApp» под
+    # альбомом «Все фото». Персональные данные: не в raw_payloads/логах/админке/
+    # API, стирается при деактивации (services/phones.py). lalafo — из ленты
+    # (`mobile`, если не `hide_phone`), mashina — со страницы по нажатию.
+    seller_phone: Mapped[str | None] = mapped_column(String(20))
     customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
     seller_type: Mapped[str | None] = mapped_column(String(30))
     is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -479,6 +495,9 @@ class UserFilter(Base, TimestampMixin):
     # «Не старше N лет» — год считается при матчинге, поэтому не устаревает,
     # в отличие от year_from. NULL = без ограничения.
     max_age_years: Mapped[int | None] = mapped_column(Integer)
+    # Типы топлива через запятую в каноническом порядке (services/fuel.py::
+    # pack_fuel_groups), напр. 'hybrid,electric'. NULL = все типы.
+    fuel_groups: Mapped[str | None] = mapped_column(String(64))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 

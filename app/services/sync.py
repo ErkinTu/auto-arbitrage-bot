@@ -22,8 +22,10 @@ from app.models import (
 )
 from app.parsers.base import ParserAdapter
 from app.services.catalog_service import resolve_normalized_listing
-from app.services.images import extract_image_url
+from app.services.images import extract_image_url, extract_image_urls, is_placeholder_image
 from app.services.normalizer import NormalizedListing
+from app.services.fuel import fuel_group_from_lalafo
+from app.services.phones import normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,20 @@ def _set_current_fields(listing: Listing, item: NormalizedListing) -> None:
     # известное: пропажа ссылки из ответа — не пропажа фото у объявления.
     if item.image_url:
         listing.image_url = item.image_url
+    elif is_placeholder_image(listing.image_url):
+        listing.image_url = None  # записанная раньше заглушка mashina (services/images.py)
+    if item.image_urls:
+        listing.image_urls = list(item.image_urls)
+    # Нет группы в ответе — не затираем: у mashina её ставит разметка через API
+    # (services/fuel_labeling.py), а нормализатор mashina топлива не знает.
+    if item.fuel_group:
+        listing.fuel_group = item.fuel_group
+    # Телефон: нет в ответе — не затираем (у mashina его в ленте нет вовсе);
+    # продавец скрыл номер — стираем (services/phones.py).
+    if item.seller_phone_hidden:
+        listing.seller_phone = None
+    elif item.seller_phone:
+        listing.seller_phone = item.seller_phone
     listing.customs_status = item.customs_status
     listing.seller_type = item.seller_type
     listing.is_verified_seller = item.is_verified_seller
@@ -108,6 +124,10 @@ def _append_status_history(
     new_status: str | None,
     details: dict | None = None,
 ) -> None:
+    if event_type == "deactivated":
+        # Единая точка всех деактиваций (full-scan, валидатор, «зависшие»,
+        # «Все фото»): номер снятого объявления не храним (services/phones.py).
+        listing.seller_phone = None
     session.add(
         ListingStatusHistory(
             listing_id=listing.id,
@@ -411,7 +431,7 @@ def validate_stale_lalafo_listings(
             else:
                 report.checked += 1
                 consecutive_failures = 0
-                _deactivate_by_card(session, listing, reason="card_gone")
+                deactivate_by_card(session, listing, reason="card_gone")
                 report.deactivated += 1
         except Exception:
             logger.exception("lalafo validator: detail fetch failed for id=%s", listing.external_id)
@@ -422,7 +442,7 @@ def validate_stale_lalafo_listings(
             consecutive_failures = 0
             status_id = detail.get("status_id")
             if status_id in LALAFO_DEAD_STATUS_IDS:
-                _deactivate_by_card(session, listing, reason="card_inactive", status_id=status_id)
+                deactivate_by_card(session, listing, reason="card_inactive", status_id=status_id)
                 report.deactivated += 1
             else:
                 if status_id is not None and status_id != LALAFO_STATUS_ACTIVE:
@@ -434,6 +454,8 @@ def validate_stale_lalafo_listings(
                 listing.last_seen_at = utcnow()
                 if listing.image_url is None:
                     listing.image_url = extract_image_url(detail)
+                if listing.image_urls is None:
+                    listing.image_urls = extract_image_urls(detail) or None
 
         if commit_every and index % commit_every == 0:
             session.commit()
@@ -450,7 +472,7 @@ def validate_stale_lalafo_listings(
     return report
 
 
-def _deactivate_by_card(
+def deactivate_by_card(
     session: Session, listing: Listing, *, reason: str, status_id: int | None = None
 ) -> None:
     old_status = listing.status
@@ -494,6 +516,17 @@ def _enrich_or_skip(
             # до появления колонки image_url, получают его без лишних запросов.
             if listing.image_url is None:
                 listing.image_url = extract_image_url(raw)
+            if listing.image_urls is None:
+                listing.image_urls = extract_image_urls(raw) or None
+            # Группа топлива — из уже сохранённого `fuel_type` (объявления,
+            # записанные до колонки fuel_group, получают её без бэкфилла).
+            if listing.fuel_group is None:
+                listing.fuel_group = fuel_group_from_lalafo(listing.fuel_type)
+            # Телефон — тоже из ленты (`mobile`): скрыл продавец — стираем.
+            if raw.get("hide_phone"):
+                listing.seller_phone = None
+            elif listing.seller_phone is None:
+                listing.seller_phone = normalize_phone(raw.get("mobile"))
             return None
     try:
         return parser.fetch_details(raw["id"])

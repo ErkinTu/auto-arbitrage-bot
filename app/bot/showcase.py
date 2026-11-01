@@ -7,14 +7,27 @@
 
 Чистая sync-логика без aiogram: зовут бот (`/best`, витрина в `/start` — через
 asyncio.to_thread) и worker (итоги триала с пустым результатом).
+
+Правки по проверке владельца 01.11.2026 («снятые, устаревшие, без фото, повторы»):
+- **свежесть — по номеру объявления**, а не только по дате источника: lalafo
+  (и иногда mashina) при переподаче оставляет старый номер, а дату создания
+  ставит заново — почти половина «свежих за сутки» у lalafo была старыми
+  объявлениями. Свежее = номер больше самого нового, что мы знали сутки назад
+  (`fresh_id_floors`, калибруется по нашей же базе);
+- машины не старше `BOT_SHOWCASE_MAX_AGE_YEARS` (у старых средняя шумная);
+- только с настоящим фото (заглушка mashina — не фото, `images.real_photo`);
+- повторы (та же машина на mashina и lalafo) склеиваются;
+- при прогреве из цикла бота позиции проверяются на источнике (`verify`),
+  снятое сразу деактивируется и выпадает; вердикт живёт `VERIFY_TTL_SECONDS`.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -30,6 +43,7 @@ from app.bot.matching import (
     market_estimate,
 )
 from app.models import Brand, Listing, Source
+from app.services.images import real_photo
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.regions import is_foreign
 from app.services.stats import mileage_bucket
@@ -41,9 +55,23 @@ SHOWCASE_TTL_SECONDS = 900
 SHOWCASE_SIZE = 12  # 4 страницы по 3 — дальше листать витрину уже никто не станет
 SHOWCASE_PAGE = 3
 SHOWCASE_WINDOW_HOURS = 24
+# Пул кандидатов на проверку у источника: часть топа может оказаться снятой.
+SHOWCASE_POOL = SHOWCASE_SIZE * 2
+# Сколько последних «впервые увиденных до отсечки» объявлений смотреть, чтобы
+# найти самый новый номер на тот момент (среди них есть и переподанные старые —
+# берём максимум).
+ID_FLOOR_SAMPLE = 500
+# Вердикт проверки у источника: снятое не перепроверяем, живое — раз в 30 минут.
+VERIFY_TTL_SECONDS = 1800
+_verdicts: dict[int, tuple[float, bool]] = {}
 
-_lock = threading.Lock()
+_lock = threading.Lock()  # только чтение/запись `_cache` — короткий
+# Пересчёт — по одному за раз, но БЕЗ `_lock`: прогрев с проверкой у источников
+# идёт ~13 с, и раньше всё это время каждый `/best` ждал замка, держа поток из
+# общего пула (п. К3 плана 01.11.2026).
+_compute_lock = threading.Lock()
 _cache: tuple[float, list[PendingNotification]] = (0.0, [])
+_cache_ready = False  # витрина хоть раз посчитана (пустая — тоже результат)
 
 # Что недавно показано чату (витрина в /start, «Лучшее сейчас», превью фильтра).
 # Без этого человек, нажавший /start → триал → «Лучшее сейчас», получал одни и те
@@ -122,6 +150,46 @@ def market_estimates(
     return result
 
 
+def fresh_id_floors(session: Session, cutoff: datetime) -> dict[int, int]:
+    """Источник → самый новый номер объявления, известный нам к `cutoff`.
+
+    Номера у mashina и lalafo растут со временем, поэтому всё, что новее этого
+    номера, действительно создано после отсечки, а переподанное старое — нет,
+    какую бы дату создания ни показывал источник. Нет истории — нет порога.
+    """
+    floors: dict[int, int] = {}
+    for source_id in session.scalars(select(Source.id)).all():
+        ids = session.scalars(
+            select(Listing.external_id)
+            .where(Listing.source_id == source_id, Listing.first_seen_at < cutoff)
+            .order_by(Listing.first_seen_at.desc())
+            .limit(ID_FLOOR_SAMPLE)
+        ).all()
+        numbers = [int(value) for value in ids if value and value.isdigit()]
+        if numbers:
+            floors[source_id] = max(numbers)
+    return floors
+
+
+def is_fresh_id(listing: Listing, floors: dict[int, int]) -> bool:
+    floor = floors.get(listing.source_id)
+    external_id = listing.external_id or ""
+    if floor is None or not external_id.isdigit():
+        return True  # порога нет — судить не по чему
+    return int(external_id) > floor
+
+
+def _duplicate_key(listing: Listing) -> tuple:
+    """Та же машина на двух источниках (или переподана продавцом)."""
+    return (
+        listing.brand_id,
+        listing.car_model_id,
+        listing.year,
+        listing.mileage_km,
+        round(float(listing.current_price_usd)),
+    )
+
+
 def compute_showcase(
     session: Session,
     *,
@@ -129,29 +197,39 @@ def compute_showcase(
     max_below_percent: float = 60.0,
     window_hours: int = SHOWCASE_WINDOW_HOURS,
     size: int = SHOWCASE_SIZE,
+    max_age_years: int = 20,
 ) -> list[PendingNotification]:
-    """Лучшие по % ниже рынка среди опубликованных за `window_hours` (chat_id=0).
+    """Лучшие по % ниже рынка среди созданных за `window_hours` (chat_id=0).
 
     `market_average` — та же, что у рассылки: витрина показывает ровно то, что
     человек получал бы по фильтру «ниже рынка». Только полные данные
-    (`is_complete_listing`) и правдоподобная скидка: витрина — лицо бота.
+    (`is_complete_listing`), правдоподобная скидка, настоящее фото, свежий
+    номер и не слишком старая машина: витрина — лицо бота.
     """
-    published_after = utcnow() - timedelta(hours=window_hours)
-    candidates = session.scalars(
-        select(Listing).where(
-            Listing.is_active.is_(True),
-            Listing.analytics_eligible.is_(True),
-            Listing.current_price_usd.is_not(None),
-            Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
-            Listing.source_created_at >= published_after,
-            Listing.brand_id.is_not(None),
-            Listing.car_model_id.is_not(None),
-            Listing.year.is_not(None),
-            Listing.mileage_km.is_not(None),
-        )
-    ).all()
     now = utcnow()
-    candidates = [listing for listing in candidates if is_complete_listing(listing, now)]
+    published_after = now - timedelta(hours=window_hours)
+    query = select(Listing).where(
+        Listing.is_active.is_(True),
+        Listing.analytics_eligible.is_(True),
+        Listing.current_price_usd.is_not(None),
+        Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
+        Listing.source_created_at >= published_after,
+        Listing.brand_id.is_not(None),
+        Listing.car_model_id.is_not(None),
+        Listing.year.is_not(None),
+        Listing.mileage_km.is_not(None),
+        Listing.image_url.is_not(None),
+    )
+    if max_age_years > 0:
+        query = query.where(Listing.year >= now.year - max_age_years)
+    floors = fresh_id_floors(session, published_after)
+    candidates = [
+        listing
+        for listing in session.scalars(query).all()
+        if is_complete_listing(listing, now)
+        and real_photo(listing.image_url)
+        and is_fresh_id(listing, floors)
+    ]
     source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
     brand_names = {row.id: row.name for row in session.execute(select(Brand.id, Brand.name))}
     model_names = load_model_names(session)
@@ -166,6 +244,13 @@ def compute_showcase(
             scored.append((percent, listing, estimate))
 
     scored.sort(key=lambda item: item[0], reverse=True)
+    unique: list[tuple[float, Listing, MarketEstimate]] = []
+    keys: set[tuple] = set()
+    for item in scored:
+        key = _duplicate_key(item[1])
+        if key not in keys:
+            keys.add(key)
+            unique.append(item)
     return [
         build_pending(
             listing,
@@ -177,8 +262,42 @@ def compute_showcase(
             brand_names=brand_names,
             model_names=model_names,
         )
-        for percent, listing, estimate in scored[:size]
+        for percent, listing, estimate in unique[:size]
     ]
+
+
+def verified(
+    items: list[PendingNotification],
+    verify: Callable[[PendingNotification], bool | None] | None,
+    size: int,
+) -> list[PendingNotification]:
+    """Первые `size` позиций, не снятых на источнике.
+
+    `verify` — живая проверка (True — живо, False — снято, None — не удалось
+    проверить: оставляем). Без `verify` (холодный `/best`) — только уже
+    известные вердикты: проверять 12 объявлений, пока человек ждёт, долго.
+    """
+    now = time.monotonic()
+    result: list[PendingNotification] = []
+    for item in items:
+        if len(result) >= size:
+            break
+        cached = _verdicts.get(item.listing_id)
+        if cached is not None and (not cached[1] or now - cached[0] < VERIFY_TTL_SECONDS):
+            alive = cached[1]  # снятое не оживает — без срока
+        elif verify is None:
+            alive = True
+        else:
+            verdict = verify(item)
+            if verdict is not None:
+                _verdicts[item.listing_id] = (now, verdict)
+            alive = verdict is not False
+        if alive:
+            result.append(item)
+    if len(_verdicts) > 5000:  # память процесса не растёт вечно
+        for key in [k for k, (at, _) in _verdicts.items() if now - at > VERIFY_TTL_SECONDS]:
+            _verdicts.pop(key, None)
+    return result
 
 
 def get_showcase(
@@ -186,25 +305,49 @@ def get_showcase(
     *,
     min_samples: int,
     max_below_percent: float = 60.0,
+    max_age_years: int = 20,
     refresh: bool = False,
+    verify: Callable[[PendingNotification], bool | None] | None = None,
 ) -> list[PendingNotification]:
     """Витрина из кэша процесса; пересчёт не чаще раза в SHOWCASE_TTL_SECONDS.
 
-    `refresh=True` — пересчитать сейчас (прогрев из цикла бота после парса).
-    Под замком: два одновременных `/best` после истечения кэша не должны
-    считать одно и то же дважды — второй дождётся первого и возьмёт готовое.
+    `refresh=True` — пересчитать сейчас (прогрев из цикла бота после парса);
+    там же `verify` — проверка позиций у источника. Пересчёт идёт по одному:
+    истёкший кэш человек получает прошлым, пока кто-то другой (прогрев или
+    первый пришедший) считает новый, — никто не ждёт чужого пересчёта. Ждут
+    только самые первые запросы после старта, когда прошлого ещё нет.
     """
-    global _cache
+    global _cache, _cache_ready
     with _lock:
         cached_until, cached = _cache
-        if not refresh and time.monotonic() < cached_until:
-            return cached
+        ready = _cache_ready
+    if not refresh and time.monotonic() < cached_until:
+        return verified(cached, None, SHOWCASE_SIZE)  # снятое за это время — вон
+    if not refresh and ready:
+        if not _compute_lock.acquire(blocking=False):
+            return verified(cached, None, SHOWCASE_SIZE)
+    else:
+        _compute_lock.acquire()
+    try:
+        if not refresh:
+            with _lock:  # пока ждали — мог досчитать другой
+                if time.monotonic() < _cache[0]:
+                    return verified(_cache[1], None, SHOWCASE_SIZE)
         with session_factory() as session:
-            fresh = compute_showcase(
-                session, min_samples=min_samples, max_below_percent=max_below_percent
+            pool = compute_showcase(
+                session,
+                min_samples=min_samples,
+                max_below_percent=max_below_percent,
+                max_age_years=max_age_years,
+                size=SHOWCASE_POOL,
             )
-        _cache = (time.monotonic() + SHOWCASE_TTL_SECONDS, fresh)
+        fresh = verified(pool, verify, SHOWCASE_SIZE)
+        with _lock:
+            _cache = (time.monotonic() + SHOWCASE_TTL_SECONDS, fresh)
+            _cache_ready = True
         return fresh
+    finally:
+        _compute_lock.release()
 
 
 def page_for_chat(

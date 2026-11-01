@@ -25,6 +25,8 @@ from app.models import (
     Source,
     UserFilter,
 )
+from app.services.images import real_photo
+from app.services.fuel import unpack_fuel_groups
 from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
 from app.services.filter_presets import load_brand_groups, min_year_for_age
@@ -65,6 +67,8 @@ class PendingNotification:
     image_url: str | None = None
     # id марки — для кнопки дайджеста (callback_data короткий: id, а не имя).
     brand_id: int | None = None
+    # Сколько фото в галерее; None — галерея ещё не известна (старое объявление).
+    photo_count: int | None = None
 
 
 # База «цены рынка». Рассылка, витрина и превью — на средней; медиана только
@@ -224,8 +228,9 @@ def build_pending(
         brand_name=brand_names.get(listing.brand_id) if listing.brand_id else None,
         model_name=model_names.get(listing.car_model_id) if listing.car_model_id else None,
         market_samples=estimate.samples if estimate is not None else None,
-        image_url=listing.image_url,
+        image_url=real_photo(listing.image_url),  # заглушка mashina — не фото
         brand_id=listing.brand_id,
+        photo_count=len(listing.image_urls) if listing.image_urls else None,
     )
 
 
@@ -320,6 +325,12 @@ def filter_matches(
     # пуш по неполной геолокации хуже тишины — как и с прочими границами фильтра).
     if user_filter.region is not None and not region_matches(listing.city, user_filter.region):
         return False
+    # Топливо (план 01.11.2026, п. Е): неизвестная группа под выбранные типы не
+    # попадает — как и прочие границы фильтра.
+    if user_filter.fuel_groups and listing.fuel_group not in unpack_fuel_groups(
+        user_filter.fuel_groups
+    ):
+        return False
     return True
 
 
@@ -340,6 +351,7 @@ def _match_signature(user_filter: UserFilter) -> tuple:
         user_filter.region,
         user_filter.brand_group,
         user_filter.max_age_years,
+        user_filter.fuel_groups,
     )
 
 

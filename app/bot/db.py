@@ -20,7 +20,13 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.bot.digest import DIGEST_PAGE, DIGEST_TTL_MINUTES, batch_age_minutes, order_digest
-from app.bot.matching import PendingNotification, build_pending, load_model_names, market_estimate
+from app.bot.matching import (
+    PendingNotification,
+    build_pending,
+    build_source_url,
+    load_model_names,
+    market_estimate,
+)
 from app.bot.matching import preview_for_filter as _preview_for_filter
 from app.bot.showcase import get_showcase as _get_showcase
 from app.bot.showcase import first_unseen_offset
@@ -151,6 +157,10 @@ class FilterDTO:
     region: str | None
     brand_group: str | None = None
     max_age_years: int | None = None
+    fuel_groups: str | None = None  # 'hybrid,electric'; None = все типы
+    # id — для панели редактирования (предзаполнить выбор марки/модели).
+    brand_id: int | None = None
+    car_model_id: int | None = None
 
 
 def _utcnow() -> datetime:
@@ -381,6 +391,27 @@ def create_pending_payment(telegram_id: int, *, plan_code: str) -> PaymentDraft:
         return draft
 
 
+def payment_reusable(order_id: str, draft: PaymentDraft) -> bool:
+    """Можно ли снова отдать ссылку этого платежа вместо нового (п. К8).
+
+    Только если он всё ещё `pending` и даты подтверждения не устарели: после
+    оплаты другого заказа, бонуса или ручного продления хвост расписания
+    сдвинулся — тогда новый платёж с честными датами.
+    """
+    with SessionLocal() as session:
+        row = session.execute(
+            select(Payment.status, BotUser)
+            .join(BotUser, Payment.user_id == BotUser.id)
+            .where(Payment.order_id == order_id)
+        ).first()
+        if row is None or row[0] != "pending":
+            return False
+        tail = tail_end(row[1], _utcnow())
+        if draft.starts_now:
+            return tail <= _utcnow()
+        return draft.starts_at is not None and tail == _as_aware(draft.starts_at)
+
+
 # --------------------------------------------------------------------------
 # Онбординг, триал, рефералка
 # --------------------------------------------------------------------------
@@ -555,6 +586,7 @@ def get_showcase(
         SessionLocal,
         min_samples=settings.bot_below_avg_min_samples,
         max_below_percent=settings.bot_max_below_market_percent,
+        max_age_years=settings.bot_showcase_max_age_years,
     )
     if skip_seen:
         offset = first_unseen_offset(items, chat_id)
@@ -568,8 +600,40 @@ def refresh_showcase() -> None:
         SessionLocal,
         min_samples=settings.bot_below_avg_min_samples,
         max_below_percent=settings.bot_max_below_market_percent,
+        max_age_years=settings.bot_showcase_max_age_years,
         refresh=True,
+        verify=verify_showcase_item,
     )
+
+
+def verify_showcase_item(item: PendingNotification) -> bool | None:
+    """Живо ли объявление витрины на источнике (тот же запрос, что у «Все фото»).
+
+    Снятое — сразу в базу (`mark_listing_gone`): узнаём раньше сверки, и оно
+    уходит заодно из «ниже рынка». Сбой запроса — None: «не знаем» ≠ «снято».
+    """
+    from app.bot import photos  # без цикла импорта: photos не знает про db
+
+    with SessionLocal() as session:
+        row = session.execute(
+            select(Listing.external_id, Source.name)
+            .join(Source, Listing.source_id == Source.id)
+            .where(Listing.id == item.listing_id)
+        ).first()
+    if row is None:
+        return False
+    external_id, source_name = row
+    if not photos.can_fetch(source_name):
+        return None
+    try:
+        photos.fetch_card(source_name, external_id, item.url)
+    except photos.ListingGone as gone:
+        mark_listing_gone(item.listing_id, gone.reason, gone.status_id)
+        return False
+    except Exception:
+        logger.warning("showcase verify failed for listing %s", item.listing_id, exc_info=True)
+        return None
+    return True
 
 
 def list_brands() -> list[BrandDTO]:
@@ -607,6 +671,7 @@ def _filter_signature(user_filter: UserFilter) -> tuple:
         user_filter.region,
         user_filter.brand_group,
         user_filter.max_age_years,
+        user_filter.fuel_groups,
     )
 
 
@@ -629,6 +694,9 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
         region=user_filter.region,
         brand_group=user_filter.brand_group,
         max_age_years=user_filter.max_age_years,
+        fuel_groups=user_filter.fuel_groups,
+        brand_id=user_filter.brand_id,
+        car_model_id=user_filter.car_model_id,
     )
 
 
@@ -697,6 +765,7 @@ def create_filter(
     region: str | None = None,
     brand_group: str | None = None,
     max_age_years: int | None = None,
+    fuel_groups: str | None = None,
 ) -> FilterDTO:
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
@@ -706,28 +775,25 @@ def create_filter(
         current = _count_filters(session, user.id)
         if current >= limit:
             raise FilterLimitError(limit, current)
-        existing = session.scalars(
-            select(UserFilter).where(
-                UserFilter.user_id == user.id, UserFilter.enabled.is_(True)
-            )
-        ).all()
-        candidate = (
-            brand_id,
-            car_model_id,
-            year_from,
-            year_to,
-            mileage_max_km,
-            float(price_max_usd) if price_max_usd is not None else None,
-            below_market_only,
-            below_market_percent,
-            skip_foreign,
-            region,
-            brand_group,
-            max_age_years,
+        _check_duplicate(
+            session,
+            user.id,
+            (
+                brand_id,
+                car_model_id,
+                year_from,
+                year_to,
+                mileage_max_km,
+                float(price_max_usd) if price_max_usd is not None else None,
+                below_market_only,
+                below_market_percent,
+                skip_foreign,
+                region,
+                brand_group,
+                max_age_years,
+                fuel_groups,
+            ),
         )
-        for item in existing:
-            if _filter_signature(item) == candidate:
-                raise DuplicateFilterError(item.id)
         user_filter = UserFilter(
             user_id=user.id,
             brand_id=brand_id,
@@ -742,8 +808,109 @@ def create_filter(
             region=region,
             brand_group=brand_group,
             max_age_years=max_age_years,
+            fuel_groups=fuel_groups,
         )
         session.add(user_filter)
+        session.commit()
+        return _filter_dto(session, user_filter)
+
+
+def _check_duplicate(session, user_id: int, candidate: tuple, exclude_id: int | None = None) -> None:
+    existing = session.scalars(
+        select(UserFilter).where(UserFilter.user_id == user_id, UserFilter.enabled.is_(True))
+    ).all()
+    for item in existing:
+        if item.id != exclude_id and _filter_signature(item) == candidate:
+            raise DuplicateFilterError(item.id)
+
+
+def get_filter(telegram_id: int, filter_id: int) -> FilterDTO | None:
+    """Свой фильтр по id; None — нет такого (удалён) или чужой."""
+    with SessionLocal() as session:
+        user_filter = session.scalar(
+            select(UserFilter)
+            .join(BotUser, UserFilter.user_id == BotUser.id)
+            .where(
+                BotUser.telegram_id == telegram_id,
+                UserFilter.id == filter_id,
+                UserFilter.enabled.is_(True),
+            )
+        )
+        return _filter_dto(session, user_filter) if user_filter is not None else None
+
+
+def update_filter(
+    telegram_id: int,
+    filter_id: int,
+    *,
+    brand_id: int | None,
+    car_model_id: int | None,
+    year_from: int | None,
+    year_to: int | None,
+    mileage_max_km: int | None,
+    price_max_usd: float | None,
+    below_market_only: bool,
+    below_market_percent: int | None = None,
+    skip_foreign: bool = False,
+    region: str | None = None,
+    brand_group: str | None = None,
+    max_age_years: int | None = None,
+    fuel_groups: str | None = None,
+) -> FilterDTO:
+    """Правка готового фильтра (панель, /edit_filter) — UPDATE той же строки.
+
+    Не удалить+создать: так сохраняются `sent_notifications` (повторно то же
+    объявление не придёт) и `created_at` — точка отсчёта фильтра, иначе правка
+    фильтра обрушила бы на человека всё, что лежит в окне. Лимит фильтров тут не
+    проверяется (слот уже занят), дубль — проверяется, кроме самого фильтра.
+    LookupError — фильтра нет (удалили в другом окне) или он чужой.
+    """
+    with SessionLocal() as session:
+        user_filter = session.scalar(
+            select(UserFilter)
+            .join(BotUser, UserFilter.user_id == BotUser.id)
+            .where(
+                BotUser.telegram_id == telegram_id,
+                UserFilter.id == filter_id,
+                UserFilter.enabled.is_(True),
+            )
+        )
+        if user_filter is None:
+            raise LookupError(f"filter {filter_id} of {telegram_id} not found")
+        price = float(price_max_usd) if price_max_usd is not None else None
+        _check_duplicate(
+            session,
+            user_filter.user_id,
+            (
+                brand_id,
+                car_model_id,
+                year_from,
+                year_to,
+                mileage_max_km,
+                price,
+                below_market_only,
+                below_market_percent,
+                skip_foreign,
+                region,
+                brand_group,
+                max_age_years,
+                fuel_groups,
+            ),
+            exclude_id=user_filter.id,
+        )
+        user_filter.brand_id = brand_id
+        user_filter.car_model_id = car_model_id
+        user_filter.year_from = year_from
+        user_filter.year_to = year_to
+        user_filter.mileage_max_km = mileage_max_km
+        user_filter.price_max_usd = Decimal(str(price)) if price is not None else None
+        user_filter.below_market_only = below_market_only
+        user_filter.below_market_percent = below_market_percent
+        user_filter.skip_foreign = skip_foreign
+        user_filter.region = region
+        user_filter.brand_group = brand_group
+        user_filter.max_age_years = max_age_years
+        user_filter.fuel_groups = fuel_groups
         session.commit()
         return _filter_dto(session, user_filter)
 
@@ -1028,6 +1195,95 @@ def set_paused(telegram_id: int, paused: bool) -> PauseResult | None:
 def _as_aware(value: datetime) -> datetime:
     """SQLite в тестах отдаёт naive-время; Postgres — с зоной."""
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+@dataclass(slots=True)
+class Gallery:
+    """Что нужно кнопке «📷 Все фото»: ссылки и откуда их дотянуть, если нет."""
+
+    listing_id: int
+    urls: list[str]
+    image_url: str | None
+    source_name: str
+    external_id: str
+    url: str
+    is_active: bool
+    last_seen_at: datetime | None = None
+    # Для строки «Связаться» под альбомом — как в заголовке карточки
+    # (`messages.card_title` читает эти же поля).
+    title: str | None = None
+    brand_name: str | None = None
+    model_name: str | None = None
+    year: int | None = None
+    price_usd: float | None = None
+    seller_phone: str | None = None  # цифры; персональные данные — не логировать
+
+
+def listing_gallery(listing_id: int) -> Gallery | None:
+    with SessionLocal() as session:
+        row = session.execute(
+            select(Listing, Source.name, Brand.name, CarModel.name)
+            .join(Source, Listing.source_id == Source.id)
+            .outerjoin(Brand, Listing.brand_id == Brand.id)
+            .outerjoin(CarModel, Listing.car_model_id == CarModel.id)
+            .where(Listing.id == listing_id)
+        ).first()
+        if row is None:
+            return None
+        listing, source_name, brand_name, model_name = row
+        return Gallery(
+            listing_id=listing.id,
+            urls=list(listing.image_urls or []),
+            image_url=listing.image_url,
+            source_name=source_name,
+            external_id=listing.external_id,
+            url=build_source_url(listing),
+            is_active=listing.is_active,
+            last_seen_at=listing.last_seen_at,
+            title=listing.title,
+            brand_name=brand_name,
+            model_name=model_name,
+            year=listing.year,
+            price_usd=float(listing.current_price_usd)
+            if listing.current_price_usd is not None
+            else None,
+            seller_phone=listing.seller_phone,
+        )
+
+
+def mark_listing_gone(listing_id: int, reason: str, status_id: int | None = None) -> bool:
+    """Источник по нажатию «Все фото» сказал «снято» — база узнаёт раньше сверки.
+
+    Та же запись, что у валидатора lalafo (`is_active=false` + строка в
+    `listing_status_history` с причиной): так снятое раньше уходит из витрины и
+    «ниже рынка». Вернёт объявление в строй обычный обход, если увидит его снова.
+    False — уже неактивно или не найдено.
+    """
+    from app.services.sync import deactivate_by_card  # тяжёлый модуль — по требованию
+
+    with SessionLocal() as session:
+        listing = session.get(Listing, listing_id)
+        if listing is None or not listing.is_active:
+            return False
+        deactivate_by_card(session, listing, reason=reason, status_id=status_id)
+        session.commit()
+        return True
+
+
+def save_seller_phone(listing_id: int, phone: str | None) -> None:
+    """Номер продавца, взятый по нажатию «Все фото» (None — продавец скрыл)."""
+    with SessionLocal() as session:
+        session.execute(
+            update(Listing).where(Listing.id == listing_id).values(seller_phone=phone)
+        )
+        session.commit()
+
+
+def save_gallery(listing_id: int, urls: list[str]) -> None:
+    """Дописывает галерею, дотянутую по нажатию: следующее нажатие — бесплатное."""
+    with SessionLocal() as session:
+        session.execute(update(Listing).where(Listing.id == listing_id).values(image_urls=urls))
+        session.commit()
 
 
 def mark_user_blocked(telegram_id: int) -> None:

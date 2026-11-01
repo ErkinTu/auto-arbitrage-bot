@@ -100,10 +100,13 @@ def _card(note: PendingNotification, *, rich: bool = False, legacy: bool = False
         )
     text = format_notification(note)
     photo_url = note.image_url if rich and len(text) <= CAPTION_MAX_LENGTH else None
+    # «Все фото» — только у карточки с фото и только если фото не одно (None —
+    # галерея неизвестна, кнопка её дотянет).
+    photos = photo_url is not None and (note.photo_count is None or note.photo_count > 1)
     return OutgoingMessage(
         chat_id=note.chat_id,
         text=text,
-        reply_markup=card_kb(note.listing_id, note.url),
+        reply_markup=card_kb(note.listing_id, note.url, photos=photos),
         listing_id=note.listing_id,
         photo_url=photo_url,
     )
@@ -220,10 +223,25 @@ class BotLike(Protocol):
 def _remember_photo(url: str, sent: object) -> None:
     photos = getattr(sent, "photo", None)
     if photos:
-        _photo_ids[url] = photos[-1].file_id
-        _photo_ids.move_to_end(url)
-        while len(_photo_ids) > PHOTO_CACHE_SIZE:
-            _photo_ids.popitem(last=False)
+        remember_photo_id(url, photos[-1].file_id)
+
+
+# Кэш общий с «📷 Все фото» (handlers.photos_cb): главное фото альбома — та же
+# ссылка, что у карточки, и повторный альбом не качается с CDN заново.
+def cached_photo_id(url: str) -> str | None:
+    return _photo_ids.get(url)
+
+
+def remember_photo_id(url: str, file_id: str) -> None:
+    _photo_ids[url] = file_id
+    _photo_ids.move_to_end(url)
+    while len(_photo_ids) > PHOTO_CACHE_SIZE:
+        _photo_ids.popitem(last=False)
+
+
+def forget_photo_ids(urls: list[str]) -> None:
+    for url in urls:
+        _photo_ids.pop(url, None)
 
 
 async def _send_photo(bot: BotLike, message: OutgoingMessage) -> None:
@@ -333,6 +351,17 @@ async def send_notifications(
             try:
                 await _deliver(bot, message)
             except TelegramRetryAfter as exc:
+                if interactive:
+                    # Ответ на нажатие (п. К плана 01.11.2026): не спим и не
+                    # повторяем — при флуде одним человеком копились спящие
+                    # задачи, а рассылка всем ждала ту же квоту. Повтор — только
+                    # у рассылки.
+                    logger.warning(
+                        "rate limited on interactive send to %s, dropped (retry after %s s)",
+                        message.chat_id,
+                        exc.retry_after,
+                    )
+                    return False
                 logger.warning("rate limited, retry after %s s", exc.retry_after)
                 await asyncio.sleep(exc.retry_after)
                 await _deliver(bot, message)
