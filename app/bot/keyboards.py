@@ -267,12 +267,23 @@ def card_kb(listing_id: int, url: str, *, photos: bool = False) -> InlineKeyboar
     Двухшаговое меню «что именно не показывать» живёт в /blacklist: под
     карточкой нужен один тап, а не выбор из трёх.
     """
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🚫 Не то", callback_data=HideCB(listing_id=listing_id))
+    first = [
+        InlineKeyboardButton(text="🚫 Не то", callback_data=HideCB(listing_id=listing_id).pack()),
+        InlineKeyboardButton(text="Открыть ↗", url=url),
+    ]
+    return _card_rows(first, listing_id, photos=photos)
+
+
+def _card_rows(first: list, listing_id: int, *, photos: bool) -> InlineKeyboardMarkup:
+    """Два этажа (решение владельца 01.11.2026): сверху две короткие кнопки,
+    снизу на всю ширину «📷 Все фото» - действие внутри бота, после альбома сразу
+    контакт продавца; широкая кнопка заметнее и удобнее для пальца."""
+    rows = [first]
     if photos:
-        builder.button(text="📷 Все фото", callback_data=PhotosCB(listing_id=listing_id))
-    builder.button(text="Открыть ↗", url=url)
-    return builder.as_markup()
+        rows.append(
+            [InlineKeyboardButton(text="📷 Все фото", callback_data=PhotosCB(listing_id=listing_id).pack())]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def has_photos_button(markup: InlineKeyboardMarkup | None) -> bool:
@@ -284,16 +295,15 @@ def hidden_kb(
 ) -> InlineKeyboardMarkup:
     """Карточка после «Не то»: что скрыто и кнопка вернуть. Ссылка и «Все фото»
     остаются — на «Вернуть» card_kb их восстановит по этой клавиатуре."""
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text=f"↩️ Вернуть {label}",
-        callback_data=UnhideCB(block_id=block_id, listing_id=listing_id),
-    )
-    if photos:
-        builder.button(text="📷 Все фото", callback_data=PhotosCB(listing_id=listing_id))
+    first = [
+        InlineKeyboardButton(
+            text=f"↩️ Вернуть {label}",
+            callback_data=UnhideCB(block_id=block_id, listing_id=listing_id).pack(),
+        )
+    ]
     if url:
-        builder.button(text="Открыть ↗", url=url)
-    return builder.as_markup()
+        first.append(InlineKeyboardButton(text="Открыть ↗", url=url))
+    return _card_rows(first, listing_id, photos=photos)
 
 
 def markup_url(markup: InlineKeyboardMarkup | None) -> str | None:
