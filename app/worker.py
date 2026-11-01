@@ -200,8 +200,11 @@ def mashina_fuel_labeling_if_due(last_run_date: date | None) -> date | None:
     return today
 
 
-def run_mashina_fuel_labeling() -> None:
-    """Полная разметка топлива mashina (worker раз в сутки, `cli.py fuel-backfill`)."""
+def run_mashina_fuel_labeling():
+    """Полная разметка топлива mashina (worker раз в сутки, `cli.py fuel-backfill`).
+
+    Возвращает отчёт: CLI печатает его сам - логгер CLI строку с цифрами не выводит.
+    """
     settings = get_settings()
     with SessionLocal() as session:
         source = get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
@@ -220,6 +223,7 @@ def run_mashina_fuel_labeling() -> None:
         report.updated,
         report.failed,
     )
+    return report
 
 
 def lalafo_maintenance_if_due(last_run_date: date | None) -> date | None:

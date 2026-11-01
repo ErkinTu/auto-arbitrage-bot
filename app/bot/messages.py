@@ -39,6 +39,7 @@ HELP_TEXT = (
     "Вы создаёте фильтр - я каждые 10 минут проверяю новые объявления "
     "и присылаю сюда те, что вам подходят.\n\n"
     "Команды\n"
+    "/menu - все настройки на одном экране\n"
     "/add_filter - создать фильтр (готовый или свой)\n"
     "/filters - мои фильтры: изменить или удалить\n"
     "/edit_filter - изменить фильтр\n"
@@ -183,6 +184,23 @@ def pause_reminder_text(paused_at) -> str:
 
 def _speed_label(delayed: bool) -> str:
     return "с отставанием ~1 ч" if delayed else "полная скорость"
+
+
+def menu_access_line(info) -> str:
+    """Доступ одной строкой для главной `/menu` (`info` - `db.SubscriptionInfo` или None)."""
+    if info is None:
+        return "нет - отправьте /start"
+    if info.access_status == "member":
+        return "участник группы · полная скорость"
+    if info.active:
+        return f"подписка до {_d(info.expires_at)} · {_speed_label(info.tier == TIER_DELAYED)}"
+    if info.trial_active:
+        return f"бесплатный период до {_d(info.trial_expires_at)}"
+    return "нет - включите в «💎 Доступ»"
+
+
+def menu_paused_text(paused_at) -> str | None:
+    return _local_dt(paused_at) if paused_at is not None else None
 
 
 def plan_line(plan: Plan, *, bold: bool = True) -> str:

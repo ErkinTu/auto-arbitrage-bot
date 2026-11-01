@@ -426,8 +426,11 @@ def command_fuel_backfill(args: argparse.Namespace) -> None:
             counts = backfill_lalafo_fuel_groups(session, source.id)
         print(f"lalafo: обновлено по группам {counts}")
     if args.source in (None, MASHINA):
-        run_mashina_fuel_labeling()
-        print("mashina: разметка завершена (итог — в логе)")
+        report = run_mashina_fuel_labeling()
+        print(
+            f"mashina: запросов {report.requests}, увидено {report.seen}, "
+            f"размечено {report.updated}, сбои по типам: {report.failed or 'нет'}"
+        )
 
 
 def command_preset_volume(args: argparse.Namespace) -> None:
