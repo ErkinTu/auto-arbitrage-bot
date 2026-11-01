@@ -2,7 +2,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: car_analytics_postgres
-    restart: unless-stopped
+    restart: ${RESTART_POLICY:-unless-stopped}
     env_file: .env
     ports:
       # bind только на localhost хоста: наружу порт БД не публикуется.
@@ -39,7 +39,7 @@ services:
   api:
     build: .
     container_name: car_analytics_api
-    restart: unless-stopped
+    restart: ${RESTART_POLICY:-unless-stopped}
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -58,7 +58,7 @@ services:
   worker:
     build: .
     container_name: car_analytics_worker
-    restart: unless-stopped
+    restart: ${RESTART_POLICY:-unless-stopped}
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -72,7 +72,7 @@ services:
   bot:
     build: .
     container_name: car_analytics_bot
-    restart: unless-stopped
+    restart: ${RESTART_POLICY:-unless-stopped}
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -97,7 +97,7 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: car_analytics_caddy
-    restart: unless-stopped
+    restart: ${RESTART_POLICY:-unless-stopped}
     profiles: ["payments"]
     depends_on:
       - api
