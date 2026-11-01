@@ -65,8 +65,13 @@ ID_FLOOR_SAMPLE = 500
 VERIFY_TTL_SECONDS = 1800
 _verdicts: dict[int, tuple[float, bool]] = {}
 
-_lock = threading.Lock()
+_lock = threading.Lock()  # только чтение/запись `_cache` — короткий
+# Пересчёт — по одному за раз, но БЕЗ `_lock`: прогрев с проверкой у источников
+# идёт ~13 с, и раньше всё это время каждый `/best` ждал замка, держа поток из
+# общего пула (п. К3 плана 01.11.2026).
+_compute_lock = threading.Lock()
 _cache: tuple[float, list[PendingNotification]] = (0.0, [])
+_cache_ready = False  # витрина хоть раз посчитана (пустая — тоже результат)
 
 # Что недавно показано чату (витрина в /start, «Лучшее сейчас», превью фильтра).
 # Без этого человек, нажавший /start → триал → «Лучшее сейчас», получал одни и те
@@ -307,15 +312,27 @@ def get_showcase(
     """Витрина из кэша процесса; пересчёт не чаще раза в SHOWCASE_TTL_SECONDS.
 
     `refresh=True` — пересчитать сейчас (прогрев из цикла бота после парса);
-    там же `verify` — проверка позиций у источника. Под замком: два
-    одновременных `/best` после истечения кэша не должны считать одно и то же
-    дважды — второй дождётся первого и возьмёт готовое.
+    там же `verify` — проверка позиций у источника. Пересчёт идёт по одному:
+    истёкший кэш человек получает прошлым, пока кто-то другой (прогрев или
+    первый пришедший) считает новый, — никто не ждёт чужого пересчёта. Ждут
+    только самые первые запросы после старта, когда прошлого ещё нет.
     """
-    global _cache
+    global _cache, _cache_ready
     with _lock:
         cached_until, cached = _cache
-        if not refresh and time.monotonic() < cached_until:
-            return verified(cached, None, SHOWCASE_SIZE)  # снятое за это время — вон
+        ready = _cache_ready
+    if not refresh and time.monotonic() < cached_until:
+        return verified(cached, None, SHOWCASE_SIZE)  # снятое за это время — вон
+    if not refresh and ready:
+        if not _compute_lock.acquire(blocking=False):
+            return verified(cached, None, SHOWCASE_SIZE)
+    else:
+        _compute_lock.acquire()
+    try:
+        if not refresh:
+            with _lock:  # пока ждали — мог досчитать другой
+                if time.monotonic() < _cache[0]:
+                    return verified(_cache[1], None, SHOWCASE_SIZE)
         with session_factory() as session:
             pool = compute_showcase(
                 session,
@@ -325,8 +342,12 @@ def get_showcase(
                 size=SHOWCASE_POOL,
             )
         fresh = verified(pool, verify, SHOWCASE_SIZE)
-        _cache = (time.monotonic() + SHOWCASE_TTL_SECONDS, fresh)
+        with _lock:
+            _cache = (time.monotonic() + SHOWCASE_TTL_SECONDS, fresh)
+            _cache_ready = True
         return fresh
+    finally:
+        _compute_lock.release()
 
 
 def page_for_chat(

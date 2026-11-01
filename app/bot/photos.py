@@ -93,6 +93,75 @@ def record_album(chat_id: int, *, now: float | None = None) -> None:
             _recent_albums(stale, moment)
 
 
+def reserve_album(chat_id: int, *, limit: int, now: float | None = None) -> int:
+    """Занять место в лимите ДО отправки: 0 — занято, иначе минуты ожидания.
+
+    Раньше альбом засчитывался ПОСЛЕ отправки, и 30 одновременных нажатий все
+    видели свободное место (п. К1). Не отправили — `release_album`.
+    """
+    wait = album_wait_minutes(chat_id, limit=limit, now=now)
+    if not wait and limit > 0:
+        record_album(chat_id, now=now)
+    return wait
+
+
+def release_album(chat_id: int) -> None:
+    """Вернуть место: альбом не ушёл (снято, фото нет, Telegram отверг)."""
+    window = _albums_sent.get(chat_id)
+    if window:
+        window.pop()
+        if not window:
+            _albums_sent.pop(chat_id, None)
+
+
+# Повтор того же объявления (п. К2): альбом уже в чате — второй раз не шлём, а
+# показываем «фото выше». Окно — SHOWN_SECONDS после отправки.
+SHOWN_SECONDS = 600.0
+_shown: dict[tuple[int, int], float] = {}
+
+
+def recently_shown(chat_id: int, listing_id: int, *, now: float | None = None) -> bool:
+    moment = time.monotonic() if now is None else now
+    at = _shown.get((chat_id, listing_id))
+    return at is not None and moment - at < SHOWN_SECONDS
+
+
+def mark_shown(chat_id: int, listing_id: int, *, now: float | None = None) -> None:
+    moment = time.monotonic() if now is None else now
+    _shown[(chat_id, listing_id)] = moment
+    if len(_shown) > 5000:
+        for key in [k for k, t in _shown.items() if moment - t >= SHOWN_SECONDS]:
+            _shown.pop(key, None)
+
+
+# Вердикт живой проверки «не снято» (п. К1): раньше старое объявление
+# проверялось на источнике при КАЖДОМ нажатии — от любого человека.
+VERIFIED_SECONDS = 1800.0
+_verified: dict[int, float] = {}
+
+
+def recently_verified(listing_id: int, *, now: float | None = None) -> bool:
+    moment = time.monotonic() if now is None else now
+    at = _verified.get(listing_id)
+    return at is not None and moment - at < VERIFIED_SECONDS
+
+
+def mark_verified(listing_id: int, *, now: float | None = None) -> None:
+    moment = time.monotonic() if now is None else now
+    _verified[listing_id] = moment
+    if len(_verified) > 5000:
+        for key in [k for k, t in _verified.items() if moment - t >= VERIFIED_SECONDS]:
+            _verified.pop(key, None)
+
+
+def reset_memory() -> None:
+    """Сбросить дебаунс, лимит и кэши «Все фото» (тесты; память процесса)."""
+    _recent.clear()
+    _albums_sent.clear()
+    _shown.clear()
+    _verified.clear()
+
+
 def albums(urls: list[str]) -> list[list[str]]:
     """Режет галерею на альбомы по ALBUM_MAX.
 
@@ -196,10 +265,10 @@ class Card:
     phone_hidden: bool = False  # продавец скрыл номер (lalafo `hide_phone`)
 
 
-def _fetch_mashina_page(url: str) -> str:
+def _fetch_mashina_page(url: str, timeout: float | None = None) -> str:
     settings = get_settings()
     with httpx.Client(
-        timeout=settings.request_timeout_seconds,
+        timeout=settings.request_timeout_seconds if timeout is None else timeout,
         headers={"User-Agent": settings.user_agent},
         follow_redirects=True,
     ) as client:
@@ -211,14 +280,18 @@ def _fetch_mashina_page(url: str) -> str:
     return response.text
 
 
-def fetch_card(source_name: str, external_id: str, url: str) -> Card:
+def fetch_card(
+    source_name: str, external_id: str, url: str, *, timeout: float | None = None
+) -> Card:
     """Запасной путь: страница/карточка источника по нажатию. Синхронно (из потока).
 
     Один запрос даёт и галерею, и телефон продавца. `url` — публичная страница
-    объявления (нужна mashina). `ListingGone` — снято.
+    объявления (нужна mashina). `ListingGone` — снято. `timeout` — запрос по
+    нажатию: короче общего и без повторов (человек не ждёт); None — общие
+    настройки (прогрев витрины в фоне).
     """
     if source_name == MASHINA:
-        page = _fetch_mashina_page(url)
+        page = _fetch_mashina_page(url, timeout)
         return Card(urls=mashina_gallery_from_page(page), phone=mashina_phone_from_page(page))
     if not can_fetch(source_name):
         return Card(urls=[])
@@ -227,7 +300,9 @@ def fetch_card(source_name: str, external_id: str, url: str) -> Card:
     from app.parsers.lalafo import LalafoParser
     from app.services.sync import LALAFO_DEAD_STATUS_IDS
 
-    parser = LalafoParser()
+    parser = (
+        LalafoParser() if timeout is None else LalafoParser(timeout=timeout, retry_attempts=1)
+    )
     try:
         detail = parser.fetch_details(external_id)
     except httpx.HTTPStatusError as error:

@@ -12,9 +12,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.bot.access import AccessMiddleware
 from app.bot.commands import setup_bot_commands
+from app.bot.executors import install_default_executor
 from app.bot.handlers import router
 from app.bot.poller import polling_loop
 from app.bot.protection import ContentProtectionMiddleware
+from app.bot.throttle import ThrottlingMiddleware
 from app.bot.wizard import WizardExitMiddleware
 from app.core.config import get_settings
 from app.core.logging_setup import setup_logging
@@ -49,7 +51,17 @@ async def main() -> None:
             "content protection on; forwarding allowed for %s id(s)",
             len(settings.share_whitelist_id_set),
         )
+    # Пул потоков для запросов к базе — явно (п. К плана 01.11.2026): пул по
+    # умолчанию на 2 vCPU — 6 потоков, и медленные источники выедали его целиком.
+    install_default_executor(asyncio.get_running_loop())
     dispatcher = Dispatcher(storage=MemoryStorage())
+    # Ограничитель частоты — ПЕРВЫМ: лишний апдейт не идёт даже в базу за
+    # проверкой доступа. Один экземпляр на сообщения и кнопки — ведро общее.
+    throttle = ThrottlingMiddleware(
+        settings.bot_throttle_burst, settings.bot_throttle_rate_per_second
+    )
+    dispatcher.message.outer_middleware(throttle)
+    dispatcher.callback_query.outer_middleware(throttle)
     access = AccessMiddleware()
     dispatcher.message.outer_middleware(access)
     # После access: сбрасываем визард только у тех, кого бот вообще обслуживает.

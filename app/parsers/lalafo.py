@@ -42,15 +42,26 @@ class LalafoParser(ParserAdapter):
     _category_cache: ClassVar[dict[str, int]] = {}
     _generic_category_id: ClassVar[int | None] = None
 
-    def __init__(self, usd_rate_kgs: Decimal | None = None) -> None:
+    def __init__(
+        self,
+        usd_rate_kgs: Decimal | None = None,
+        *,
+        timeout: float | None = None,
+        retry_attempts: int | None = None,
+    ) -> None:
         # Курс НБКР для объявлений в сомах; None — конвертации не будет.
         self.usd_rate_kgs = usd_rate_kgs
         self.settings = get_settings()
+        # Запрос по нажатию человека (бот, «Все фото») — короче и без серии
+        # повторов: человек 20 с × 3 попытки не ждёт. None — общие настройки.
+        self._retry_attempts = (
+            self.settings.request_retry_attempts if retry_attempts is None else retry_attempts
+        )
         # Пауза карточек живёт на инстансе (один цикл): каждый ответ 429
         # удваивает её до конца работы парсера — вежливый бэкофф.
         self._detail_delay = self.settings.lalafo_detail_delay_seconds
         self.client = httpx.Client(
-            timeout=self.settings.request_timeout_seconds,
+            timeout=self.settings.request_timeout_seconds if timeout is None else timeout,
             headers={"User-Agent": self.settings.user_agent},
             follow_redirects=True,
             # Cloudflare lalafo режет датацентровые IP — с сервера ходим
@@ -72,7 +83,7 @@ class LalafoParser(ParserAdapter):
             "Accept": "application/json",
         }
         response: httpx.Response | None = None
-        attempts = max(1, self.settings.request_retry_attempts)
+        attempts = max(1, self._retry_attempts)
         for attempt in range(1, attempts + 1):
             try:
                 response = self.client.get(url, params=params, headers=headers)

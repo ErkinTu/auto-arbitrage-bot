@@ -96,6 +96,7 @@ def sessions(monkeypatch):
     monkeypatch.setattr(botdb, "SessionLocal", factory)
     monkeypatch.setattr(worker, "SessionLocal", factory)
     monkeypatch.setattr(showcase, "_cache", (0.0, []))
+    monkeypatch.setattr(showcase, "_cache_ready", False)
     return factory
 
 

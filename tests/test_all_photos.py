@@ -335,8 +335,7 @@ def _gallery(
 
 
 def _reset_memory() -> None:
-    photos._recent.clear()
-    photos._albums_sent.clear()
+    photos.reset_memory()
     notifier._photo_ids.clear()
 
 
@@ -355,7 +354,9 @@ def _press(
     if reset:
         _reset_memory()
     else:
-        photos._recent.clear()  # дебаунс — не предмет этих тестов
+        # Дебаунс и «фото уже выше» — не предмет этих тестов.
+        photos._recent.clear()
+        photos._shown.clear()
     saved: list[list[str]] = []
     fetch_calls: list[str] = []
     marked = [] if marked is None else marked
@@ -371,7 +372,7 @@ def _press(
         handlers.db, "save_seller_phone", lambda listing_id, value: saved_phones.append(value)
     )
 
-    def fake_fetch(source_name, external_id, url):
+    def fake_fetch(source_name, external_id, url, **kwargs):
         fetch_calls.append(external_id)
         if gone:
             raise gone if isinstance(gone, photos.ListingGone) else photos.ListingGone()

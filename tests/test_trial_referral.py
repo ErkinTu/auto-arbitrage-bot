@@ -558,6 +558,7 @@ def demo_db(sessions, monkeypatch):
     import app.bot.showcase as showcase
 
     monkeypatch.setattr(showcase, "_cache", (0.0, []))
+    monkeypatch.setattr(showcase, "_cache_ready", False)
     return sessions
 
 

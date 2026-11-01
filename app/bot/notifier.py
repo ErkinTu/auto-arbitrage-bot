@@ -351,6 +351,17 @@ async def send_notifications(
             try:
                 await _deliver(bot, message)
             except TelegramRetryAfter as exc:
+                if interactive:
+                    # Ответ на нажатие (п. К плана 01.11.2026): не спим и не
+                    # повторяем — при флуде одним человеком копились спящие
+                    # задачи, а рассылка всем ждала ту же квоту. Повтор — только
+                    # у рассылки.
+                    logger.warning(
+                        "rate limited on interactive send to %s, dropped (retry after %s s)",
+                        message.chat_id,
+                        exc.retry_after,
+                    )
+                    return False
                 logger.warning("rate limited, retry after %s s", exc.retry_after)
                 await asyncio.sleep(exc.retry_after)
                 await _deliver(bot, message)

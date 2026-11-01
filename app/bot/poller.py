@@ -31,6 +31,7 @@ from datetime import timedelta
 
 from app.bot.db import mark_user_blocked, refresh_showcase, tag_digest_rows
 from app.bot.digest import batch_id_for
+from app.bot.executors import run_background
 from app.bot.matching import PendingNotification, match_new_listings
 from app.bot.notifier import BotLike, send_notifications
 from app.core.config import get_settings
@@ -278,7 +279,7 @@ async def _run_sources(
             # «Task exception was never retrieved» без привязки к источнику.
             _log_task_error(task)
         inflight[source_name] = asyncio.create_task(
-            asyncio.to_thread(sync_source, source_name), name=f"sync:{source_name}"
+            run_background(sync_source, source_name), name=f"sync:{source_name}"
         )
         started.append(source_name)
 
@@ -366,7 +367,7 @@ async def polling_loop(bot: BotLike) -> None:
             # парса: на проде пересчёт — несколько секунд, и пусть их ждёт цикл,
             # а не новичок, нажавший /start. TTL витрины чуть длиннее цикла,
             # так что между прогревами кэш не пустеет.
-            await asyncio.to_thread(refresh_showcase)
+            await run_background(refresh_showcase)
         except Exception:
             logger.exception("showcase warm-up failed")
 

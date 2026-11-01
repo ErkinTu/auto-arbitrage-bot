@@ -14,7 +14,8 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 
-from app.bot import db, photos
+from app.bot import db, photos, throttle
+from app.bot.executors import run_click
 from app.bot import filter_panel as fp
 from app.bot.keyboards import (
     FilterAddCB,
@@ -189,6 +190,10 @@ async def _send_start_showcase(message: Message) -> bool:
     место витрины — бывший «демо-лот». Ошибка витрины /start не ломает.
     """
     settings = get_settings()
+    # /start подряд (п. К7): витрина — не чаще раза в N минут на чат. Карточки
+    # прошлого /start ещё в чате, поэтому «показано» (True), а не «примера нет».
+    if _start_showcase_rate().wait(message.chat.id):
+        return True
     try:
         page, _ = await asyncio.to_thread(db.get_showcase, message.chat.id, 0)
     except Exception:
@@ -362,7 +367,49 @@ async def cb_plan_selected(callback: CallbackQuery, callback_data: PlanCB) -> No
         )
         return
 
-    await callback.answer()
+    # Нажатия внахлёст (п. К8) — по одному: иначе оба не нашли бы готовую
+    # ссылку и завели по платежу.
+    with throttle.exclusive(("payment", callback.from_user.id)) as ok:
+        if not ok:
+            await callback.answer(throttle.BUSY_TEXT)
+            return
+        await callback.answer()
+        await _send_payment_link(callback, plan)
+
+
+# Ссылка оплаты на (человек, тариф): повторное нажатие того же тарифа отдаёт её,
+# а не заводит новый pending + запрос в Finik (п. К8: мусор в `payments`,
+# `payment_created` на каждое нажатие в воронке, нагрузка на чужой API).
+# Память процесса: после рестарта — просто новый платёж, как раньше.
+_payment_links: dict[tuple[int, str], tuple[float, db.PaymentDraft, str]] = {}
+
+
+async def _reused_payment(telegram_id: int, plan_code: str):
+    """(draft, ссылка) свежего неоплаченного платежа этого тарифа или None."""
+    reuse_seconds = get_settings().bot_payment_reuse_minutes * 60
+    cached = _payment_links.get((telegram_id, plan_code))
+    if cached is None or reuse_seconds <= 0:
+        return None
+    created, draft, url = cached
+    if time.monotonic() - created >= reuse_seconds:
+        _payment_links.pop((telegram_id, plan_code), None)
+        return None
+    if not await asyncio.to_thread(db.payment_reusable, draft.order_id, draft):
+        _payment_links.pop((telegram_id, plan_code), None)
+        return None
+    return draft, url
+
+
+async def _send_payment_link(callback: CallbackQuery, plan) -> None:
+    settings = get_settings()
+    reused = await _reused_payment(callback.from_user.id, plan.code)
+    if reused is not None:
+        draft, url = reused
+        await callback.message.answer(
+            plan_confirm_text(plan, draft),
+            reply_markup=pay_kb(url, f"💳 Оплатить {plan.price} сом"),
+        )
+        return
     try:
         draft = await asyncio.to_thread(
             db.create_pending_payment, callback.from_user.id, plan_code=plan.code
@@ -389,6 +436,15 @@ async def cb_plan_selected(callback: CallbackQuery, callback_data: PlanCB) -> No
         await callback.message.answer(subscribe_error_text())
         return
 
+    _payment_links[(callback.from_user.id, plan.code)] = (
+        time.monotonic(),
+        draft,
+        result.redirect_url,
+    )
+    if len(_payment_links) > 1000:  # память процесса не растёт вечно
+        horizon = time.monotonic() - settings.bot_payment_reuse_minutes * 60
+        for key in [k for k, (at, _, _) in _payment_links.items() if at < horizon]:
+            _payment_links.pop(key, None)
     await callback.message.answer(
         plan_confirm_text(plan, draft),
         reply_markup=pay_kb(result.redirect_url, f"💳 Оплатить {plan.price} сом"),
@@ -639,6 +695,8 @@ async def hide_cb(query: CallbackQuery, callback_data: HideCB) -> None:
     Клавиатуру карточки заменяем на «↩️ Вернуть …» + прежнюю ссылку: подпись
     к фото edit_text не меняется, а кнопки — одинаково и у фото, и у текста.
     """
+    if not await _card_tap_allowed(query, "hide", callback_data.listing_id):
+        return
     try:
         result = await asyncio.to_thread(
             db.hide_from_listing, query.from_user.id, callback_data.listing_id
@@ -671,9 +729,23 @@ async def hide_cb(query: CallbackQuery, callback_data: HideCB) -> None:
         )
 
 
+async def _card_tap_allowed(query: CallbackQuery, action: str, listing_id: int) -> bool:
+    """«Не то» ↔ «Вернуть» (п. К6): одна и та же кнопка карточки — не чаще раза
+    в HIDE_DEBOUNCE_SECONDS. Ключ — с действием: «Не то» и сразу «Вернуть»
+    (передумал) — законно; частое переключение по кругу держит общий
+    ограничитель. Лишнее нажатие — молчаливый ответ (без «часиков»)."""
+    if _hide_taps.wait((query.from_user.id, action, listing_id)):
+        with suppress(TelegramAPIError):
+            await query.answer()
+        return False
+    return True
+
+
 @router.callback_query(UnhideCB.filter())
 async def unhide_cb(query: CallbackQuery, callback_data: UnhideCB) -> None:
     """«↩️ Вернуть»: снять запрет и вернуть карточке кнопки «Не то»/«Открыть»."""
+    if not await _card_tap_allowed(query, "unhide", callback_data.listing_id):
+        return
     deleted = await asyncio.to_thread(db.delete_block, query.from_user.id, callback_data.block_id)
     await query.answer("Вернул в выдачу" if deleted else "Уже возвращено")
     url = markup_url(query.message.reply_markup)
@@ -694,6 +766,7 @@ PHOTOS_MISSING_TEXT = "Других фото у меня нет — все фо�
 PHOTOS_FAILED_TEXT = "Не удалось загрузить фото с сайта — откройте объявление."
 PHOTOS_CONTACT_BUTTON = "💬 Связаться на сайте ↗"  # если номера нет
 PHOTOS_WHATSAPP_BUTTON = "💬 Написать в WhatsApp ↗"
+PHOTOS_SHOWN_TEXT = "Фото этой машины уже выше ⬆️"
 
 
 @router.callback_query(PhotosCB.filter())
@@ -706,33 +779,63 @@ async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
     на источнике — фото на CDN переживают объявление. Двойной тап гасит дебаунс.
     """
     listing_id = callback_data.listing_id
-    if not photos.debounce(query.from_user.id, listing_id):
+    user_id = query.from_user.id
+    if not photos.debounce(user_id, listing_id):
         await query.answer("Уже отправляю")
         return
+    if photos.recently_shown(user_id, listing_id):
+        # Альбом этого объявления уже в чате (п. К2): второй раз те же 10 фото
+        # не шлём — это 10 сообщений в общем лимите Telegram.
+        await query.answer(PHOTOS_SHOWN_TEXT)
+        return
+    # Одна операция «Все фото» на человека (п. К1): нажатия по разным машинам
+    # подряд не запускают параллельные альбомы и запросы к источникам.
+    with throttle.exclusive(("photos", user_id)) as ok:
+        if not ok:
+            await query.answer(throttle.BUSY_TEXT)
+            return
+        await _send_all_photos(query, listing_id)
+
+
+async def _send_all_photos(query: CallbackQuery, listing_id: int) -> None:
+    user_id = query.from_user.id
     await query.answer("Загружаю фото…")
     gallery = await asyncio.to_thread(db.listing_gallery, listing_id)
     if gallery is None or not gallery.is_active:
         await query.message.answer(PHOTOS_GONE_TEXT)
         return
     settings = get_settings()
-    wait = photos.album_wait_minutes(
-        query.from_user.id, limit=settings.bot_photos_albums_per_hour
-    )
+    # Место в лимите занимаем ДО отправки (иначе нажатия внахлёст проходят
+    # все) и возвращаем, если альбом не ушёл.
+    wait = photos.reserve_album(user_id, limit=settings.bot_photos_albums_per_hour)
     if wait:  # до запроса к источнику: лишние нажатия не должны его дёргать
         await query.message.answer(
             photos_limit_text(settings.bot_photos_albums_per_hour, wait),
             reply_markup=pay_kb(gallery.url, "Открыть ↗"),
         )
         return
+    reserved = settings.bot_photos_albums_per_hour > 0
+    sent = False
+    try:
+        sent = await _deliver_all_photos(query, gallery, settings)
+    finally:
+        if reserved and not sent:
+            photos.release_album(user_id)
 
+
+async def _deliver_all_photos(query: CallbackQuery, gallery: db.Gallery, settings) -> bool:
+    """Альбом(ы) и строка «связаться»; True — альбом ушёл (место в лимите занято)."""
+    listing_id = gallery.listing_id
     urls = gallery.urls
     phone = gallery.seller_phone
     card_fetched = False
-    recheck = photos.needs_recheck(gallery.last_seen_at, hours=settings.bot_photos_recheck_hours)
+    recheck = photos.needs_recheck(
+        gallery.last_seen_at, hours=settings.bot_photos_recheck_hours
+    ) and not photos.recently_verified(listing_id)
     if (not urls or recheck) and photos.can_fetch(gallery.source_name):
         card = await _fetch_card(query, gallery)
         if card is _GONE:
-            return
+            return False
         if card is not None:
             card_fetched = True
             if card.urls:
@@ -744,7 +847,7 @@ async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
         await query.message.answer(
             PHOTOS_MISSING_TEXT, reply_markup=pay_kb(gallery.url, "Открыть ↗")
         )
-        return
+        return False
 
     reply_to = query.message.message_id
     try:
@@ -756,8 +859,8 @@ async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
         await query.message.answer(
             PHOTOS_FAILED_TEXT, reply_markup=pay_kb(gallery.url, "Открыть ↗")
         )
-        return
-    photos.record_album(query.from_user.id)
+        return False
+    photos.mark_shown(query.from_user.id, listing_id)
 
     # Номера нет (mashina не отдаёт его в ленте) — один запрос страницы уже
     # ПОСЛЕ альбома: фото не ждут телефона, а номер запоминаем — второе
@@ -770,7 +873,7 @@ async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
     ):
         card = await _fetch_card(query, gallery)
         if card is _GONE:
-            return
+            return True
         if card is not None:
             phone = await _remember_phone(gallery, card)
 
@@ -786,12 +889,13 @@ async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
             ),
             reply_to_message_id=reply_to,
         )
-        return
+        return True
     await query.message.answer(
         photos_contact_text(gallery),
         reply_markup=pay_kb(gallery.url, PHOTOS_CONTACT_BUTTON),
         reply_to_message_id=reply_to,
     )
+    return True
 
 
 _GONE = object()  # маркер «источник сказал: снято» из `_fetch_card`
@@ -804,9 +908,17 @@ async def _fetch_card(query: CallbackQuery, gallery: db.Gallery):
     5xx, лежащий прокси — это НЕ «снято»: None, работаем с тем, что в базе.
     """
     try:
-        return await asyncio.to_thread(
-            photos.fetch_card, gallery.source_name, gallery.external_id, gallery.url
+        # Свой пул и короткий таймаут (п. К1): медленный источник не занимает
+        # потоки базы, а человек не ждёт 20 с — не успели, работаем с базой.
+        card = await run_click(
+            photos.fetch_card,
+            gallery.source_name,
+            gallery.external_id,
+            gallery.url,
+            timeout=get_settings().bot_click_timeout_seconds,
         )
+        photos.mark_verified(gallery.listing_id)
+        return card
     except photos.ListingGone as gone:
         await asyncio.to_thread(
             db.mark_listing_gone, gallery.listing_id, gone.reason, gone.status_id
@@ -871,6 +983,21 @@ async def digest_more_cb(query: CallbackQuery, callback_data: DigestCB) -> None:
     а не над присланным. Последняя порция её не несёт; список устарел или всё
     снято — честно говорим.
     """
+    # Двойной тап (п. К5): оба нажатия успевали прочитать страницу до снятия
+    # кнопки и присылали те же 3 карточки дважды.
+    tap = (query.from_user.id, callback_data.batch, callback_data.offset)
+    if _digest_taps.wait(tap):
+        await query.answer("Уже отправляю")
+        return
+    with throttle.exclusive(("digest", query.from_user.id)) as ok:
+        if not ok:
+            _digest_taps.forget(tap)
+            await query.answer(throttle.BUSY_TEXT)
+            return
+        await _send_digest_page(query, callback_data)
+
+
+async def _send_digest_page(query: CallbackQuery, callback_data: DigestCB) -> None:
     page = await asyncio.to_thread(
         db.digest_page, query.from_user.id, callback_data.batch, callback_data.offset
     )
@@ -904,19 +1031,104 @@ async def digest_more_cb(query: CallbackQuery, callback_data: DigestCB) -> None:
 @router.message(Command("best"))
 @router.message(F.text == MENU_BEST)
 async def cmd_best(message: Message) -> None:
-    # fresh: повторное нажатие даёт следующие машины, а не те же три.
-    await _send_showcase_page(message, offset=0, fresh=True)
+    wait = _showcase_rate().wait(message.chat.id)
+    if wait:
+        # Частое нажатие — молча (ограничитель и так отвечает на флуд), а
+        # исчерпанный потолок за 10 минут — объясняем.
+        if wait > get_settings().bot_showcase_cooldown_seconds:
+            await message.answer(showcase_limit_text(throttle.minutes(wait)))
+        return
+    with throttle.exclusive(("showcase", message.chat.id)) as ok:
+        if ok:
+            # fresh: повторное нажатие даёт следующие машины, а не те же три.
+            await _send_showcase_page(message, offset=0, fresh=True)
 
 
 @router.callback_query(BestCB.filter())
 async def cb_best_more(query: CallbackQuery, callback_data: BestCB) -> None:
-    await query.answer()
-    # Кнопка стоит под карточкой: снимаем только её строку, «Не то»/«Открыть» остаются.
-    with suppress(TelegramAPIError):
-        await query.message.edit_reply_markup(
-            reply_markup=without_best_rows(query.message.reply_markup)
+    # Проверки — ДО снятия кнопки: отбитое нажатие кнопку не теряет. Двойной
+    # тап (п. К4) отбивает кулдаун: второе нажатие приходит раньше него.
+    wait = _showcase_rate().wait(query.message.chat.id)
+    if wait:
+        await query.answer(
+            showcase_limit_text(throttle.minutes(wait))
+            if wait > get_settings().bot_showcase_cooldown_seconds
+            else throttle.TOO_FAST_TEXT,
+            show_alert=wait > get_settings().bot_showcase_cooldown_seconds,
         )
-    await _send_showcase_page(query.message, offset=callback_data.offset)
+        return
+    with throttle.exclusive(("showcase", query.message.chat.id)) as ok:
+        if not ok:
+            await query.answer(throttle.BUSY_TEXT)
+            return
+        await query.answer()
+        # Кнопка стоит под карточкой: снимаем только её строку, «Не то»/«Открыть» остаются.
+        with suppress(TelegramAPIError):
+            await query.message.edit_reply_markup(
+                reply_markup=without_best_rows(query.message.reply_markup)
+            )
+        await _send_showcase_page(query.message, offset=callback_data.offset)
+
+
+SHOWCASE_WINDOW_SECONDS = 600.0
+_rates: dict[str, throttle.RateWindow] = {}
+
+
+def _rate(name: str, factory) -> throttle.RateWindow:
+    """Окно частоты по имени: из настроек при первом обращении (память процесса)."""
+    if name not in _rates:
+        _rates[name] = factory(get_settings())
+    return _rates[name]
+
+
+def _showcase_rate() -> throttle.RateWindow:
+    """«Лучшее сейчас» и «Показать ещё» (п. К3–К4): кулдаун и потолок за 10 минут."""
+    return _rate(
+        "showcase",
+        lambda st: throttle.RateWindow(
+            min_interval=st.bot_showcase_cooldown_seconds,
+            max_count=st.bot_showcase_pages_per_10min,
+            window=SHOWCASE_WINDOW_SECONDS,
+        ),
+    )
+
+
+def _start_showcase_rate() -> throttle.RateWindow:
+    return _rate(
+        "start_showcase",
+        lambda st: throttle.RateWindow(min_interval=st.bot_start_showcase_every_minutes * 60.0),
+    )
+
+
+def _preview_rate() -> throttle.RateWindow:
+    return _rate(
+        "preview",
+        lambda st: throttle.RateWindow(min_interval=st.bot_preview_every_minutes * 60.0),
+    )
+
+
+# Дебаунс кнопок, которые шлют карточки или правят сообщение (п. К5–К6).
+DIGEST_DEBOUNCE_SECONDS = 10.0
+HIDE_DEBOUNCE_SECONDS = 1.5
+_digest_taps = throttle.RateWindow(min_interval=DIGEST_DEBOUNCE_SECONDS)
+_hide_taps = throttle.RateWindow(min_interval=HIDE_DEBOUNCE_SECONDS)
+
+
+def reset_click_limits() -> None:
+    """Сбросить все ограничители нажатий (тесты; память процесса)."""
+    _rates.clear()
+    _digest_taps.clear()
+    _hide_taps.clear()
+    _payment_links.clear()
+    photos.reset_memory()
+    throttle.reset()
+
+
+def showcase_limit_text(minutes: int) -> str:
+    return (
+        "Вы уже посмотрели всё лучшее на сейчас. "
+        f"Подборка обновится — загляните через {minutes} мин."
+    )
 
 
 async def _send_showcase_page(message: Message, *, offset: int, fresh: bool = False) -> None:
@@ -1278,6 +1490,10 @@ async def _send_filter_preview(message: Message, filter_id: int) -> None:
     чёрного списка.
     """
     settings = get_settings()
+    # Пресет → удалить → снова (п. К9): превью не чаще раза в N минут на
+    # человека, иначе только «Фильтр создан».
+    if _preview_rate().wait(message.chat.id):
+        return
     try:
         # Уже показанное в этом чате (витрина в /start) не повторяем.
         preview = await asyncio.to_thread(

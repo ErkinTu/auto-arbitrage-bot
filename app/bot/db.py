@@ -391,6 +391,27 @@ def create_pending_payment(telegram_id: int, *, plan_code: str) -> PaymentDraft:
         return draft
 
 
+def payment_reusable(order_id: str, draft: PaymentDraft) -> bool:
+    """Можно ли снова отдать ссылку этого платежа вместо нового (п. К8).
+
+    Только если он всё ещё `pending` и даты подтверждения не устарели: после
+    оплаты другого заказа, бонуса или ручного продления хвост расписания
+    сдвинулся — тогда новый платёж с честными датами.
+    """
+    with SessionLocal() as session:
+        row = session.execute(
+            select(Payment.status, BotUser)
+            .join(BotUser, Payment.user_id == BotUser.id)
+            .where(Payment.order_id == order_id)
+        ).first()
+        if row is None or row[0] != "pending":
+            return False
+        tail = tail_end(row[1], _utcnow())
+        if draft.starts_now:
+            return tail <= _utcnow()
+        return draft.starts_at is not None and tail == _as_aware(draft.starts_at)
+
+
 # --------------------------------------------------------------------------
 # Онбординг, триал, рефералка
 # --------------------------------------------------------------------------
