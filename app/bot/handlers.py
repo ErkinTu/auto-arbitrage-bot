@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 from app.bot import db, photos, throttle
 from app.bot.executors import run_click
 from app.bot import filter_panel as fp
+from app.bot import menu_screens as ms
 from app.bot.keyboards import (
     FilterAddCB,
     FilterEditCB,
@@ -94,6 +95,8 @@ from app.bot.messages import (
     filters_limit_text,
     format_filter_line,
     invite_text,
+    menu_access_line,
+    menu_paused_text,
     onboarding_text,
     preview_intro_text,
     referral_bonus_text,
@@ -324,15 +327,17 @@ async def menu_access(message: Message) -> None:
     await _send_plans(message, info)
 
 
-async def _send_plans(message: Message, info) -> None:
+async def _send_plans(message: Message, info, telegram_id: int | None = None) -> None:
+    """`telegram_id` - когда `message` бота (кнопка меню), а не человека."""
     settings = get_settings()
+    telegram_id = telegram_id if telegram_id is not None else message.from_user.id
     if info is not None and info.access_status == "member":
         # Участнику группы платить нечем и незачем — до вайтлиста оплаты не
         # доходим, иначе он получил бы «оплата скоро», хотя доступ у него есть.
         await message.answer(SUBSCRIPTION_MEMBER_TEXT)
         return
 
-    if not settings.subscription_allowed_for(message.from_user.id):
+    if not settings.subscription_allowed_for(telegram_id):
         # Обкатка платежей на проде: контур включён и проверяется тестировщиком,
         # остальным честно говорим «скоро», а не «сломалось».
         await message.answer(
@@ -514,7 +519,7 @@ async def cb_play(callback: CallbackQuery) -> None:
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Действие отменено. /add_filter — начать заново.")
+    await message.answer("Действие отменено. /add_filter - начать заново.")
 
 
 # --- /filters ---------------------------------------------------------------
@@ -582,7 +587,7 @@ async def cmd_filters(message: Message) -> None:
     filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
     if not filters:
         await message.answer(
-            "У вас пока нет фильтров — поэтому я молчу.\n\n" + PRESETS_PROMPT_TEXT,
+            "У вас пока нет фильтров - поэтому я молчу.\n\n" + PRESETS_PROMPT_TEXT,
             reply_markup=presets_kb(),
         )
         return
@@ -599,7 +604,7 @@ async def delete_filter_cb(query: CallbackQuery, callback_data: FilterDeleteCB) 
     filters = await asyncio.to_thread(db.list_filters, query.from_user.id)
     if not filters:
         await query.message.edit_text(
-            "Фильтров не осталось — без них я молчу.\n\n" + PRESETS_PROMPT_TEXT,
+            "Фильтров не осталось - без них я молчу.\n\n" + PRESETS_PROMPT_TEXT,
             reply_markup=presets_kb(),
         )
         return
@@ -761,9 +766,9 @@ async def unhide_cb(query: CallbackQuery, callback_data: UnhideCB) -> None:
         )
 
 
-PHOTOS_GONE_TEXT = "Объявление снято — фото больше недоступны."
-PHOTOS_MISSING_TEXT = "Других фото у меня нет — все фото на сайте объявления."
-PHOTOS_FAILED_TEXT = "Не удалось загрузить фото с сайта — откройте объявление."
+PHOTOS_GONE_TEXT = "Объявление снято - фото больше недоступны."
+PHOTOS_MISSING_TEXT = "Других фото у меня нет - все фото на сайте объявления."
+PHOTOS_FAILED_TEXT = "Не удалось загрузить фото с сайта - откройте объявление."
 PHOTOS_CONTACT_BUTTON = "💬 Связаться на сайте ↗"  # если номера нет
 PHOTOS_WHATSAPP_BUTTON = "💬 Написать в WhatsApp ↗"
 PHOTOS_SHOWN_TEXT = "Фото этой машины уже выше ⬆️"
@@ -1127,7 +1132,7 @@ def reset_click_limits() -> None:
 def showcase_limit_text(minutes: int) -> str:
     return (
         "Вы уже посмотрели всё лучшее на сейчас. "
-        f"Подборка обновится — загляните через {minutes} мин."
+        f"Подборка обновится - загляните через {minutes} мин."
     )
 
 
@@ -1309,7 +1314,7 @@ async def cmd_edit_filter(message: Message, state: FSMContext) -> None:
     filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
     if not filters:
         await message.answer(
-            "Фильтров пока нет — менять нечего.\n\n" + PRESETS_PROMPT_TEXT,
+            "Фильтров пока нет - менять нечего.\n\n" + PRESETS_PROMPT_TEXT,
             reply_markup=presets_kb(),
         )
         return
@@ -1335,7 +1340,7 @@ async def cb_edit_filter(query: CallbackQuery, callback_data: FilterEditCB, stat
 
 
 async def _stale_panel(query: CallbackQuery) -> None:
-    await query.answer("Эта панель устарела — начните заново: /add_filter", show_alert=True)
+    await query.answer("Эта панель устарела - начните заново: /add_filter", show_alert=True)
     with suppress(TelegramAPIError):
         await query.message.edit_reply_markup(reply_markup=None)
 
@@ -1356,8 +1361,8 @@ async def cb_panel(query: CallbackQuery, callback_data: fp.PanelCB, state: FSMCo
         await query.answer("Отменено")
         with suppress(TelegramAPIError):
             await query.message.edit_text(
-                "✖ Отменено — фильтр не сохранён." if data.get("filter_id") is None
-                else "✖ Отменено — фильтр остался прежним."
+                "✖ Отменено - фильтр не сохранён." if data.get("filter_id") is None
+                else "✖ Отменено - фильтр остался прежним."
             )
         return
     if action == "noop":
@@ -1413,7 +1418,7 @@ async def _save_panel(query: CallbackQuery, state: FSMContext, data: dict) -> No
             )
     except db.DuplicateFilterError:
         # Панель не закрываем: человек поправит шаг и сохранит снова.
-        await state.update_data(notice="Такой фильтр у вас уже есть — измените что-нибудь.")
+        await state.update_data(notice="Такой фильтр у вас уже есть - измените что-нибудь.")
         await query.answer("Такой фильтр уже есть")
         await _redraw(query.bot, query.message.chat.id, state)
         return
@@ -1424,7 +1429,7 @@ async def _save_panel(query: CallbackQuery, state: FSMContext, data: dict) -> No
         return
     except LookupError:
         await state.clear()
-        await query.answer("Фильтр не найден — возможно, его уже удалили", show_alert=True)
+        await query.answer("Фильтр не найден - возможно, его уже удалили", show_alert=True)
         with suppress(TelegramAPIError):
             await query.message.edit_reply_markup(reply_markup=None)
         return
@@ -1526,7 +1531,7 @@ async def _send_filter_preview(message: Message, filter_id: int) -> None:
 @router.callback_query(PercentCB.filter())
 @router.callback_query(RegionCB.filter())
 async def wizard_stale_button(query: CallbackQuery) -> None:
-    await query.answer("Этот шаг уже неактуален — начните заново: /add_filter", show_alert=True)
+    await query.answer("Этот шаг уже неактуален - начните заново: /add_filter", show_alert=True)
     with suppress(TelegramAPIError):
         await query.message.edit_reply_markup(reply_markup=None)
 
@@ -1539,6 +1544,211 @@ async def wizard_stale_button(query: CallbackQuery) -> None:
 # `WizardExitMiddleware` (bot/wizard.py) сбрасывает состояние на любой команде,
 # так что до фолбэков визарда команда не доходит. Регистрируется ПОСЛЕДНИМ,
 # после фолбэков, чтобы не перехватывать их сообщения.
+
+
+# --- /menu: меню в стиле BotFather (план 01.11.2026, п. В) -------------------
+# Одно сообщение, по которому ходят кнопками `m:<экран>:<аргумент>`; каждое
+# нажатие читает базу заново и перерисовывает сообщение на месте. FSM нет -
+# меню переживает рестарт бота. Экраны - `menu_screens.py`.
+
+
+def _filter_rows(filters: list[db.FilterDTO]) -> list[ms.FilterRow]:
+    return [ms.FilterRow(id=item.id, summary=_filter_summary(item)) for item in filters]
+
+
+def _access_open(info) -> bool:
+    return info is not None and (info.access_status == "member" or info.active or info.trial_active)
+
+
+async def _menu_home(telegram_id: int, has_access: bool) -> ms.Screen:
+    info = await asyncio.to_thread(db.get_subscription_info, telegram_id)
+    filters = await asyncio.to_thread(db.list_filters, telegram_id)
+    blocks = await asyncio.to_thread(db.list_blocks, telegram_id)
+    paused_at = info.paused_at if info is not None else None
+    data = ms.HomeData(
+        has_access=has_access,
+        access_line=menu_access_line(info),
+        paused_at=paused_at,
+        filters_used=len(filters),
+        filters_limit=get_settings().bot_max_filters_per_user,
+        blocks=len(blocks),
+    )
+    return ms.home_screen(data, paused_text=menu_paused_text(paused_at))
+
+
+async def _menu_filters(telegram_id: int) -> ms.Screen:
+    filters = await asyncio.to_thread(db.list_filters, telegram_id)
+    return ms.filters_screen(_filter_rows(filters), get_settings().bot_max_filters_per_user)
+
+
+async def _menu_filter(telegram_id: int, filter_id: int) -> ms.Screen:
+    filters = await asyncio.to_thread(db.list_filters, telegram_id)
+    for index, item in enumerate(filters, start=1):
+        if item.id == filter_id:
+            stats = await asyncio.to_thread(db.filter_sent_stats, telegram_id, filter_id)
+            return ms.filter_screen(
+                ms.FilterRow(id=item.id, summary=_filter_summary(item)),
+                index,
+                sent_7d=stats.count,
+                best_percent=stats.best_percent,
+            )
+    return ms.filter_gone_screen()
+
+
+async def _menu_blacklist(telegram_id: int) -> ms.Screen:
+    blocks = await asyncio.to_thread(db.list_blocks, telegram_id)
+    return ms.blacklist_screen([ms.BlockRow(id=item.id, label=item.label) for item in blocks])
+
+
+async def _menu_notify(telegram_id: int) -> ms.Screen:
+    info = await asyncio.to_thread(db.get_subscription_info, telegram_id)
+    paused_at = info.paused_at if info is not None else None
+    return ms.notify_screen(paused_at, menu_paused_text(paused_at))
+
+
+async def _menu_access(telegram_id: int) -> ms.Screen:
+    settings = get_settings()
+    info = await asyncio.to_thread(db.get_subscription_info, telegram_id)
+    status = _status_text(info) if info is not None else "❌ Доступа нет. Начните с /start"
+    can_buy = (info is None or info.access_status != "member") and settings.subscription_allowed_for(
+        telegram_id
+    )
+    return ms.access_screen(status, can_buy=can_buy)
+
+
+async def _menu_invite(telegram_id: int) -> ms.Screen:
+    settings = get_settings()
+    if not settings.referral_enabled or not settings.bot_username:
+        return ms.invite_screen("Реферальная программа сейчас недоступна.", None)
+    try:
+        info = await asyncio.to_thread(db.get_invite_info, telegram_id)
+    except LookupError:
+        return ms.invite_screen(NOT_STARTED_TEXT, None)
+    link = f"https://t.me/{settings.bot_username.lstrip('@')}?start=ref_{info.invite_code}"
+    text = invite_text(
+        link=link,
+        qualified=info.qualified,
+        friends_to_next_bonus=info.friends_to_next_bonus,
+        bonus_days=settings.referral_bonus_days,
+        friends_per_bonus=settings.referral_friends_per_bonus,
+        bonuses_granted=info.bonuses_granted,
+        limit_reached=info.limit_reached,
+    )
+    return ms.invite_screen(text, markup_url(share_kb(link)))
+
+
+# Разделы, которые без доступа не открываются (гейт внутри меню, а не в
+# middleware: человек без доступа видит «нужен доступ» и кнопку, а не тупик).
+_MENU_GATED = {
+    ms.FILTERS, ms.FILTER, ms.FILTER_DELETE, ms.FILTER_DELETE_YES, ms.FILTER_EDIT,
+    ms.FILTER_ADD, ms.BLACKLIST, ms.BLOCK_RETURN,
+}
+
+
+@router.message(Command("menu"))
+async def cmd_menu(message: Message, has_access: bool = True) -> None:
+    text, markup = await _menu_home(message.from_user.id, has_access)
+    await message.answer(text, reply_markup=markup, disable_web_page_preview=True)
+    await asyncio.to_thread(db.log_menu_open, message.from_user.id)
+
+
+@router.callback_query(ms.MenuCB.filter())
+async def cb_menu(
+    query: CallbackQuery, callback_data: ms.MenuCB, state: FSMContext, has_access: bool = True
+) -> None:
+    telegram_id = query.from_user.id
+    screen, arg = callback_data.screen, callback_data.arg
+    message = query.message
+    if message is None:
+        await query.answer()
+        return
+
+    if screen in _MENU_GATED and not has_access:
+        await query.answer()
+        await _menu_show(message, ms.no_access_screen())
+        return
+
+    if screen == ms.CLOSE:
+        await query.answer()
+        with suppress(TelegramAPIError):
+            await message.delete()
+        return
+    if screen == ms.FILTER_ADD:
+        # Пресеты и панель - прежний поток, новым сообщением (меню остаётся).
+        await query.answer()
+        await state.clear()
+        await _send_add_filter_prompt(message, telegram_id)
+        return
+    if screen == ms.FILTER_EDIT:
+        await state.clear()
+        if await _start_edit(message, state, telegram_id, arg, edit_message=True):
+            await query.answer()
+        else:
+            await query.answer()
+            await _menu_show(message, ms.filter_gone_screen())
+        return
+    if screen == ms.PLANS:
+        # Ссылка оплаты - кнопка-URL отдельным сообщением: перерисовать меню
+        # поверх неё нельзя, ссылка потерялась бы.
+        await query.answer()
+        info = await asyncio.to_thread(db.get_subscription_info, telegram_id)
+        await _send_plans(message, info, telegram_id=telegram_id)
+        return
+
+    notice = None
+    if screen == ms.HOME:
+        result = await _menu_home(telegram_id, has_access)
+        await asyncio.to_thread(db.log_menu_open, telegram_id)
+    elif screen == ms.FILTERS:
+        result = await _menu_filters(telegram_id)
+    elif screen == ms.FILTER:
+        result = await _menu_filter(telegram_id, arg)
+    elif screen == ms.FILTER_DELETE:
+        item = await asyncio.to_thread(db.get_filter, telegram_id, arg)
+        result = (
+            ms.filter_delete_screen(ms.FilterRow(id=item.id, summary=_filter_summary(item)))
+            if item is not None
+            else ms.filter_gone_screen()
+        )
+    elif screen == ms.FILTER_DELETE_YES:
+        deleted = await asyncio.to_thread(db.delete_filter, telegram_id, arg)
+        notice = "Фильтр удалён" if deleted else "Фильтр уже удалён"
+        result = await _menu_filters(telegram_id)
+    elif screen == ms.BLACKLIST:
+        result = await _menu_blacklist(telegram_id)
+    elif screen == ms.BLOCK_RETURN:
+        deleted = await asyncio.to_thread(db.delete_block, telegram_id, arg)
+        notice = "Вернул в выдачу" if deleted else "Уже удалено"
+        result = await _menu_blacklist(telegram_id)
+    elif screen in (ms.NOTIFY, ms.PAUSE, ms.PLAY):
+        if screen != ms.NOTIFY:
+            changed = await asyncio.to_thread(db.set_paused, telegram_id, screen == ms.PAUSE)
+            if changed is None:
+                notice = NOT_STARTED_TEXT
+            else:
+                notice = "Пауза включена" if screen == ms.PAUSE else "Уведомления включены"
+        result = await _menu_notify(telegram_id)
+    elif screen == ms.ACCESS:
+        result = await _menu_access(telegram_id)
+    elif screen == ms.INVITE:
+        result = await _menu_invite(telegram_id)
+    elif screen == ms.HELP:
+        result = ms.help_screen(HELP_TEXT)
+    else:
+        # Кнопка из будущей/прошлой версии меню - ведём на главную.
+        result = await _menu_home(telegram_id, has_access)
+
+    await query.answer(notice or None)
+    await _menu_show(message, result)
+
+
+async def _menu_show(message: Message, screen: ms.Screen) -> None:
+    text, markup = screen
+    try:
+        await message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+    except TelegramBadRequest as error:
+        if "message is not modified" not in str(error):
+            raise
 
 
 @router.message(Command("admin"))

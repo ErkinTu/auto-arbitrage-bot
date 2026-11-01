@@ -26,7 +26,7 @@ from app.models import (
     UserFilter,
 )
 from app.services.images import real_photo
-from app.services.fuel import unpack_fuel_groups
+from app.services.fuel import fuel_display, unpack_fuel_groups
 from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
 from app.services.filter_presets import load_brand_groups, min_year_for_age
@@ -69,6 +69,12 @@ class PendingNotification:
     brand_id: int | None = None
     # Сколько фото в галерее; None — галерея ещё не известна (старое объявление).
     photo_count: int | None = None
+    # Базовые характеристики для первой строки карточки
+    # («BMW 5 series: 2020 г., 2 л, Автомат, Электромобиль, Седан»).
+    engine_volume: float | None = None
+    gearbox: str | None = None
+    fuel: str | None = None
+    body_type: str | None = None
 
 
 # База «цены рынка». Рассылка, витрина и превью — на средней; медиана только
@@ -231,6 +237,10 @@ def build_pending(
         image_url=real_photo(listing.image_url),  # заглушка mashina — не фото
         brand_id=listing.brand_id,
         photo_count=len(listing.image_urls) if listing.image_urls else None,
+        engine_volume=float(listing.engine_volume) if listing.engine_volume is not None else None,
+        gearbox=listing.gearbox,
+        fuel=fuel_display(listing.fuel_type, listing.fuel_group),
+        body_type=listing.body_type,
     )
 
 

@@ -27,34 +27,35 @@ def start_text() -> str:
     return (
         "👋 Привет! Я слежу за новыми объявлениями о продаже авто в Кыргызстане "
         "и присылаю те, что подходят под ваши фильтры.\n\n"
-        "<b>Нет фильтров — нет объявлений.</b>\n"
+        "<b>Нет фильтров - нет объявлений.</b>\n"
         f"Создайте фильтр, их может быть до {limit}: /add_filter\n\n"
-        "/filters — мои фильтры\n"
-        "/best — лучшие предложения прямо сейчас\n"
-        "/help — все команды и как это работает"
+        "/filters - мои фильтры\n"
+        "/best - лучшие предложения прямо сейчас\n"
+        "/help - все команды и как это работает"
     )
 
 HELP_TEXT = (
     "ℹ️ Как это работает\n\n"
-    "Вы создаёте фильтр — я каждые 10 минут проверяю новые объявления "
+    "Вы создаёте фильтр - я каждые 10 минут проверяю новые объявления "
     "и присылаю сюда те, что вам подходят.\n\n"
     "Команды\n"
-    "/add_filter — создать фильтр (готовый или свой)\n"
-    "/filters — мои фильтры: изменить или удалить\n"
-    "/edit_filter — изменить фильтр\n"
-    "/best — лучшие предложения прямо сейчас\n"
-    "/blacklist — что не показывать\n"
-    "/invite — пригласить друзей и получить дни бесплатно\n"
-    "/status — мой доступ\n"
-    "/pause — поставить уведомления на паузу, /play — включить снова\n"
-    "/cancel — отменить текущее действие\n\n"
+    "/menu - все настройки на одном экране\n"
+    "/add_filter - создать фильтр (готовый или свой)\n"
+    "/filters - мои фильтры: изменить или удалить\n"
+    "/edit_filter - изменить фильтр\n"
+    "/best - лучшие предложения прямо сейчас\n"
+    "/blacklist - что не показывать\n"
+    "/invite - пригласить друзей и получить дни бесплатно\n"
+    "/status - мой доступ\n"
+    "/pause - поставить уведомления на паузу, /play - включить снова\n"
+    "/cancel - отменить текущее действие\n\n"
     "Полезно знать\n"
-    "• В фильтре любой шаг можно пропустить — тогда ограничения по нему не будет.\n"
-    "• «Только ниже рынка» — пришлю лишь те авто, что заметно дешевле средней цены "
+    "• В фильтре любой шаг можно пропустить - тогда ограничения по нему не будет.\n"
+    "• «Только ниже рынка» - пришлю лишь те авто, что заметно дешевле средней цены "
     "по такой же модели, году и пробегу.\n"
-    "• «Регион» — область КР, «Зарубежные авто» (Китай, Корея, США) или все сразу. "
+    "• «Регион» - область КР, «Зарубежные авто» (Китай, Корея, США) или все сразу. "
     "У зарубежных цена обычно без растаможки и доставки.\n"
-    "• Надоела марка, модель или город — нажмите «🚫 Не показывать такие» под "
+    "• Надоела марка, модель или город - нажмите «🚫 Не показывать такие» под "
     "объявлением. Подействует сразу на все ваши фильтры."
 )
 
@@ -73,24 +74,24 @@ def access_denied_text(
     if trial_available:
         return (
             "🔒 Чтобы получать объявления, нужно включить доступ.\n\n"
-            f"🎁 {trial_days} дня бесплатно — без карты и без оплаты. "
+            f"🎁 {trial_days} дня бесплатно - без карты и без оплаты. "
             "Нажмите кнопку ниже."
         )
     if payments_open:
         return (
-            "🔒 Доступ закончился — новые объявления я не присылаю.\n\n"
+            "🔒 Доступ закончился - новые объявления я не присылаю.\n\n"
             "Продлить: /subscribe\n"
             "Или получить дни бесплатно за приглашённых друзей: /invite"
         )
     return (
-        "🔒 Доступ закончился — новые объявления я не присылаю.\n\n"
-        "Оплата подписки открывается со дня на день. Напишите сюда «хочу» — "
+        "🔒 Доступ закончился - новые объявления я не присылаю.\n\n"
+        "Оплата подписки открывается со дня на день. Напишите сюда «хочу» - "
         "включим доступ вручную.\n"
         "А пока можно получить дни за приглашённых друзей: /invite"
     )
 
 SUBSCRIPTION_REQUIRED_TEXT = (
-    "🔒 Доступ к боту — по подписке.\n"
+    "🔒 Доступ к боту - по подписке.\n"
     "Оформите её командой /subscribe, чтобы получать объявления по вашим фильтрам."
 )
 
@@ -115,19 +116,19 @@ def admin_login_text(ttl_minutes: int) -> str:
 # (SUBSCRIPTION_TESTER_IDS). Обещать «оплатите» человеку, которому кнопка не
 # откроется, нельзя — он один раз упрётся и уйдёт.
 SUBSCRIPTION_SOON_TEXT = (
-    "🛠 Оплата сейчас в последней настройке — откроем со дня на день.\n"
+    "🛠 Оплата сейчас в последней настройке - откроем со дня на день.\n"
     "Доступ пока не отключаем: напишите сюда, если он закончился, и мы продлим вручную."
 )
 
 
 SUBSCRIPTION_MEMBER_TEXT = (
-    "✅ У вас доступ участника закрытой группы — платить не нужно, всё уже открыто."
+    "✅ У вас доступ участника закрытой группы - платить не нужно, всё уже открыто."
 )
 
 
 def _d(value) -> str:
     """Дата для человека: 17.09.2026."""
-    return value.strftime("%d.%m.%Y") if value is not None else "—"
+    return value.strftime("%d.%m.%Y") if value is not None else "-"
 
 
 def _local_dt(value) -> str:
@@ -150,8 +151,8 @@ def _lookback_hours() -> int:
 def pause_on_text() -> str:
     return (
         "⏸ Пауза включена. Новые объявления не присылаю, фильтры сохранены.\n\n"
-        "• Срок доступа на паузе идёт как обычно — пауза его не продлевает.\n"
-        f"• После /play пришлю только свежее — за последние ~{_lookback_hours()} ч, "
+        "• Срок доступа на паузе идёт как обычно - пауза его не продлевает.\n"
+        f"• После /play пришлю только свежее - за последние ~{_lookback_hours()} ч, "
         "а не всё, что вышло за паузу.\n"
         "• Раз в день напомню, что вы на паузе.\n\n"
         "Включить снова: /play"
@@ -165,7 +166,7 @@ def pause_already_text(paused_at) -> str:
 def play_on_text() -> str:
     return (
         "▶️ Уведомления снова включены. Пришлю подходящие объявления по вашим "
-        f"фильтрам — начиная с вышедших за последние ~{_lookback_hours()} ч."
+        f"фильтрам - начиная с вышедших за последние ~{_lookback_hours()} ч."
     )
 
 
@@ -175,14 +176,31 @@ def play_already_text() -> str:
 
 def pause_reminder_text(paused_at) -> str:
     return (
-        f"⏸ Напоминаю: уведомления на паузе с {_local_dt(paused_at)} — новые "
+        f"⏸ Напоминаю: уведомления на паузе с {_local_dt(paused_at)} - новые "
         "объявления я не присылаю, а срок доступа идёт.\n"
-        "Включить — кнопкой ниже или командой /play."
+        "Включить - кнопкой ниже или командой /play."
     )
 
 
 def _speed_label(delayed: bool) -> str:
     return "с отставанием ~1 ч" if delayed else "полная скорость"
+
+
+def menu_access_line(info) -> str:
+    """Доступ одной строкой для главной `/menu` (`info` - `db.SubscriptionInfo` или None)."""
+    if info is None:
+        return "нет - отправьте /start"
+    if info.access_status == "member":
+        return "участник группы · полная скорость"
+    if info.active:
+        return f"подписка до {_d(info.expires_at)} · {_speed_label(info.tier == TIER_DELAYED)}"
+    if info.trial_active:
+        return f"бесплатный период до {_d(info.trial_expires_at)}"
+    return "нет - включите в «💎 Доступ»"
+
+
+def menu_paused_text(paused_at) -> str | None:
+    return _local_dt(paused_at) if paused_at is not None else None
 
 
 def plan_line(plan: Plan, *, bold: bool = True) -> str:
@@ -194,10 +212,10 @@ def plan_line(plan: Plan, *, bold: bool = True) -> str:
     жизнь юзера, испортить его разметкой нельзя.
     """
     speed = "уведомления на ~1 ч позже" if plan.delayed else "уведомления сразу"
-    price = f"{plan.period_label} — {_fmt_int(plan.price)} сом"
+    price = f"{plan.period_label} - {_fmt_int(plan.price)} сом"
     if bold:
         price = f"<b>{price}</b>"
-    return f"• {price} — {speed}"
+    return f"• {price} - {speed}"
 
 
 # Снимает вопрос «почему ночью тихо» — иначе пауза читается как сбой.
@@ -211,7 +229,7 @@ def subscribe_menu_text() -> str:
         "💳 <b>Тарифы</b>\n\n"
         f"{grid}\n\n"
         f"{NIGHT_NOTE}\n\n"
-        "Выберите тариф — покажу точные даты до оплаты."
+        "Выберите тариф - покажу точные даты до оплаты."
     )
 
 
@@ -223,7 +241,7 @@ def plan_confirm_text(plan: Plan, draft) -> str:
     """
     current = draft.schedule_before[0] if draft.schedule_before else None
     head = (
-        f"💳 <b>{plan.title.capitalize()}</b> — {_fmt_int(plan.price)} сом "
+        f"💳 <b>{plan.title.capitalize()}</b> - {_fmt_int(plan.price)} сом "
         f"за {plan.days} дней.\n\n"
     )
 
@@ -240,12 +258,12 @@ def plan_confirm_text(plan: Plan, draft) -> str:
         body = (
             f"У вас оплачено с отставанием до {_d(current.ends_at)}. "
             "Доплаты разницы нет: "
-            f"{plan.days} полных дней встанут следом — <b>полная скорость с "
+            f"{plan.days} полных дней встанут следом - <b>полная скорость с "
             f"{_d(draft.starts_at)} по {_d(draft.access_until)}</b>. Ничего не сгорает."
         )
     elif current is not None and not current.delayed and plan.delayed:
         body = (
-            f"Полная скорость сохраняется до {_d(current.ends_at)} — понижения "
+            f"Полная скорость сохраняется до {_d(current.ends_at)} - понижения "
             f"сейчас не будет. Дальше {plan.days} дней с отставанием, "
             f"до {_d(draft.access_until)}."
         )
@@ -262,11 +280,11 @@ def plan_confirm_text(plan: Plan, draft) -> str:
         # subscription_expires_at, бесплатные дни лежат отдельно и не плюсуются).
         text += (
             f"\n\n🎁 Бесплатный период идёт до {_d(draft.trial_expires_at)}. "
-            f"Если оплатить сейчас, {plan.days} дней пойдут с сегодняшнего дня — "
+            f"Если оплатить сейчас, {plan.days} дней пойдут с сегодняшнего дня - "
             "оставшиеся бесплатные дни не приплюсуются."
         )
     text += (
-        "\n\nНажмите кнопку ниже — откроется страница оплаты Finik с QR. На телефоне "
+        "\n\nНажмите кнопку ниже - откроется страница оплаты Finik с QR. На телефоне "
         "она сама предложит ваше банковское приложение; вводить номер карты не нужно.\n"
         "Доступ откроется автоматически сразу после оплаты."
     )
@@ -281,7 +299,7 @@ def subscribe_horizon_text(horizon_until, max_horizon_days: int) -> str:
     """
     months = max(max_horizon_days // 30, 1)
     return (
-        f"✅ У вас уже оплачено до <b>{_d(horizon_until)}</b> — это максимум "
+        f"✅ У вас уже оплачено до <b>{_d(horizon_until)}</b> - это максимум "
         f"на {months} мес. вперёд.\n"
         "Продлить можно ближе к сроку: напомню сам за день до окончания."
     )
@@ -294,19 +312,19 @@ def onboarding_text(trial_days: int) -> str:
         "и присылаю те, что дешевле рынка.\n\n"
         "Как это работает: вы задаёте фильтр (марка, модель, год, пробег, цена, "
         "регион), а я каждые ~10 минут проверяю свежие объявления и сравниваю цену "
-        "со средней по таким же машинам. Ниже рынка — сразу пишу вам.\n\n"
-        f"🎁 Первые {trial_days} дня — бесплатно, без карты и на полной скорости.\n"
-        f"Дальше — от {_fmt_int(min(plan.price for plan in PLANS))} сом; тарифы и "
+        "со средней по таким же машинам. Ниже рынка - сразу пишу вам.\n\n"
+        f"🎁 Первые {trial_days} дня - бесплатно, без карты и на полной скорости.\n"
+        f"Дальше - от {_fmt_int(min(plan.price for plan in PLANS))} сом; тарифы и "
         "условия в /subscribe."
     )
 
 
-START_SHOWCASE_INTRO_TEXT = "Вот что я нашёл за сутки — дешевле всего относительно рынка:"
+START_SHOWCASE_INTRO_TEXT = "Вот что я нашёл за сутки - дешевле всего относительно рынка:"
 
 START_TRIAL_PROMPT_TEXT = "Хотите получать такие, как только они появятся?"
 
 DEMO_UNAVAILABLE_TEXT = (
-    "Сейчас нет свежего примера под рукой — как только появится машина ниже рынка, "
+    "Сейчас нет свежего примера под рукой - как только появится машина ниже рынка, "
     "она придёт вам первой."
 )
 
@@ -318,7 +336,7 @@ def trial_started_text(expires_at, trial_days: int, base_filter: str | None = No
     чего не делали, и про фильтры молчим только если они есть.
     """
     head = (
-        f"🎁 Бесплатный период на {trial_days} дня активирован — до "
+        f"🎁 Бесплатный период на {trial_days} дня активирован - до "
         f"{expires_at.strftime('%d.%m.%Y')}.\n\n"
     )
     if base_filter:
@@ -336,7 +354,7 @@ def base_filter_set_text(summary: str) -> str:
 
 
 PRESETS_PROMPT_TEXT = (
-    "Выберите готовый фильтр — или настройте свой по марке, году, пробегу и цене:"
+    "Выберите готовый фильтр - или настройте свой по марке, году, пробегу и цене:"
 )
 
 
@@ -350,8 +368,8 @@ def filter_updated_text(summary: str) -> str:
 def filter_created_text(summary: str) -> str:
     return (
         f"✅ Фильтр создан:\n{summary}\n\n"
-        "Как только появится подходящее объявление — пришлю его сюда.\n"
-        "/filters — мои фильтры, /add_filter — еще один."
+        "Как только появится подходящее объявление - пришлю его сюда.\n"
+        "/filters - мои фильтры, /add_filter - еще один."
     )
 
 
@@ -366,10 +384,10 @@ FILTERS_PRIORITY_NOTE = (
 )
 
 
-SHOWCASE_INTRO_TEXT = "🔥 Лучшие предложения за сутки — дешевле всего относительно рынка:"
+SHOWCASE_INTRO_TEXT = "🔥 Лучшие предложения за сутки - дешевле всего относительно рынка:"
 
 SHOWCASE_EMPTY_TEXT = (
-    "Сейчас нет машин заметно ниже рынка за последние сутки — загляните позже."
+    "Сейчас нет машин заметно ниже рынка за последние сутки - загляните позже."
 )
 
 
@@ -378,13 +396,13 @@ def nudge_trial_text(trial_days: int, step: int) -> str:
     if step == 1:
         return (
             "Вы ещё не включили бесплатный период 🙂\n\n"
-            "Одна кнопка — и я начну присылать машины по Кыргызстану, которые "
+            "Одна кнопка - и я начну присылать машины по Кыргызстану, которые "
             f"дешевле рынка на {get_settings().bot_base_filter_percent}% и больше. "
             f"{trial_days} дня бесплатно, без карты."
         )
     return (
         "Пока вы думаете, машины ниже рынка уходят за часы.\n"
-        f"Включите {trial_days} бесплатных дня — фильтр поставлю сам, "
+        f"Включите {trial_days} бесплатных дня - фильтр поставлю сам, "
         "поменять его можно в любой момент."
     )
 
@@ -393,13 +411,13 @@ def nudge_filter_text(step: int) -> str:
     """Напоминание тому, у кого доступ есть, а фильтра нет — бот для него молчит."""
     if step == 1:
         return (
-            "У вас пока нет ни одного фильтра — поэтому я молчу.\n\n"
+            "У вас пока нет ни одного фильтра - поэтому я молчу.\n\n"
             "Поставить базовый: вся КР, ниже рынка на "
             f"{get_settings().bot_base_filter_percent}%? Изменить можно в /filters."
         )
     return (
         "Фильтра всё ещё нет, и новые машины проходят мимо вас.\n"
-        "Одна кнопка — и базовый фильтр начнёт работать. Свой: /add_filter"
+        "Одна кнопка - и базовый фильтр начнёт работать. Свой: /add_filter"
     )
 
 
@@ -413,16 +431,16 @@ def trial_summary_text(*, sent: int, below_market: int, best_percent: float | No
         "⏳ Бесплатный период заканчивается примерно через 12 часов.\n",
         f"За это время я прислал вам {sent} {_plural(sent, 'машину', 'машины', 'машин')}"
         + (
-            f", из них {below_market} — ниже рынка."
+            f", из них {below_market} - ниже рынка."
             if below_market
             else "."
         ),
     ]
     if best_percent:
-        lines.append(f"Лучшая находка — на {_fmt_percent(best_percent)}% дешевле рынка.")
+        lines.append(f"Лучшая находка - на {_fmt_percent(best_percent)}% дешевле рынка.")
     lines.append(
         "\nЧтобы уведомления не прекратились, продлите доступ: /subscribe\n"
-        f"Самый доступный вариант — {_fmt_int(min(plan.price for plan in PLANS))} сом."
+        f"Самый доступный вариант - {_fmt_int(min(plan.price for plan in PLANS))} сом."
     )
     return "\n".join(lines)
 
@@ -431,7 +449,7 @@ def trial_summary_market_text(best: list[PendingNotification]) -> str:
     """Итоги триала, когда по фильтрам ничего не пришло: показываем рынок."""
     lines = [
         "⏳ Бесплатный период заканчивается примерно через 12 часов.\n",
-        "По вашим фильтрам за это время подходящих машин не нашлось — возможно, "
+        "По вашим фильтрам за это время подходящих машин не нашлось - возможно, "
         "фильтр слишком узкий. Вот что есть на рынке прямо сейчас:\n",
     ]
     for note in best:
@@ -454,17 +472,17 @@ def burned_broadcast_text(*, matches: int | None) -> str:
     if matches:
         head = (
             f"🚗 За последнюю неделю по вашему фильтру было {matches} "
-            f"{_plural(matches, 'машина', 'машины', 'машин')} ниже рынка — "
+            f"{_plural(matches, 'машина', 'машины', 'машин')} ниже рынка - "
             "я не мог их прислать: бесплатный период закончился.\n\n"
         )
     else:
         head = (
             "🚗 Каждый день на рынке Кыргызстана появляются машины на 20% и больше "
-            "дешевле рынка — их разбирают за часы.\n\n"
+            "дешевле рынка - их разбирают за часы.\n\n"
         )
     return (
         head
-        + f"Попробуйте: {cheapest.title.lower()} — {_fmt_int(cheapest.price)} сом, "
+        + f"Попробуйте: {cheapest.title.lower()} - {_fmt_int(cheapest.price)} сом, "
         "оплата по QR из банковского приложения: /subscribe"
     )
 
@@ -478,7 +496,7 @@ def trial_already_used_text(payments_open: bool = True) -> str:
     if not payments_open:
         return (
             "Бесплатный период уже был использован на этом аккаунте.\n"
-            "Оплата открывается со дня на день — напишите сюда «хочу», "
+            "Оплата открывается со дня на день - напишите сюда «хочу», "
             "включим доступ вручную.\n"
             "А пока можно получить дни за приглашённых друзей: /invite"
         )
@@ -499,14 +517,14 @@ def trial_paywall_text(payments_open: bool = True) -> str:
     """
     if not payments_open:
         return (
-            "⏳ Бесплатный период закончился — новые объявления я пока не присылаю.\n\n"
-            "Оплата подписки открывается со дня на день. Напишите сюда «хочу» — "
+            "⏳ Бесплатный период закончился - новые объявления я пока не присылаю.\n\n"
+            "Оплата подписки открывается со дня на день. Напишите сюда «хочу» - "
             "включим доступ вручную, как только всё заработает.\n"
             "А пока можно получить дни за приглашённых друзей: /invite"
         )
     grid = "\n".join(plan_line(plan, bold=False) for plan in PLANS)
     return (
-        "⏳ Бесплатный период закончился — новые объявления я больше не присылаю.\n\n"
+        "⏳ Бесплатный период закончился - новые объявления я больше не присылаю.\n\n"
         f"{grid}\n\n"
         "Оплата по QR из банковского приложения, без ввода карты.\n"
         "Оформить: /subscribe\n"
@@ -538,7 +556,7 @@ def invite_text(
         else ""
     )
     return (
-        f"🤝 Пригласите {friends_per_bonus} друзей — получите +{bonus_days} дней бесплатно "
+        f"🤝 Пригласите {friends_per_bonus} друзей - получите +{bonus_days} дней бесплатно "
         "(бонус даётся один раз).\n\n"
         f"Ваша ссылка:\n{link}\n\n"
         f"Друг засчитывается, когда перейдёт по ссылке и активирует бесплатный период.\n"
@@ -549,7 +567,7 @@ def invite_text(
 
 def referral_bonus_text(days: int) -> str:
     return (
-        f"🎉 Ваши друзья активировали бота — вам начислено +{days} дней доступа.\n"
+        f"🎉 Ваши друзья активировали бота - вам начислено +{days} дней доступа.\n"
         "Статус: /status"
     )
 
@@ -576,7 +594,7 @@ BLOCK_MENU_TEXT = "Что именно больше не показывать?"
 
 BLOCK_LIST_EMPTY_TEXT = (
     "🚫 Чёрный список пуст.\n\n"
-    "Он работает поверх всех ваших фильтров: что сюда попало — не придёт никогда.\n"
+    "Он работает поверх всех ваших фильтров: что сюда попало - не придёт никогда.\n"
     "Добавить проще всего кнопкой «🚫 Не показывать такие» под любым объявлением."
 )
 
@@ -590,12 +608,12 @@ def blocks_text(blocks: list) -> str:
 
 
 def block_added_text(label: str) -> str:
-    return f"Больше не покажу: {label}. Вернуть — /blacklist"
+    return f"Больше не покажу: {label}. Вернуть - /blacklist"
 
 
 def block_limit_text(limit: int) -> str:
     return (
-        f"В чёрном списке уже {limit} записей — это потолок.\n"
+        f"В чёрном списке уже {limit} записей - это потолок.\n"
         "Удалите лишнее в /blacklist или сузьте сам фильтр: длинный чёрный список "
         "обычно значит, что фильтр задан слишком широко."
     )
@@ -603,7 +621,7 @@ def block_limit_text(limit: int) -> str:
 
 def duplicate_filter_text() -> str:
     return (
-        "🤔 Такой фильтр у вас уже есть — второй такой же ничего не добавит "
+        "🤔 Такой фильтр у вас уже есть - второй такой же ничего не добавит "
         "(объявление всё равно приходит один раз).\n"
         "Ваши фильтры: /filters"
     )
@@ -669,7 +687,7 @@ def _access_status_text(
     tier: str | None,
 ) -> str:
     if access_status == "member":
-        return "✅ У вас доступ участника закрытой группы — подписка не требуется."
+        return "✅ У вас доступ участника закрытой группы - подписка не требуется."
     if active and expires_at is not None:
         text = f"✅ Подписка активна до {_d(expires_at)}."
         if schedule:
@@ -679,7 +697,7 @@ def _access_status_text(
         return text + "\nПродлить: /subscribe"
     if trial_active and trial_expires_at is not None:
         return (
-            f"🎁 Бесплатный период активен до {_d(trial_expires_at)} — на полной скорости.\n"
+            f"🎁 Бесплатный период активен до {_d(trial_expires_at)} - на полной скорости.\n"
             "Оформить подписку заранее: /subscribe · Продлить бесплатно: /invite"
         )
     return "❌ Подписка неактивна. Оформить: /subscribe"
@@ -699,8 +717,8 @@ def renewal_reminder_text(expires_at, tier: str) -> str:
     )
     return (
         f"⏳ Ваш доступ ({expiring}) истекает {_d(expires_at)}.\n"
-        f"Продление на месяц — {prices}.\n"
-        "Продлить: /subscribe — чтобы не пропускать выгодные объявления."
+        f"Продление на месяц - {prices}.\n"
+        "Продлить: /subscribe - чтобы не пропускать выгодные объявления."
     )
 
 
@@ -713,8 +731,8 @@ def paid_text(plan: Plan, expires_at, full_speed_from=None) -> str:
     if full_speed_from is not None:
         # Полная скорость начинается не сегодня (купили поверх отстающего) —
         # молчать об этом нельзя, иначе тишина читается как «оплата не сработала».
-        text += f"\nПолная скорость — с {_d(full_speed_from)}."
-    return text + "\nДоступ открыт — /add_filter"
+        text += f"\nПолная скорость - с {_d(full_speed_from)}."
+    return text + "\nДоступ открыт - /add_filter"
 
 
 def _fmt_int(value: int) -> str:
@@ -735,14 +753,49 @@ def card_title(p: PendingNotification) -> str:
     return f"{name} · {p.year}" if p.year is not None else name
 
 
+def _volume_text(volume: float) -> str:
+    """2.0 → «2», 2.5 → «2.5»."""
+    return f"{volume:g}"
+
+
+def _cap(value: str) -> str:
+    """«автомат» → «Автомат» (mashina пишет со строчной, lalafo - с заглавной)."""
+    value = value.strip()
+    return value[:1].upper() + value[1:]
+
+
+def card_heading(p: PendingNotification) -> str:
+    """Первая строка карточки: «BMW 5 series: 2020 г., 2 л, Автомат, Электромобиль, Седан».
+
+    Собирается из полей, а не из заголовка источника: у lalafo заголовок уже
+    такой, а у mashina - «Hyundai Grandeur VI 2.5 AT». Неизвестное пропускается;
+    объём у электромобиля не пишем (у источников там 0 или мусор).
+    """
+    if p.brand_name and p.model_name:
+        name = f"{p.brand_name} {p.model_name}"
+    else:
+        name = (p.title or "").split(":", 1)[0].strip() or "Объявление"
+    specs: list[str] = []
+    if p.year is not None:
+        specs.append(f"{p.year} г.")
+    electric = (p.fuel or "").strip().lower() == "электромобиль"
+    if p.engine_volume and p.engine_volume > 0 and not electric:
+        specs.append(f"{_volume_text(p.engine_volume)} л")
+    for value in (p.gearbox, p.fuel, p.body_type):
+        # Без букв - мусор источника (у mashina коробка бывает «-1»).
+        if value and any(ch.isalpha() for ch in value):
+            specs.append(_cap(value))
+    return f"{name}: {', '.join(specs)}" if specs else name
+
+
 def photos_limit_text(limit: int, wait_minutes: int) -> str:
     """Лимит альбомов «Все фото» исчерпан (п. Г плана 01.11.2026)."""
     albums = _plural(limit, "альбом", "альбома", "альбомов")
     minutes = _plural(wait_minutes, "минуту", "минуты", "минут")
     return (
-        f"За час можно открыть {limit} {albums} с фото — лимит исчерпан. "
-        f"Следующий — через {wait_minutes} {minutes}. "
-        "Пока все фото — на сайте объявления."
+        f"За час можно открыть {limit} {albums} с фото - лимит исчерпан. "
+        f"Следующий - через {wait_minutes} {minutes}. "
+        "Пока все фото - на сайте объявления."
     )
 
 
@@ -789,7 +842,7 @@ def format_notification(p: PendingNotification) -> str:
     модель, год и диапазон пробега (так считает `market_estimate`); при
     неизвестном пробеге — все пробеги, и это сказано прямо.
     """
-    lines = [f"<b>{html.escape(card_title(p))}</b>"]
+    lines = [f"<b>{html.escape(card_heading(p))}</b>"]
 
     if p.price_usd is not None:
         price_line = f"💰 ${_fmt_int(round(p.price_usd))}"
@@ -807,9 +860,9 @@ def format_notification(p: PendingNotification) -> str:
         market_line = f"Рынок: ${_fmt_int(_round_hundred(p.market_avg_usd))}"
         if p.market_samples:
             similar = _plural(p.market_samples, "похожей машине", "похожим машинам", "похожим машинам")
-            market_line += f" — по {p.market_samples} {similar}"
+            market_line += f" - по {p.market_samples} {similar}"
         if p.mileage_km is None:
-            market_line += " (пробег не указан — по всем пробегам)"
+            market_line += " (пробег не указан - по всем пробегам)"
         lines.append(market_line)
 
     details = []
@@ -834,10 +887,10 @@ def format_notification(p: PendingNotification) -> str:
 def format_notification_legacy(p: PendingNotification) -> str:
     """Карточка до 22.10.2026 — вид при `BOT_RICH_CARDS_PER_CYCLE=0` (откат флагом)."""
     title = html.escape(p.title) if p.title else "Объявление"
-    year = str(p.year) if p.year is not None else "—"
-    mileage = f"{_fmt_int(p.mileage_km)} км" if p.mileage_km is not None else "—"
-    price = f"${_fmt_int(round(p.price_usd))}" if p.price_usd is not None else "—"
-    city = html.escape(p.city) if p.city else "—"
+    year = str(p.year) if p.year is not None else "-"
+    mileage = f"{_fmt_int(p.mileage_km)} км" if p.mileage_km is not None else "-"
+    price = f"${_fmt_int(round(p.price_usd))}" if p.price_usd is not None else "-"
+    city = html.escape(p.city) if p.city else "-"
 
     below = ""
     if p.below_market_percent is not None and p.below_market_percent > 0:
@@ -879,7 +932,7 @@ def _digest_line(note: PendingNotification) -> str:
         details.append(f"${_fmt_int(round(note.price_usd))}")
     if note.below_market_percent:
         details.append(f"на {_fmt_percent(note.below_market_percent)}% ниже рынка")
-    suffix = f" — {', '.join(details)}" if details else ""
+    suffix = f" - {', '.join(details)}" if details else ""
     return f'<a href="{note.url}">{title}</a>{suffix}'
 
 
@@ -943,7 +996,7 @@ def format_digest(
     return "\n".join(lines)
 
 
-DIGEST_EXPIRED_TEXT = "Список устарел — свежие предложения в «🔥 Лучшее сейчас»"
+DIGEST_EXPIRED_TEXT = "Список устарел - свежие предложения в «🔥 Лучшее сейчас»"
 DIGEST_GONE_TEXT = "Эти объявления уже сняты с продажи"
 DIGEST_EMPTY_TEXT = "Больше объявлений в этом списке нет"
 
@@ -957,10 +1010,10 @@ def format_digest_legacy(brand_name: str, notes: list[PendingNotification]) -> s
     даётся текстом на каждой строке.
     """
     word = _plural(len(notes), "объявление", "объявления", "объявлений")
-    lines = [f"🚗 <b>{html.escape(brand_name)}</b> — {len(notes)} {word} по вашим фильтрам\n"]
+    lines = [f"🚗 <b>{html.escape(brand_name)}</b> - {len(notes)} {word} по вашим фильтрам\n"]
     for index, note in enumerate(notes, start=1):
         title = html.escape(note.title) if note.title else "Объявление"
-        price = f"${_fmt_int(round(note.price_usd))}" if note.price_usd is not None else "—"
+        price = f"${_fmt_int(round(note.price_usd))}" if note.price_usd is not None else "-"
         details = [price]
         if note.below_market_percent is not None and note.below_market_percent > 0:
             details.append(f"на {note.below_market_percent:g}% ниже средней")
@@ -997,7 +1050,7 @@ def format_filter_line(
     else:
         parts = ["Все марки"]
     if year_from is not None or year_to is not None:
-        parts.append(f"{year_from or '…'}–{year_to or '…'} г.")
+        parts.append(f"{year_from or '…'}-{year_to or '…'} г.")
     if max_age_years is not None:
         parts.append(f"не старше {max_age_years} лет")
     if fuel_groups_label(fuel_groups):
@@ -1023,6 +1076,6 @@ def preview_intro_text(count: int) -> str:
     """Подводка к разовой подборке после создания фильтра."""
     word = "объявление" if count == 1 else ("объявления" if 2 <= count <= 4 else "объявлений")
     return (
-        f"Вот {count} подходящих {word} за последние сутки — чтобы вы сразу "
+        f"Вот {count} подходящих {word} за последние сутки - чтобы вы сразу "
         "увидели, что фильтр работает. Дальше буду присылать только новые."
     )

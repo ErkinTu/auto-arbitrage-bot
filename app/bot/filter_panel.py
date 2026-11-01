@@ -89,7 +89,7 @@ PRICE_QUICK = (5_000, 10_000, 15_000, 20_000)
 
 LINE = "━━━━━━━━━━━━━━━━"
 ALL_CARS_HINT = (
-    "💡 Фильтр на все марки без «ниже рынка» — самый широкий: при лимите пушей за "
+    "💡 Фильтр на все марки без «ниже рынка» - самый широкий: при лимите пушей за "
     "цикл его объявления идут последними."
 )
 
@@ -193,7 +193,7 @@ def years_label(draft: dict) -> str | None:
         return f"не старше {draft['max_age_years']} лет"
     year_from, year_to = draft.get("year_from"), draft.get("year_to")
     if year_from and year_to:
-        return str(year_from) if year_from == year_to else f"{year_from}–{year_to}"
+        return str(year_from) if year_from == year_to else f"{year_from}-{year_to}"
     if year_from:
         return f"от {year_from}"
     if year_to:
@@ -244,7 +244,7 @@ _EMPTY_LABELS = {
 }
 
 _PROMPTS = {
-    STEP_BRAND: "Марка. «Все марки» — без ограничения.",
+    STEP_BRAND: "Марка. «Все марки» - без ограничения.",
     STEP_MODEL: "Модель выбранной марки.",
     STEP_YEARS: "Годы выпуска. Пример: <code>2015-2022</code>, <code>от 2018</code> или <code>до 2012</code>.",
     STEP_MILEAGE: "Максимальный пробег, км. Пример: <code>150000</code> или <code>150к</code>.",
@@ -252,7 +252,7 @@ _PROMPTS = {
     STEP_MARKET: "Присылать только авто дешевле средней цены по рынку?",
     STEP_REGION: "Откуда показывать авто. ⚠️ У зарубежных цена обычно без растаможки.",
     STEP_FUEL: (
-        "Тип топлива — можно отметить несколько. Плагин-гибриды — в «Гибрид». "
+        "Тип топлива - можно отметить несколько. Плагин-гибриды - в «Гибрид». "
         "Если топливо в объявлении не указано, по выбранным типам оно не придёт."
     ),
 }
@@ -281,7 +281,7 @@ def render_text(draft: dict, step: int, *, editing: bool = False, notice: str | 
         lines.append(f"⚠️ {html.escape(notice)}")
     prompt = _PROMPTS[step]
     if step == STEP_MODEL and not draft.get("brand_id"):
-        prompt = "Модель выбирается после марки — сначала шаг 1."
+        prompt = "Модель выбирается после марки - сначала шаг 1."
     if step in TEXT_STEPS:
         prompt += "\nМожно написать своё значение сообщением."
     lines.append(prompt)

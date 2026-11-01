@@ -744,8 +744,8 @@ def test_photos_limit_text_plurals() -> None:
     from app.bot.messages import photos_limit_text
 
     assert photos_limit_text(30, 1) == (
-        "За час можно открыть 30 альбомов с фото — лимит исчерпан. "
-        "Следующий — через 1 минуту. Пока все фото — на сайте объявления."
+        "За час можно открыть 30 альбомов с фото - лимит исчерпан. "
+        "Следующий - через 1 минуту. Пока все фото - на сайте объявления."
     )
     assert "21 альбом " in photos_limit_text(21, 5) and "5 минут." in photos_limit_text(21, 5)
 
@@ -816,3 +816,17 @@ def test_mashina_phone_as_list_is_parsed() -> None:
     assert photos.mashina_phone_from_page(page) == "996555123456"
     json_variant = '\\"slug\\":\\"phone\\",\\"value_text\\":null,\\"value_json\\":[\\"+996 555 12 34 56\\"]'
     assert photos.mashina_phone_from_page(json_variant) == "996555123456"
+
+
+def test_card_buttons_two_floors() -> None:
+    """Сверху две короткие кнопки, снизу на всю ширину «📷 Все фото» (01.11.2026)."""
+
+    def layout(markup):
+        return [[button.text for button in row] for row in markup.inline_keyboard]
+
+    assert layout(card_kb(42, URL, photos=True)) == [["🚫 Не то", "Открыть ↗"], ["📷 Все фото"]]
+    assert layout(card_kb(42, URL)) == [["🚫 Не то", "Открыть ↗"]]
+    hidden = hidden_kb("Toyota Camry", 7, 42, URL, photos=True)
+    assert layout(hidden) == [["↩️ Вернуть Toyota Camry", "Открыть ↗"], ["📷 Все фото"]]
+    assert has_photos_button(hidden) and not has_photos_button(card_kb(42, URL))
+    assert layout(hidden_kb("BMW", 7, 42, None)) == [["↩️ Вернуть BMW"]]

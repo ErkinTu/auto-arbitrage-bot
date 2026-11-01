@@ -50,7 +50,7 @@ def test_new_panel_shows_seven_steps_with_statuses_and_summary() -> None:
     assert "✅ 3 Годы: от 2015" in text
     assert "✏️ 4 Пробег: любой  ← сейчас" in text
     assert "⬜ 7 Регион: вся КР" in text
-    assert "Итог: Toyota (все модели) · 2015–… г. · регион: Местный рынок (вся КР)" in text
+    assert "Итог: Toyota (все модели) · 2015-… г. · регион: Местный рынок (вся КР)" in text
 
 
 def test_all_cars_hint_only_without_brand_and_market() -> None:
@@ -497,7 +497,7 @@ def test_create_flow_in_one_message(flow) -> None:
     assert {message_id for message_id, _ in bot.edits} == {50}
     assert panel.answers == []
     last_text = bot.edits[-1][1]
-    assert "✅ 1 Марка: Toyota" in last_text and "✅ 3 Годы: 2015–2020" in last_text
+    assert "✅ 1 Марка: Toyota" in last_text and "✅ 3 Годы: 2015-2020" in last_text
     assert "✏️ 7 Регион" in last_text
 
     _press(panel, state, "save")

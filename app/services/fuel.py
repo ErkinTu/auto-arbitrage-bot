@@ -34,6 +34,24 @@ FUEL_LABELS: dict[str, str] = {
     DIESEL: "Дизель",
 }
 
+# Подпись в карточке объявления: полные слова, как у источников
+# («Электромобиль», а не кнопочное «Электро»).
+CARD_FUEL_LABELS: dict[str, str] = {
+    PETROL: "Бензин",
+    PETROL_GAS: "Бензин, Газ",
+    HYBRID: "Гибрид",
+    ELECTRIC: "Электромобиль",
+    DIESEL: "Дизель",
+}
+
+
+def fuel_display(fuel_type: str | None, fuel_group: str | None) -> str | None:
+    """Топливо для карточки: как написал источник (lalafo), иначе по группе (mashina)."""
+    if fuel_type and fuel_type.strip():
+        return fuel_type.strip()
+    return CARD_FUEL_LABELS.get(fuel_group) if fuel_group else None
+
+
 # Значение `fuel_type` в API mashina → группа. «газ» у mashina — бензиновая
 # машина с ГБО (по заголовку её от бензиновой не отличить).
 MASHINA_FUEL_VALUES: dict[str, str] = {

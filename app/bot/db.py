@@ -61,6 +61,7 @@ from app.services.access_schedule import (
     tail_end,
 )
 from app.services.events import (
+    EVENT_MENU_OPEN,
     EVENT_PAUSED,
     EVENT_PAYMENT_CREATED,
     EVENT_RESUMED,
@@ -1110,6 +1111,41 @@ def delete_block(telegram_id: int, block_id: int) -> bool:
         session.delete(block)
         session.commit()
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class FilterSentStats:
+    """Сколько фильтр прислал за период и лучший % ниже рынка среди присланного."""
+
+    count: int
+    best_percent: float | None
+
+
+def filter_sent_stats(telegram_id: int, filter_id: int, days: int = 7) -> FilterSentStats:
+    """Для карточки фильтра в /menu: «за 7 дней прислал N (лучшее - на X%)»."""
+    since = _utcnow() - timedelta(days=days)
+    with SessionLocal() as session:
+        row = session.execute(
+            select(func.count(SentNotification.id), func.max(SentNotification.below_market_percent))
+            .join(BotUser, BotUser.id == SentNotification.user_id)
+            .where(
+                BotUser.telegram_id == telegram_id,
+                SentNotification.filter_id == filter_id,
+                SentNotification.sent_at >= since,
+            )
+        ).one()
+        best = float(row[1]) if row[1] is not None and row[1] > 0 else None
+        return FilterSentStats(count=int(row[0] or 0), best_percent=best)
+
+
+def log_menu_open(telegram_id: int) -> None:
+    """Событие `menu_open`: без него через месяц не решить, развивать меню или убирать."""
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is None:
+            return
+        log_event(session, user.id, EVENT_MENU_OPEN)
+        session.commit()
 
 
 def issue_admin_login_token(telegram_id: int) -> str | None:
