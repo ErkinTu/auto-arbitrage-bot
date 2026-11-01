@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 
 from app.bot import db, photos
 from app.bot import filter_panel as fp
+from app.bot import menu_screens as ms
 from app.bot.keyboards import (
     FilterAddCB,
     FilterEditCB,
@@ -91,7 +92,6 @@ from app.bot.messages import (
     duplicate_filter_text,
     filter_created_text,
     filters_limit_text,
-    format_filter_line,
     invite_text,
     onboarding_text,
     preview_intro_text,
@@ -261,36 +261,39 @@ async def _notify_referral_bonus(bot, chat_id: int, days: int) -> None:
 
 @router.message(Command("invite"))
 async def cmd_invite(message: Message) -> None:
+    text, link = await invite_content(message.from_user.id)
+    await message.answer(
+        text,
+        reply_markup=share_kb(link) if link else None,
+        disable_web_page_preview=True,
+    )
+
+
+async def invite_content(telegram_id: int) -> tuple[str, str | None]:
+    """Текст приглашения и ссылка (None — ссылки нет). Общее для /invite и меню."""
     settings = get_settings()
     if not settings.referral_enabled:
-        await message.answer("Реферальная программа сейчас недоступна.")
-        return
+        return "Реферальная программа сейчас недоступна.", None
     if not settings.bot_username:
         # Без username бота deep-link не собрать — молча отдавать «ссылку» вида
         # t.me/None было бы хуже честного отказа.
-        await message.answer("Реферальные ссылки временно недоступны.")
-        return
-
+        return "Реферальные ссылки временно недоступны.", None
     try:
-        info = await asyncio.to_thread(db.get_invite_info, message.from_user.id)
+        info = await asyncio.to_thread(db.get_invite_info, telegram_id)
     except LookupError:
-        await message.answer("Отправьте /start, чтобы начать пользоваться ботом.")
-        return
+        return "Отправьте /start, чтобы начать пользоваться ботом.", None
 
     link = f"https://t.me/{settings.bot_username.lstrip('@')}?start=ref_{info.invite_code}"
-    await message.answer(
-        invite_text(
-            link=link,
-            qualified=info.qualified,
-            friends_to_next_bonus=info.friends_to_next_bonus,
-            bonus_days=settings.referral_bonus_days,
-            friends_per_bonus=settings.referral_friends_per_bonus,
-            bonuses_granted=info.bonuses_granted,
-            limit_reached=info.limit_reached,
-        ),
-        reply_markup=share_kb(link),
-        disable_web_page_preview=True,
+    text = invite_text(
+        link=link,
+        qualified=info.qualified,
+        friends_to_next_bonus=info.friends_to_next_bonus,
+        bonus_days=settings.referral_bonus_days,
+        friends_per_bonus=settings.referral_friends_per_bonus,
+        bonuses_granted=info.bonuses_granted,
+        limit_reached=info.limit_reached,
     )
+    return text, link
 
 
 @router.message(Command("help"))
@@ -319,15 +322,17 @@ async def menu_access(message: Message) -> None:
     await _send_plans(message, info)
 
 
-async def _send_plans(message: Message, info) -> None:
+async def _send_plans(message: Message, info, telegram_id: int | None = None) -> None:
+    """`telegram_id` — когда `message` написал бот (меню): там `from_user` — бот."""
     settings = get_settings()
+    telegram_id = telegram_id if telegram_id is not None else message.from_user.id
     if info is not None and info.access_status == "member":
         # Участнику группы платить нечем и незачем — до вайтлиста оплаты не
         # доходим, иначе он получил бы «оплата скоро», хотя доступ у него есть.
         await message.answer(SUBSCRIPTION_MEMBER_TEXT)
         return
 
-    if not settings.subscription_allowed_for(message.from_user.id):
+    if not settings.subscription_allowed_for(telegram_id):
         # Обкатка платежей на проде: контур включён и проверяется тестировщиком,
         # остальным честно говорим «скоро», а не «сломалось».
         await message.answer(
@@ -397,11 +402,10 @@ async def cb_plan_selected(callback: CallbackQuery, callback_data: PlanCB) -> No
 
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
+    """Тот же экран, что «💎 Доступ» в /menu — новым сообщением (одна правда)."""
     info = await asyncio.to_thread(db.get_subscription_info, message.from_user.id)
-    if info is None:
-        await message.answer("❌ Подписка неактивна. Оформить: /subscribe")
-        return
-    await message.answer(_status_text(info))
+    text, markup = ms.render_access(info)
+    await message.answer(text, reply_markup=markup)
 
 
 def _status_text(info) -> str:
@@ -466,21 +470,7 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 
 def _filter_summary(item: db.FilterDTO) -> str:
-    return format_filter_line(
-        brand_name=item.brand_name,
-        model_name=item.model_name,
-        year_from=item.year_from,
-        year_to=item.year_to,
-        mileage_max_km=item.mileage_max_km,
-        price_max_usd=item.price_max_usd,
-        below_market_only=item.below_market_only,
-        below_market_percent=item.below_market_percent,
-        skip_foreign=item.skip_foreign,
-        region=item.region,
-        brand_group=item.brand_group,
-        max_age_years=item.max_age_years,
-        fuel_groups=item.fuel_groups,
-    )
+    return ms.filter_summary(item)
 
 
 def _filters_text(filters: list[db.FilterDTO], *, note: bool = False) -> str:
@@ -523,15 +513,15 @@ def _should_show_priority_note(chat_id: int, filters: list[db.FilterDTO]) -> boo
 @router.message(Command("filters"))
 @router.message(F.text == MENU_FILTERS)
 async def cmd_filters(message: Message) -> None:
-    filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
-    if not filters:
-        await message.answer(
-            "У вас пока нет фильтров — поэтому я молчу.\n\n" + PRESETS_PROMPT_TEXT,
-            reply_markup=presets_kb(),
-        )
-        return
-    note = _should_show_priority_note(message.chat.id, filters)
-    await message.answer(_filters_text(filters, note=note), reply_markup=filters_kb(filters))
+    """Тот же экран, что «📋 Фильтры» в /menu — новым сообщением (одна правда)."""
+    text, markup = await filters_screen(message.from_user.id, message.chat.id)
+    await message.answer(text, reply_markup=markup)
+
+
+async def filters_screen(telegram_id: int, chat_id: int) -> ms.Screen:
+    filters = await asyncio.to_thread(db.list_filters, telegram_id)
+    note = FILTERS_PRIORITY_NOTE if _should_show_priority_note(chat_id, filters) else None
+    return ms.render_filters(filters, get_settings().bot_max_filters_per_user, note=note)
 
 
 @router.callback_query(FilterDeleteCB.filter())
@@ -556,11 +546,10 @@ async def delete_filter_cb(query: CallbackQuery, callback_data: FilterDeleteCB) 
 
 @router.message(Command("blacklist"))
 async def cmd_blacklist(message: Message) -> None:
+    """Тот же экран, что «🚫 Чёрный список» в /menu — новым сообщением."""
     blocks = await asyncio.to_thread(db.list_blocks, message.from_user.id)
-    if not blocks:
-        await message.answer(BLOCK_LIST_EMPTY_TEXT)
-        return
-    await message.answer(blocks_text(blocks), reply_markup=blocks_kb(blocks))
+    text, markup = ms.render_blacklist(blocks)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(BlockDeleteCB.filter())
@@ -1145,7 +1134,8 @@ async def cb_panel(query: CallbackQuery, callback_data: fp.PanelCB, state: FSMCo
         with suppress(TelegramAPIError):
             await query.message.edit_text(
                 "✖ Отменено — фильтр не сохранён." if data.get("filter_id") is None
-                else "✖ Отменено — фильтр остался прежним."
+                else "✖ Отменено — фильтр остался прежним.",
+                reply_markup=ms.back_to_filters_kb(),
             )
         return
     if action == "noop":
@@ -1218,11 +1208,16 @@ async def _save_panel(query: CallbackQuery, state: FSMContext, data: dict) -> No
         return
     await state.clear()
     await query.answer("Фильтр сохранен")
+    back = ms.back_to_filters_kb()  # панель могли открыть из /menu — путь назад
     if filter_id is None:
-        await query.message.edit_text(filter_created_text(html.escape(_filter_summary(saved))))
+        await query.message.edit_text(
+            filter_created_text(html.escape(_filter_summary(saved))), reply_markup=back
+        )
         await _send_filter_preview(query.message, saved.id)
     else:
-        await query.message.edit_text(filter_updated_text(html.escape(_filter_summary(saved))))
+        await query.message.edit_text(
+            filter_updated_text(html.escape(_filter_summary(saved))), reply_markup=back
+        )
 
 
 @router.message(FilterPanel.active, F.text, ~F.text.startswith("/"))

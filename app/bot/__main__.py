@@ -13,6 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from app.bot.access import AccessMiddleware
 from app.bot.commands import setup_bot_commands
 from app.bot.handlers import router
+from app.bot.menu_handlers import router as menu_router
 from app.bot.poller import polling_loop
 from app.bot.protection import ContentProtectionMiddleware
 from app.bot.wizard import WizardExitMiddleware
@@ -55,6 +56,7 @@ async def main() -> None:
     # После access: сбрасываем визард только у тех, кого бот вообще обслуживает.
     dispatcher.message.outer_middleware(WizardExitMiddleware())
     dispatcher.callback_query.outer_middleware(access)
+    dispatcher.include_router(menu_router)
     dispatcher.include_router(router)
 
     await setup_bot_commands(bot)

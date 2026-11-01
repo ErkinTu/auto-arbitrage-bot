@@ -12,7 +12,9 @@ from pathlib import Path
 
 from app.bot.commands import BOT_COMMANDS, setup_bot_commands
 
-HANDLERS_SOURCE = Path(__file__).resolve().parents[1] / "app" / "bot" / "handlers.py"
+BOT_DIR = Path(__file__).resolve().parents[1] / "app" / "bot"
+# Модули с хендлерами команд: основной и меню (/menu, план 01.11.2026 п. В).
+HANDLER_SOURCES = (BOT_DIR / "handlers.py", BOT_DIR / "menu_handlers.py")
 
 # Команды, которые в меню не показываем осознанно (см. docstring commands.py).
 # `admin` — привилегия: в автодополнении у всех она раскрывала бы сам факт
@@ -22,8 +24,10 @@ INTENTIONALLY_HIDDEN = {"subscribe", "admin"}
 
 def _registered_commands() -> set[str]:
     """Что реально висит на @router.message(Command("...")) в хендлерах."""
-    source = HANDLERS_SOURCE.read_text(encoding="utf-8")
-    return set(re.findall(r'Command\("([a-z_]+)"\)', source))
+    found: set[str] = set()
+    for path in HANDLER_SOURCES:
+        found |= set(re.findall(r'Command\("([a-z_]+)"\)', path.read_text(encoding="utf-8")))
+    return found
 
 
 class _FakeBot:

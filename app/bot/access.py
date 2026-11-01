@@ -38,12 +38,15 @@ CHAT_PROBLEM_MARKER = "chat not found"
 # /pause и /play — тоже: включить/выключить свои же уведомления можно всегда
 # (пауза у истёкшего доступа ничего не стоит, а «доступ закончился» на /play
 # путал бы сильнее, чем молчание).
-ENTRY_COMMANDS = {"start", "help", "subscribe", "status", "cancel", "invite", "pause", "play"}
+# /menu — тоже: открывается всем, а гейт — внутри экранов (menu_handlers.py).
+ENTRY_COMMANDS = {"start", "help", "subscribe", "status", "cancel", "invite", "pause", "play", "menu"}
 # Callback-и, доступные без активного доступа (префикс aiogram CallbackData):
 # кнопка триала в онбординге и выбор тарифа в /subscribe. Без второго меню
 # тарифов открывалось (команда — входная), а нажатие на план упиралось в
 # «доступ закончился» — оплатить не мог ровно тот, кому это нужнее всего.
-ENTRY_CALLBACK_PREFIXES = {"trial", "plan", "play"}
+# «m» — кнопки меню (menu_screens.MenuCB): без доступа там «нужен доступ» +
+# «💎 Доступ», а не глухой отказ.
+ENTRY_CALLBACK_PREFIXES = {"trial", "plan", "play", "m"}
 ENTRY_CALLBACK_SEP = ":"
 
 
@@ -81,6 +84,9 @@ class AccessMiddleware(BaseMiddleware):
         has_access = await asyncio.to_thread(
             resolve_access, user.id, user.username, user.first_name, is_member
         )
+        # Входным экранам (меню) нужно знать, есть ли доступ, чтобы гейтить
+        # разделы внутри себя.
+        data["has_access"] = bool(has_access)
         if has_access or self._is_entry(event):
             return await handler(event, data)
 

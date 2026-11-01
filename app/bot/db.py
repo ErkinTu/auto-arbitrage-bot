@@ -61,6 +61,7 @@ from app.services.access_schedule import (
     tail_end,
 )
 from app.services.events import (
+    EVENT_MENU_OPEN,
     EVENT_PAUSED,
     EVENT_PAYMENT_CREATED,
     EVENT_RESUMED,
@@ -1230,6 +1231,32 @@ def save_gallery(listing_id: int, urls: list[str]) -> None:
     with SessionLocal() as session:
         session.execute(update(Listing).where(Listing.id == listing_id).values(image_urls=urls))
         session.commit()
+
+
+def filter_sent_stats(telegram_id: int, filter_id: int, days: int = 7) -> tuple[int, float | None]:
+    """Сколько уведомлений прислал свой фильтр за `days` дней и лучшее «ниже
+    рынка» среди них — для карточки фильтра в меню (продаёт сам фильтр)."""
+    since = _utcnow() - timedelta(days=days)
+    with SessionLocal() as session:
+        row = session.execute(
+            select(func.count(SentNotification.id), func.max(SentNotification.below_market_percent))
+            .join(BotUser, SentNotification.user_id == BotUser.id)
+            .where(
+                BotUser.telegram_id == telegram_id,
+                SentNotification.filter_id == filter_id,
+                SentNotification.sent_at >= since,
+            )
+        ).one()
+        count, best = row
+        return int(count or 0), float(best) if best is not None else None
+
+
+def log_menu_open(telegram_id: int) -> None:
+    with SessionLocal() as session:
+        user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
+        if user is not None:
+            log_event(session, user.id, EVENT_MENU_OPEN)
+            session.commit()
 
 
 def mark_user_blocked(telegram_id: int) -> None:

@@ -26,6 +26,9 @@ EVENT_REFERRAL_BONUS = "referral_bonus"
 EVENT_PAUSED = "paused"  # /pause — кто и надолго ли уходит
 EVENT_RESUMED = "resumed"  # /play (payload: сколько часов был на паузе)
 EVENT_PAUSE_REMINDER = "pause_reminder"  # ежедневное «вы на паузе»
+# /menu (план 01.11.2026, п. В): пользуются ли меню вообще — без замера через
+# месяц не решить, развивать его или убирать.
+EVENT_MENU_OPEN = "menu_open"
 
 # Порядок = порядок воронки в отчёте.
 FUNNEL_EVENTS = (
