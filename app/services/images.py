@@ -34,13 +34,29 @@ def _is_http_url(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(("http://", "https://"))
 
 
+# Заглушка вместо фото: у объявления без фотографий mashina отдаёт
+# `https://s3.mashina.kg/assets/preview.png` — серую картинку-плейсхолдер. Бот
+# показывал её как фото машины (01.11.2026, витрина «Лучшее сейчас»). Настоящие
+# фото mashina лежат в `/images/<дата>/<id объявления>/`.
+_PLACEHOLDER_MARKERS = ("mashina.kg/assets/",)
+
+
+def is_placeholder_image(url: str | None) -> bool:
+    return bool(url) and any(marker in url for marker in _PLACEHOLDER_MARKERS)
+
+
+def real_photo(url: str | None) -> str | None:
+    """Ссылка на фото или None, если фото нет или это заглушка источника."""
+    return url if url and not is_placeholder_image(url) else None
+
+
 def _gallery_item_url(item: Any) -> str | None:
     if _is_http_url(item):
-        return item
+        return real_photo(item)
     if isinstance(item, dict):
         for url_key in _IMAGE_URL_KEYS:
             if _is_http_url(item.get(url_key)):
-                return item[url_key]
+                return real_photo(item[url_key])
     return None
 
 
@@ -87,7 +103,7 @@ def extract_image_url(payload: dict[str, Any] | None) -> str | None:
         return None
     # Плоские поля — на случай, если источник отдаст одно фото без галереи.
     for key in ("image_url", "photo", "preview_image"):
-        if _is_http_url(payload.get(key)):
+        if _is_http_url(payload.get(key)) and real_photo(payload[key]):
             return payload[key]
     for key in ("photos", "images"):
         gallery = payload.get(key)

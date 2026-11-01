@@ -776,3 +776,42 @@ def test_fetch_card_reads_mashina_phone(monkeypatch) -> None:
     _patch_mashina_http(monkeypatch, _FakeResponse(page, text=html))
     card = photos.fetch_card("mashina.kg", "1", page)
     assert card.phone == "996555123456" and len(card.urls) == len(MASHINA_IMAGES)
+
+
+# --- проверка витрины 01.11.2026: заглушка вместо фото, номер списком --------------------
+
+
+def test_mashina_placeholder_is_not_a_photo() -> None:
+    from app.services.images import extract_image_url, real_photo
+
+    stub = "https://s3.mashina.kg/assets/preview.png"
+    assert real_photo(stub) is None
+    assert extract_image_url({"preview_image": stub}) is None
+    assert extract_image_urls({"images": [{"medium": stub}]}) == []
+    real = MASHINA_IMAGES[0]["medium"]
+    assert extract_image_urls({"images": [{"medium": stub}, {"medium": real}]}) == [real]
+
+
+def test_card_with_stored_placeholder_goes_out_without_photo() -> None:
+    from app.bot.matching import build_pending
+
+    listing = Listing(
+        id=1, source_id=1, title="Mercedes C", year=1999, city="Бишкек",
+        current_price_usd=1830, image_url="https://s3.mashina.kg/assets/preview.png",
+    )
+    note = build_pending(
+        listing, chat_id=1, filter_id=1, below_percent=50.0, estimate=None,
+        source_names={1: "mashina.kg"}, brand_names={}, model_names={},
+    )
+    assert note.image_url is None
+
+
+def test_mashina_phone_as_list_is_parsed() -> None:
+    """Регрессия 01.11.2026: у большинства страниц `"value":["996…"]` — номер не находился."""
+    page = (
+        '\\"attributes\\":[{\\"slug\\":\\"phone\\",\\"name\\":\\"Телефон\\",'
+        '\\"value\\":[\\"996555123456\\"],\\"meta\\":null}]'
+    )
+    assert photos.mashina_phone_from_page(page) == "996555123456"
+    json_variant = '\\"slug\\":\\"phone\\",\\"value_text\\":null,\\"value_json\\":[\\"+996 555 12 34 56\\"]'
+    assert photos.mashina_phone_from_page(json_variant) == "996555123456"

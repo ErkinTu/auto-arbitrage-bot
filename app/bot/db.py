@@ -566,6 +566,7 @@ def get_showcase(
         SessionLocal,
         min_samples=settings.bot_below_avg_min_samples,
         max_below_percent=settings.bot_max_below_market_percent,
+        max_age_years=settings.bot_showcase_max_age_years,
     )
     if skip_seen:
         offset = first_unseen_offset(items, chat_id)
@@ -579,8 +580,40 @@ def refresh_showcase() -> None:
         SessionLocal,
         min_samples=settings.bot_below_avg_min_samples,
         max_below_percent=settings.bot_max_below_market_percent,
+        max_age_years=settings.bot_showcase_max_age_years,
         refresh=True,
+        verify=verify_showcase_item,
     )
+
+
+def verify_showcase_item(item: PendingNotification) -> bool | None:
+    """Живо ли объявление витрины на источнике (тот же запрос, что у «Все фото»).
+
+    Снятое — сразу в базу (`mark_listing_gone`): узнаём раньше сверки, и оно
+    уходит заодно из «ниже рынка». Сбой запроса — None: «не знаем» ≠ «снято».
+    """
+    from app.bot import photos  # без цикла импорта: photos не знает про db
+
+    with SessionLocal() as session:
+        row = session.execute(
+            select(Listing.external_id, Source.name)
+            .join(Source, Listing.source_id == Source.id)
+            .where(Listing.id == item.listing_id)
+        ).first()
+    if row is None:
+        return False
+    external_id, source_name = row
+    if not photos.can_fetch(source_name):
+        return None
+    try:
+        photos.fetch_card(source_name, external_id, item.url)
+    except photos.ListingGone as gone:
+        mark_listing_gone(item.listing_id, gone.reason, gone.status_id)
+        return False
+    except Exception:
+        logger.warning("showcase verify failed for listing %s", item.listing_id, exc_info=True)
+        return None
+    return True
 
 
 def list_brands() -> list[BrandDTO]:

@@ -22,7 +22,7 @@ from app.models import (
 )
 from app.parsers.base import ParserAdapter
 from app.services.catalog_service import resolve_normalized_listing
-from app.services.images import extract_image_url, extract_image_urls
+from app.services.images import extract_image_url, extract_image_urls, is_placeholder_image
 from app.services.normalizer import NormalizedListing
 from app.services.fuel import fuel_group_from_lalafo
 from app.services.phones import normalize_phone
@@ -70,6 +70,8 @@ def _set_current_fields(listing: Listing, item: NormalizedListing) -> None:
     # известное: пропажа ссылки из ответа — не пропажа фото у объявления.
     if item.image_url:
         listing.image_url = item.image_url
+    elif is_placeholder_image(listing.image_url):
+        listing.image_url = None  # записанная раньше заглушка mashina (services/images.py)
     if item.image_urls:
         listing.image_urls = list(item.image_urls)
     # Нет группы в ответе — не затираем: у mashina её ставит разметка через API
