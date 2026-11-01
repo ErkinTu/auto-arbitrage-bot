@@ -58,7 +58,7 @@ class Plan:
         """Подпись кнопки в меню /subscribe: срок, скорость и цена в одной строке."""
         speed = "с отставанием ~1 ч" if self.delayed else "полная скорость"
         star = "⭐ " if self.recommended else ""
-        return f"{star}{self.period_label} · {speed} — {self.price} сом"
+        return f"{star}{self.period_label} · {speed} - {self.price} сом"
 
     @property
     def period_label(self) -> str:

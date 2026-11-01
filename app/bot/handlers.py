@@ -514,7 +514,7 @@ async def cb_play(callback: CallbackQuery) -> None:
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Действие отменено. /add_filter — начать заново.")
+    await message.answer("Действие отменено. /add_filter - начать заново.")
 
 
 # --- /filters ---------------------------------------------------------------
@@ -582,7 +582,7 @@ async def cmd_filters(message: Message) -> None:
     filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
     if not filters:
         await message.answer(
-            "У вас пока нет фильтров — поэтому я молчу.\n\n" + PRESETS_PROMPT_TEXT,
+            "У вас пока нет фильтров - поэтому я молчу.\n\n" + PRESETS_PROMPT_TEXT,
             reply_markup=presets_kb(),
         )
         return
@@ -599,7 +599,7 @@ async def delete_filter_cb(query: CallbackQuery, callback_data: FilterDeleteCB) 
     filters = await asyncio.to_thread(db.list_filters, query.from_user.id)
     if not filters:
         await query.message.edit_text(
-            "Фильтров не осталось — без них я молчу.\n\n" + PRESETS_PROMPT_TEXT,
+            "Фильтров не осталось - без них я молчу.\n\n" + PRESETS_PROMPT_TEXT,
             reply_markup=presets_kb(),
         )
         return
@@ -761,9 +761,9 @@ async def unhide_cb(query: CallbackQuery, callback_data: UnhideCB) -> None:
         )
 
 
-PHOTOS_GONE_TEXT = "Объявление снято — фото больше недоступны."
-PHOTOS_MISSING_TEXT = "Других фото у меня нет — все фото на сайте объявления."
-PHOTOS_FAILED_TEXT = "Не удалось загрузить фото с сайта — откройте объявление."
+PHOTOS_GONE_TEXT = "Объявление снято - фото больше недоступны."
+PHOTOS_MISSING_TEXT = "Других фото у меня нет - все фото на сайте объявления."
+PHOTOS_FAILED_TEXT = "Не удалось загрузить фото с сайта - откройте объявление."
 PHOTOS_CONTACT_BUTTON = "💬 Связаться на сайте ↗"  # если номера нет
 PHOTOS_WHATSAPP_BUTTON = "💬 Написать в WhatsApp ↗"
 PHOTOS_SHOWN_TEXT = "Фото этой машины уже выше ⬆️"
@@ -1127,7 +1127,7 @@ def reset_click_limits() -> None:
 def showcase_limit_text(minutes: int) -> str:
     return (
         "Вы уже посмотрели всё лучшее на сейчас. "
-        f"Подборка обновится — загляните через {minutes} мин."
+        f"Подборка обновится - загляните через {minutes} мин."
     )
 
 
@@ -1309,7 +1309,7 @@ async def cmd_edit_filter(message: Message, state: FSMContext) -> None:
     filters = await asyncio.to_thread(db.list_filters, message.from_user.id)
     if not filters:
         await message.answer(
-            "Фильтров пока нет — менять нечего.\n\n" + PRESETS_PROMPT_TEXT,
+            "Фильтров пока нет - менять нечего.\n\n" + PRESETS_PROMPT_TEXT,
             reply_markup=presets_kb(),
         )
         return
@@ -1335,7 +1335,7 @@ async def cb_edit_filter(query: CallbackQuery, callback_data: FilterEditCB, stat
 
 
 async def _stale_panel(query: CallbackQuery) -> None:
-    await query.answer("Эта панель устарела — начните заново: /add_filter", show_alert=True)
+    await query.answer("Эта панель устарела - начните заново: /add_filter", show_alert=True)
     with suppress(TelegramAPIError):
         await query.message.edit_reply_markup(reply_markup=None)
 
@@ -1356,8 +1356,8 @@ async def cb_panel(query: CallbackQuery, callback_data: fp.PanelCB, state: FSMCo
         await query.answer("Отменено")
         with suppress(TelegramAPIError):
             await query.message.edit_text(
-                "✖ Отменено — фильтр не сохранён." if data.get("filter_id") is None
-                else "✖ Отменено — фильтр остался прежним."
+                "✖ Отменено - фильтр не сохранён." if data.get("filter_id") is None
+                else "✖ Отменено - фильтр остался прежним."
             )
         return
     if action == "noop":
@@ -1413,7 +1413,7 @@ async def _save_panel(query: CallbackQuery, state: FSMContext, data: dict) -> No
             )
     except db.DuplicateFilterError:
         # Панель не закрываем: человек поправит шаг и сохранит снова.
-        await state.update_data(notice="Такой фильтр у вас уже есть — измените что-нибудь.")
+        await state.update_data(notice="Такой фильтр у вас уже есть - измените что-нибудь.")
         await query.answer("Такой фильтр уже есть")
         await _redraw(query.bot, query.message.chat.id, state)
         return
@@ -1424,7 +1424,7 @@ async def _save_panel(query: CallbackQuery, state: FSMContext, data: dict) -> No
         return
     except LookupError:
         await state.clear()
-        await query.answer("Фильтр не найден — возможно, его уже удалили", show_alert=True)
+        await query.answer("Фильтр не найден - возможно, его уже удалили", show_alert=True)
         with suppress(TelegramAPIError):
             await query.message.edit_reply_markup(reply_markup=None)
         return
@@ -1526,7 +1526,7 @@ async def _send_filter_preview(message: Message, filter_id: int) -> None:
 @router.callback_query(PercentCB.filter())
 @router.callback_query(RegionCB.filter())
 async def wizard_stale_button(query: CallbackQuery) -> None:
-    await query.answer("Этот шаг уже неактуален — начните заново: /add_filter", show_alert=True)
+    await query.answer("Этот шаг уже неактуален - начните заново: /add_filter", show_alert=True)
     with suppress(TelegramAPIError):
         await query.message.edit_reply_markup(reply_markup=None)
 

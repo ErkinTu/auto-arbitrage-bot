@@ -744,8 +744,8 @@ def test_photos_limit_text_plurals() -> None:
     from app.bot.messages import photos_limit_text
 
     assert photos_limit_text(30, 1) == (
-        "За час можно открыть 30 альбомов с фото — лимит исчерпан. "
-        "Следующий — через 1 минуту. Пока все фото — на сайте объявления."
+        "За час можно открыть 30 альбомов с фото - лимит исчерпан. "
+        "Следующий - через 1 минуту. Пока все фото - на сайте объявления."
     )
     assert "21 альбом " in photos_limit_text(21, 5) and "5 минут." in photos_limit_text(21, 5)
 

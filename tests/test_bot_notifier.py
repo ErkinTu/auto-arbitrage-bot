@@ -5,6 +5,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from app.bot.matching import PendingNotification
 from app.bot.keyboards import BlockMenuCB, HideCB
 from app.bot.messages import (
+    card_heading,
     card_title,
     format_filter_line,
     format_notification,
@@ -93,8 +94,8 @@ def test_legacy_notification_missing_fields_and_escaping() -> None:
         _note(title="<script>", year=None, mileage_km=None, price_usd=None, city=None)
     )
     assert "&lt;script&gt;" in text
-    assert "Год: — · Пробег: —" in text
-    assert "Цена: <b>—</b>" in text
+    assert "Год: - · Пробег: -" in text
+    assert "Цена: <b>-</b>" in text
     assert "ниже средней" not in text
     assert "Средняя цена" not in text
 
@@ -123,9 +124,9 @@ def _rich_note(**overrides) -> PendingNotification:
 def test_format_notification_matches_owner_layout() -> None:
     text = format_notification(_rich_note())
     assert text.split("\n") == [
-        "<b>Toyota Camry · 2018</b>",
+        "<b>Toyota Camry: 2018 г.</b>",
         "💰 $15 900 · на 18% ниже рынка (выгода ≈ $3 500)",
-        "Рынок: $19 400 — по 31 похожей машине",
+        "Рынок: $19 400 - по 31 похожей машине",
         "98 000 км · Бишкек",
         "mashina.kg",  # источник простым текстом; ссылка — кнопкой «Открыть ↗»
     ]
@@ -138,10 +139,10 @@ def test_format_notification_has_no_placeholders_or_service_phrase() -> None:
             mileage_km=None, city=None, below_market_percent=None, market_avg_usd=None
         )
     )
-    assert "—" not in text
+    assert "—" not in text and ": -" not in text
     assert "Новое объявление" not in text
     assert "Рынок" not in text and "ниже рынка" not in text
-    assert text == "<b>Toyota Camry · 2018</b>\n💰 $15 900\nmashina.kg"
+    assert text == "<b>Toyota Camry: 2018 г.</b>\n💰 $15 900\nmashina.kg"
 
 
 def test_format_notification_says_ниже_рынка_not_средней() -> None:
@@ -160,14 +161,14 @@ def test_format_notification_samples_plural() -> None:
 
 def test_format_notification_unknown_mileage_is_said_plainly() -> None:
     text = format_notification(_rich_note(mileage_km=None))
-    assert "пробег не указан — по всем пробегам" in text
+    assert "пробег не указан - по всем пробегам" in text
 
 
 def test_format_notification_foreign_and_escaping() -> None:
     text = format_notification(_rich_note(city="Китай"))
     assert "🌍 <b>Внимание: авто находится за рубежом</b>" in text
     escaped = format_notification(_rich_note(brand_name=None, model_name=None, title="<b>x</b>: 2016 г."))
-    assert escaped.startswith("<b>&lt;b&gt;x&lt;/b&gt; · 2018</b>")
+    assert escaped.startswith("<b>&lt;b&gt;x&lt;/b&gt;: 2018 г.</b>")
 
 
 def test_card_title_falls_back_to_source_title() -> None:
@@ -176,6 +177,43 @@ def test_card_title_falls_back_to_source_title() -> None:
     lalafo = _rich_note(model_name=None, title="Toyota Camry: 2016 г., 2.5 л, Автомат")
     assert card_title(lalafo) == "Toyota Camry · 2018"
     assert card_title(_rich_note(model_name=None, title=None, year=None)) == "Объявление"
+
+
+def test_card_heading_has_base_specs() -> None:
+    """Первая строка - как у lalafo: «Марка Модель: год, объём, коробка, топливо, кузов»."""
+    mashina = _rich_note(engine_volume=2.5, gearbox="автомат", fuel="Гибрид", body_type="седан")
+    assert card_heading(mashina) == "Toyota Camry: 2018 г., 2.5 л, Автомат, Гибрид, Седан"
+    assert format_notification(mashina).startswith(
+        "<b>Toyota Camry: 2018 г., 2.5 л, Автомат, Гибрид, Седан</b>\n"
+    )
+    bmw = _rich_note(
+        brand_name="BMW", model_name="5 series", year=2020, engine_volume=2.0,
+        gearbox="Автомат", fuel="Бензин", body_type="Седан",
+    )
+    assert card_heading(bmw) == "BMW 5 series: 2020 г., 2 л, Автомат, Бензин, Седан"
+
+
+def test_card_heading_electric_without_volume_and_skips_unknown() -> None:
+    electric = _rich_note(engine_volume=0.0, gearbox="Автомат", fuel="Электромобиль", body_type="Седан")
+    assert card_heading(electric) == "Toyota Camry: 2018 г., Автомат, Электромобиль, Седан"
+    # Неизвестное не выводится, без лишних запятых.
+    assert card_heading(_rich_note(engine_volume=1.6, gearbox=None, fuel=None, body_type="")) == (
+        "Toyota Camry: 2018 г., 1.6 л"
+    )
+    # Мусор без букв (у mashina коробка бывает «-1») пропускается.
+    assert card_heading(_rich_note(gearbox="-1", fuel=None, body_type="внедорожник 5 дв.")) == (
+        "Toyota Camry: 2018 г., Внедорожник 5 дв."
+    )
+    assert card_heading(_rich_note(model_name=None, title=None, year=None)) == "Объявление"
+
+
+def test_fuel_display_prefers_source_text() -> None:
+    from app.services.fuel import fuel_display
+
+    assert fuel_display("Бензин, Газ", "petrol_gas") == "Бензин, Газ"  # lalafo как есть
+    assert fuel_display(None, "electric") == "Электромобиль"  # mashina по группе
+    assert fuel_display(None, "diesel") == "Дизель"
+    assert fuel_display(None, None) is None
 
 
 def test_new_card_fits_photo_caption() -> None:
@@ -209,7 +247,7 @@ def test_rich_cards_top_n_per_chat_get_photo() -> None:
     # Без фото у объявления — текстовая карточка даже в топе.
     assert [message.photo_url for message in messages if message.chat_id == 2] == [None]
     # Новый текст и «Не то» — у всех карточек, не только у топа.
-    assert all(message.text.startswith("<b>Toyota Camry · 2018</b>") for message in messages)
+    assert all(message.text.startswith("<b>Toyota Camry: 2018 г.</b>") for message in messages)
     assert _button_callbacks(chat1[4].reply_markup) == [HideCB(listing_id=4).pack()]
     urls = [button.url for row in chat1[0].reply_markup.inline_keyboard for button in row if button.url]
     assert urls == [notes[0].url]
@@ -277,7 +315,7 @@ def test_format_filter_line() -> None:
         skip_foreign=True,
     )
     assert line == (
-        "BMW X5 · 2015–2020 г. · до 150 000 км · до $25 000 · только ниже рынка · без зарубежных"
+        "BMW X5 · 2015-2020 г. · до 150 000 км · до $25 000 · только ниже рынка · без зарубежных"
     )
     assert (
         format_filter_line(
@@ -314,7 +352,7 @@ def test_format_filter_line() -> None:
             price_max_usd=15_000.0,
             below_market_only=False,
         )
-        == "Все марки · 2015–… г. · до $15 000"
+        == "Все марки · 2015-… г. · до $15 000"
     )
 
 
