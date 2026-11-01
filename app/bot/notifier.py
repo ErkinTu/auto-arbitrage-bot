@@ -102,7 +102,9 @@ def _card(note: PendingNotification, *, rich: bool = False, legacy: bool = False
     photo_url = note.image_url if rich and len(text) <= CAPTION_MAX_LENGTH else None
     # «Все фото» — только у карточки с фото и только если фото не одно (None —
     # галерея неизвестна, кнопка её дотянет).
-    photos = photo_url is not None and (note.photo_count is None or note.photo_count > 1)
+    # У текстовой карточки (не вошла в топ с фото) кнопка тоже нужна: человеку
+    # должно быть можно запросить альбом, фото известно по `image_url`.
+    photos = note.image_url is not None and (note.photo_count is None or note.photo_count > 1)
     return OutgoingMessage(
         chat_id=note.chat_id,
         text=text,

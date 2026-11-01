@@ -248,7 +248,7 @@ def test_rich_cards_top_n_per_chat_get_photo() -> None:
     assert [message.photo_url for message in messages if message.chat_id == 2] == [None]
     # Новый текст и «Не то» — у всех карточек, не только у топа.
     assert all(message.text.startswith("<b>Toyota Camry: 2018 г.</b>") for message in messages)
-    assert _button_callbacks(chat1[4].reply_markup) == [HideCB(listing_id=4).pack()]
+    assert HideCB(listing_id=4).pack() in _button_callbacks(chat1[4].reply_markup)
     urls = [button.url for row in chat1[0].reply_markup.inline_keyboard for button in row if button.url]
     assert urls == [notes[0].url]
 
