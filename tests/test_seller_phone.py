@@ -98,3 +98,20 @@ def test_deactivation_erases_phone() -> None:
     session.commit()
     session.refresh(listing)
     assert listing.is_active is False and listing.seller_phone is None
+
+
+def test_sync_clears_stored_mashina_placeholder() -> None:
+    from tests.test_fuel_filter import _MashinaFeed
+    from tests.test_rich_cards import _mashina_raw
+
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    source.name = "mashina.kg"
+    session.commit()
+    run_sync(session, _MashinaFeed([_mashina_raw()], {}), source, target, mode="fresh")
+    listing = session.scalar(select(Listing))
+    listing.image_url = "https://s3.mashina.kg/assets/preview.png"  # записано до фикса
+    session.commit()
+    run_sync(session, _MashinaFeed([_mashina_raw(images=[], title="Toyota Camry 70 2.5 AT ")], {}), source, target, mode="fresh")
+    session.refresh(listing)
+    assert listing.image_url is None

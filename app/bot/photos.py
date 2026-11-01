@@ -168,7 +168,12 @@ def mashina_gallery_from_page(html: str) -> list[str]:
 # (01.11.2026: `{"slug":"phone","name":"Телефон","value":"996…"}` и ещё раз
 # с `value_text`/`value_json`). В ленте API номера нет (`user.phones` пуст).
 _MASHINA_PHONE_MARKER = '\\"slug\\":\\"phone\\"'
-_MASHINA_PHONE_VALUE_RE = re.compile(r'\\"value(?:_text)?\\":\\"([+\d][\d ()+-]{8,})\\"')
+# Значение бывает строкой (`"value":"996…"`) и списком (`"value":["996…"]`,
+# `"value_json":["+996 …"]`) — второй вид у большинства страниц (01.11.2026:
+# номер не находился ни у одной машины mashina в витрине).
+_MASHINA_PHONE_VALUE_RE = re.compile(
+    r'\\"value(?:_text|_json)?\\":\[?\\"([+\d][\d ()+-]{8,})\\"'
+)
 
 
 def mashina_phone_from_page(html: str) -> str | None:

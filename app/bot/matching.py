@@ -25,6 +25,7 @@ from app.models import (
     Source,
     UserFilter,
 )
+from app.services.images import real_photo
 from app.services.fuel import unpack_fuel_groups
 from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
@@ -227,7 +228,7 @@ def build_pending(
         brand_name=brand_names.get(listing.brand_id) if listing.brand_id else None,
         model_name=model_names.get(listing.car_model_id) if listing.car_model_id else None,
         market_samples=estimate.samples if estimate is not None else None,
-        image_url=listing.image_url,
+        image_url=real_photo(listing.image_url),  # заглушка mashina — не фото
         brand_id=listing.brand_id,
         photo_count=len(listing.image_urls) if listing.image_urls else None,
     )
