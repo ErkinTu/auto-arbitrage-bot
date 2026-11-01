@@ -410,6 +410,26 @@ def command_lalafo_maintenance(_: argparse.Namespace) -> None:
     run_lalafo_maintenance()
 
 
+def command_fuel_backfill(args: argparse.Namespace) -> None:
+    """Группа топлива для старых объявлений (план 01.11.2026, п. Е) — один раз
+    после выката. lalafo — из `fuel_type` (секунды), mashina — полная разметка
+    через API (~550 запросов, ~20 мин; то же делает worker еженощно).
+    Запускать синхронно с `</dev/null`, не фоном поверх ssh."""
+    from app.services.fuel_labeling import backfill_lalafo_fuel_groups
+    from app.services.sources import LALAFO, MASHINA
+    from app.worker import run_mashina_fuel_labeling
+
+    if args.source in (None, LALAFO):
+        with SessionLocal() as session:
+            source = get_or_create_source(session, LALAFO, source_base_url(LALAFO))
+            session.commit()
+            counts = backfill_lalafo_fuel_groups(session, source.id)
+        print(f"lalafo: обновлено по группам {counts}")
+    if args.source in (None, MASHINA):
+        run_mashina_fuel_labeling()
+        print("mashina: разметка завершена (итог — в логе)")
+
+
 def command_preset_volume(args: argparse.Namespace) -> None:
     """Объём «ниже рынка» в сутки по КР при разных порогах и по пресетам.
 
@@ -620,6 +640,13 @@ def parser() -> argparse.ArgumentParser:
         help="Run lalafo card validator + stale fallback now (what worker does daily)",
     )
     maintenance.set_defaults(func=command_lalafo_maintenance)
+
+    fuel = sub.add_parser(
+        "fuel-backfill",
+        help="Fill listings.fuel_group: lalafo from fuel_type, mashina via API fuel lists",
+    )
+    fuel.add_argument("--source", choices=list(SOURCE_NAMES), default=None)
+    fuel.set_defaults(func=command_fuel_backfill)
 
     volume = sub.add_parser(
         "preset-volume",

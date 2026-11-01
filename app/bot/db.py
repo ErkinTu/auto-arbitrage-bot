@@ -157,6 +157,7 @@ class FilterDTO:
     region: str | None
     brand_group: str | None = None
     max_age_years: int | None = None
+    fuel_groups: str | None = None  # 'hybrid,electric'; None = все типы
     # id — для панели редактирования (предзаполнить выбор марки/модели).
     brand_id: int | None = None
     car_model_id: int | None = None
@@ -616,6 +617,7 @@ def _filter_signature(user_filter: UserFilter) -> tuple:
         user_filter.region,
         user_filter.brand_group,
         user_filter.max_age_years,
+        user_filter.fuel_groups,
     )
 
 
@@ -638,6 +640,7 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
         region=user_filter.region,
         brand_group=user_filter.brand_group,
         max_age_years=user_filter.max_age_years,
+        fuel_groups=user_filter.fuel_groups,
         brand_id=user_filter.brand_id,
         car_model_id=user_filter.car_model_id,
     )
@@ -708,6 +711,7 @@ def create_filter(
     region: str | None = None,
     brand_group: str | None = None,
     max_age_years: int | None = None,
+    fuel_groups: str | None = None,
 ) -> FilterDTO:
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
@@ -733,6 +737,7 @@ def create_filter(
                 region,
                 brand_group,
                 max_age_years,
+                fuel_groups,
             ),
         )
         user_filter = UserFilter(
@@ -749,6 +754,7 @@ def create_filter(
             region=region,
             brand_group=brand_group,
             max_age_years=max_age_years,
+            fuel_groups=fuel_groups,
         )
         session.add(user_filter)
         session.commit()
@@ -795,6 +801,7 @@ def update_filter(
     region: str | None = None,
     brand_group: str | None = None,
     max_age_years: int | None = None,
+    fuel_groups: str | None = None,
 ) -> FilterDTO:
     """Правка готового фильтра (панель, /edit_filter) — UPDATE той же строки.
 
@@ -833,6 +840,7 @@ def update_filter(
                 region,
                 brand_group,
                 max_age_years,
+                fuel_groups,
             ),
             exclude_id=user_filter.id,
         )
@@ -848,6 +856,7 @@ def update_filter(
         user_filter.region = region
         user_filter.brand_group = brand_group
         user_filter.max_age_years = max_age_years
+        user_filter.fuel_groups = fuel_groups
         session.commit()
         return _filter_dto(session, user_filter)
 
@@ -1145,18 +1154,29 @@ class Gallery:
     external_id: str
     url: str
     is_active: bool
+    last_seen_at: datetime | None = None
+    # Для строки «Связаться» под альбомом — как в заголовке карточки
+    # (`messages.card_title` читает эти же поля).
+    title: str | None = None
+    brand_name: str | None = None
+    model_name: str | None = None
+    year: int | None = None
+    price_usd: float | None = None
+    seller_phone: str | None = None  # цифры; персональные данные — не логировать
 
 
 def listing_gallery(listing_id: int) -> Gallery | None:
     with SessionLocal() as session:
         row = session.execute(
-            select(Listing, Source.name)
+            select(Listing, Source.name, Brand.name, CarModel.name)
             .join(Source, Listing.source_id == Source.id)
+            .outerjoin(Brand, Listing.brand_id == Brand.id)
+            .outerjoin(CarModel, Listing.car_model_id == CarModel.id)
             .where(Listing.id == listing_id)
         ).first()
         if row is None:
             return None
-        listing, source_name = row
+        listing, source_name, brand_name, model_name = row
         return Gallery(
             listing_id=listing.id,
             urls=list(listing.image_urls or []),
@@ -1165,7 +1185,44 @@ def listing_gallery(listing_id: int) -> Gallery | None:
             external_id=listing.external_id,
             url=build_source_url(listing),
             is_active=listing.is_active,
+            last_seen_at=listing.last_seen_at,
+            title=listing.title,
+            brand_name=brand_name,
+            model_name=model_name,
+            year=listing.year,
+            price_usd=float(listing.current_price_usd)
+            if listing.current_price_usd is not None
+            else None,
+            seller_phone=listing.seller_phone,
         )
+
+
+def mark_listing_gone(listing_id: int, reason: str, status_id: int | None = None) -> bool:
+    """Источник по нажатию «Все фото» сказал «снято» — база узнаёт раньше сверки.
+
+    Та же запись, что у валидатора lalafo (`is_active=false` + строка в
+    `listing_status_history` с причиной): так снятое раньше уходит из витрины и
+    «ниже рынка». Вернёт объявление в строй обычный обход, если увидит его снова.
+    False — уже неактивно или не найдено.
+    """
+    from app.services.sync import deactivate_by_card  # тяжёлый модуль — по требованию
+
+    with SessionLocal() as session:
+        listing = session.get(Listing, listing_id)
+        if listing is None or not listing.is_active:
+            return False
+        deactivate_by_card(session, listing, reason=reason, status_id=status_id)
+        session.commit()
+        return True
+
+
+def save_seller_phone(listing_id: int, phone: str | None) -> None:
+    """Номер продавца, взятый по нажатию «Все фото» (None — продавец скрыл)."""
+    with SessionLocal() as session:
+        session.execute(
+            update(Listing).where(Listing.id == listing_id).values(seller_phone=phone)
+        )
+        session.commit()
 
 
 def save_gallery(listing_id: int, urls: list[str]) -> None:

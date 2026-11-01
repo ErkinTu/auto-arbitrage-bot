@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 from app.bot import db, photos
 from app.bot import filter_panel as fp
 from app.bot.keyboards import (
+    FilterAddCB,
     FilterEditCB,
     filter_pick_kb,
     PhotosCB,
@@ -60,6 +61,9 @@ from app.bot.keyboards import (
 )
 from app.bot.messages import (
     filter_updated_text,
+    photos_contact_text,
+    whatsapp_greeting,
+    photos_limit_text,
     pause_already_text,
     pause_on_text,
     play_already_text,
@@ -115,10 +119,12 @@ from app.bot.menu import (
     MENU_FILTERS,
     main_menu_kb,
 )
+from app.bot import notifier
 from app.bot.notifier import send_notifications
 from app.bot.showcase import mark_seen, seen_ids
 from app.bot.states import FilterPanel
 from app.core.config import get_settings
+from app.services.phones import whatsapp_url
 from app.services.blocklist import MAX_BLOCKS_PER_USER
 from app.services.filter_presets import base_preset, find_preset
 from app.services.finik import init_payment
@@ -473,6 +479,7 @@ def _filter_summary(item: db.FilterDTO) -> str:
         region=item.region,
         brand_group=item.brand_group,
         max_age_years=item.max_age_years,
+        fuel_groups=item.fuel_groups,
     )
 
 
@@ -685,14 +692,18 @@ async def unhide_cb(query: CallbackQuery, callback_data: UnhideCB) -> None:
 PHOTOS_GONE_TEXT = "Объявление снято — фото больше недоступны."
 PHOTOS_MISSING_TEXT = "Других фото у меня нет — все фото на сайте объявления."
 PHOTOS_FAILED_TEXT = "Не удалось загрузить фото с сайта — откройте объявление."
+PHOTOS_CONTACT_BUTTON = "💬 Связаться на сайте ↗"  # если номера нет
+PHOTOS_WHATSAPP_BUTTON = "💬 Написать в WhatsApp ↗"
 
 
 @router.callback_query(PhotosCB.filter())
 async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
     """«📷 Все фото»: альбом(ы) ответом на карточку.
 
-    Галерея — из базы; нет — у lalafo один запрос карточки (и запись в базу,
-    второе нажатие бесплатное). Двойной тап гасит дебаунс.
+    Галерея — из базы; нет — один запрос к источнику (и запись в базу, второе
+    нажатие бесплатное). Снятое альбома не получает: по флагу `is_active` —
+    сразу, а давно не виденное (`BOT_PHOTOS_RECHECK_HOURS`) сначала проверяем
+    на источнике — фото на CDN переживают объявление. Двойной тап гасит дебаунс.
     """
     listing_id = callback_data.listing_id
     if not photos.debounce(query.from_user.id, listing_id):
@@ -700,24 +711,35 @@ async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
         return
     await query.answer("Загружаю фото…")
     gallery = await asyncio.to_thread(db.listing_gallery, listing_id)
-    if gallery is None:
+    if gallery is None or not gallery.is_active:
         await query.message.answer(PHOTOS_GONE_TEXT)
+        return
+    settings = get_settings()
+    wait = photos.album_wait_minutes(
+        query.from_user.id, limit=settings.bot_photos_albums_per_hour
+    )
+    if wait:  # до запроса к источнику: лишние нажатия не должны его дёргать
+        await query.message.answer(
+            photos_limit_text(settings.bot_photos_albums_per_hour, wait),
+            reply_markup=pay_kb(gallery.url, "Открыть ↗"),
+        )
         return
 
     urls = gallery.urls
-    if not urls and photos.can_fetch(gallery.source_name):
-        try:
-            urls = await asyncio.to_thread(
-                photos.fetch_gallery, gallery.source_name, gallery.external_id, gallery.url
-            )
-        except photos.ListingGone:
-            await query.message.answer(PHOTOS_GONE_TEXT)
+    phone = gallery.seller_phone
+    card_fetched = False
+    recheck = photos.needs_recheck(gallery.last_seen_at, hours=settings.bot_photos_recheck_hours)
+    if (not urls or recheck) and photos.can_fetch(gallery.source_name):
+        card = await _fetch_card(query, gallery)
+        if card is _GONE:
             return
-        except Exception:
-            logger.exception("photos: card fetch failed for listing %s", listing_id)
-            urls = []
-        if urls:
-            await asyncio.to_thread(db.save_gallery, listing_id, urls)
+        if card is not None:
+            card_fetched = True
+            if card.urls:
+                if card.urls != urls:  # продавец мог добавить фото — альбом свежий
+                    await asyncio.to_thread(db.save_gallery, listing_id, card.urls)
+                urls = card.urls
+            phone = await _remember_phone(gallery, card)
     if len(urls) <= 1:
         await query.message.answer(
             PHOTOS_MISSING_TEXT, reply_markup=pay_kb(gallery.url, "Открыть ↗")
@@ -727,18 +749,116 @@ async def photos_cb(query: CallbackQuery, callback_data: PhotosCB) -> None:
     reply_to = query.message.message_id
     try:
         for album in photos.albums(urls):
-            if len(album) == 1:  # альбом — минимум 2 фото
-                await query.message.answer_photo(album[0], reply_to_message_id=reply_to)
-                continue
-            await query.message.answer_media_group(
-                [InputMediaPhoto(media=url) for url in album], reply_to_message_id=reply_to
-            )
+            await _send_album(query.message, album, reply_to)
     except TelegramAPIError as error:
         # Чаще всего — фото удалили с CDN или Telegram не смог его скачать.
         logger.warning("photos: album for listing %s rejected: %s", listing_id, error)
         await query.message.answer(
             PHOTOS_FAILED_TEXT, reply_markup=pay_kb(gallery.url, "Открыть ↗")
         )
+        return
+    photos.record_album(query.from_user.id)
+
+    # Номера нет (mashina не отдаёт его в ленте) — один запрос страницы уже
+    # ПОСЛЕ альбома: фото не ждут телефона, а номер запоминаем — второе
+    # нажатие бесплатное.
+    if (
+        phone is None
+        and not card_fetched
+        and settings.bot_seller_phone_enabled
+        and photos.can_fetch(gallery.source_name)
+    ):
+        card = await _fetch_card(query, gallery)
+        if card is _GONE:
+            return
+        if card is not None:
+            phone = await _remember_phone(gallery, card)
+
+    # Долистал фото — следующий шаг «связаться». У альбома кнопок не бывает,
+    # поэтому одно сообщение, тоже ответом на карточку: номер продавца в
+    # под спойлером (позвонить) и кнопка WhatsApp с готовым текстом, а без номера —
+    # кнопка на сайт (п. Д/Ж плана 01.11).
+    if phone and settings.bot_seller_phone_enabled:
+        await query.message.answer(
+            photos_contact_text(gallery, phone=phone),
+            reply_markup=pay_kb(
+                whatsapp_url(phone, whatsapp_greeting(gallery)), PHOTOS_WHATSAPP_BUTTON
+            ),
+            reply_to_message_id=reply_to,
+        )
+        return
+    await query.message.answer(
+        photos_contact_text(gallery),
+        reply_markup=pay_kb(gallery.url, PHOTOS_CONTACT_BUTTON),
+        reply_to_message_id=reply_to,
+    )
+
+
+_GONE = object()  # маркер «источник сказал: снято» из `_fetch_card`
+
+
+async def _fetch_card(query: CallbackQuery, gallery: db.Gallery):
+    """Страница/карточка источника для «Все фото»: `photos.Card`, `_GONE` или None.
+
+    Снятое — сразу в базу и сообщение человеку (дальше слать нечего). Таймаут,
+    5xx, лежащий прокси — это НЕ «снято»: None, работаем с тем, что в базе.
+    """
+    try:
+        return await asyncio.to_thread(
+            photos.fetch_card, gallery.source_name, gallery.external_id, gallery.url
+        )
+    except photos.ListingGone as gone:
+        await asyncio.to_thread(
+            db.mark_listing_gone, gallery.listing_id, gone.reason, gone.status_id
+        )
+        await query.message.answer(PHOTOS_GONE_TEXT)
+        return _GONE
+    except Exception:
+        logger.exception("photos: card fetch failed for listing %s", gallery.listing_id)
+        return None
+
+
+async def _remember_phone(gallery: db.Gallery, card: photos.Card) -> str | None:
+    """Номер из ответа источника — в базу (скрыт продавцом — стираем). Номер в
+    лог не пишем: персональные данные (services/phones.py)."""
+    phone = None if card.phone_hidden else card.phone
+    if phone is None and not card.phone_hidden:
+        return gallery.seller_phone  # в ответе нет — известный не затираем
+    if phone != gallery.seller_phone:
+        await asyncio.to_thread(db.save_seller_phone, gallery.listing_id, phone)
+    return phone
+
+
+async def _send_album(message: Message, album: list[str], reply_to: int) -> None:
+    """Один альбом (или хвост из одного фото) — по file_id из кэша, где он есть.
+
+    Кэш общий с карточками (`notifier`): повторный альбом Telegram не качает с
+    CDN. Отвергнутый file_id (Telegram его забыл) — забываем и повторяем по
+    ссылкам; ошибка по ссылкам уходит наверх (там «не удалось загрузить»).
+    """
+    cached = [notifier.cached_photo_id(url) or url for url in album]
+
+    async def send(media: list[str]) -> list:
+        if len(media) == 1:  # альбом — минимум 2 фото
+            sent = await message.answer_photo(media[0], reply_to_message_id=reply_to)
+            return [sent]
+        sent = await message.answer_media_group(
+            [InputMediaPhoto(media=item) for item in media], reply_to_message_id=reply_to
+        )
+        return list(sent or [])
+
+    if cached != album:
+        try:
+            sent = await send(cached)
+        except TelegramBadRequest:
+            notifier.forget_photo_ids(album)
+            sent = await send(album)
+    else:
+        sent = await send(album)
+    for url, item in zip(album, sent):
+        sizes = getattr(item, "photo", None)
+        if sizes:
+            notifier.remember_photo_id(url, sizes[-1].file_id)
 
 
 @router.callback_query(DigestCB.filter())
@@ -833,9 +953,22 @@ async def _send_showcase_page(message: Message, *, offset: int, fresh: bool = Fa
 @router.message(Command("add_filter"))
 @router.message(F.text == MENU_ADD_FILTER)
 async def cmd_add_filter(message: Message, state: FSMContext) -> None:
-    """Первый экран: готовые фильтры одной кнопкой и «Свой» — пошаговый визард."""
+    """Первый экран: готовые фильтры одной кнопкой и «Свой» — панель фильтра."""
     await state.clear()
-    quota = await asyncio.to_thread(db.filters_quota, message.from_user.id)
+    await _send_add_filter_prompt(message, message.from_user.id)
+
+
+@router.callback_query(FilterAddCB.filter())
+async def cb_add_filter(query: CallbackQuery, state: FSMContext) -> None:
+    """«➕ Добавить фильтр» под «Мои фильтры»: новым сообщением, список остаётся."""
+    await query.answer()
+    await state.clear()
+    await _send_add_filter_prompt(query.message, query.from_user.id)
+
+
+async def _send_add_filter_prompt(message: Message, telegram_id: int) -> None:
+    """Пресеты + «Свой», а при занятом лимите — сколько удалить (не панель)."""
+    quota = await asyncio.to_thread(db.filters_quota, telegram_id)
     if not quota.can_add:
         await message.answer(filters_limit_text(quota.used, quota.limit))
         return

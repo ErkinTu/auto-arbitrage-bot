@@ -3,7 +3,7 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.db import FilterDTO
@@ -346,13 +346,19 @@ class FilterEditCB(CallbackData, prefix="fedit"):
     filter_id: int
 
 
+class FilterAddCB(CallbackData, prefix="fadd"):
+    """«➕ Добавить фильтр» под списком — тот же экран, что /add_filter."""
+
+
 def filters_kb(filters: list[FilterDTO]) -> InlineKeyboardMarkup:
-    """«Мои фильтры»: на каждый фильтр — «✏️ Изменить N» и «🗑 Удалить N» в ряд."""
+    """«Мои фильтры»: на каждый фильтр — «✏️ Изменить N» и «🗑 Удалить N» в ряд,
+    последней строкой — «➕ Добавить фильтр» (план 01.11.2026, п. Б)."""
     builder = InlineKeyboardBuilder()
     for index, item in enumerate(filters, start=1):
         builder.button(text=f"✏️ Изменить {index}", callback_data=FilterEditCB(filter_id=item.id))
         builder.button(text=f"🗑 Удалить {index}", callback_data=FilterDeleteCB(filter_id=item.id))
     builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="➕ Добавить фильтр", callback_data=FilterAddCB().pack()))
     return builder.as_markup()
 
 

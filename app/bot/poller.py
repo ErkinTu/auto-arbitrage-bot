@@ -36,8 +36,9 @@ from app.bot.notifier import BotLike, send_notifications
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.services.lookup import ensure_brand_targets, get_or_create_source
+from app.services.fuel_labeling import label_mashina_fuel
 from app.services.schedule import local_now, seconds_until_window, window_end_utc
-from app.services.sources import LALAFO, SOURCE_NAMES, build_parser, source_base_url
+from app.services.sources import LALAFO, MASHINA, SOURCE_NAMES, build_parser, source_base_url
 from app.services.sync import run_sync, utcnow
 
 logger = logging.getLogger(__name__)
@@ -99,8 +100,28 @@ def sync_source(source_name: str) -> None:
                     logger.exception(
                         "bot fresh sync failed for %s %s", source_name, target.brand_filter
                     )
+            if source_name == MASHINA and settings.mashina_fuel_fresh_pages > 0:
+                _label_fresh_mashina_fuel(session, parser, source.id, settings.mashina_fuel_fresh_pages)
         finally:
             parser.close()
+
+
+def _label_fresh_mashina_fuel(session, parser, source_id: int, pages: int) -> None:
+    """Топливо новых объявлений mashina — в том же потоке, ДО волны рассылки:
+    иначе фильтр по топливу промолчал бы о них в этом цикле (в ленте mashina
+    топлива нет, см. services/fuel_labeling.py). Ошибка — не повод ронять обход."""
+    try:
+        report = label_mashina_fuel(session, parser, source_id, max_pages=pages)
+        logger.info(
+            "mashina fuel labeling (fresh): requests=%s seen=%s updated=%s failed=%s",
+            report.requests,
+            report.seen,
+            report.updated,
+            report.failed,
+        )
+    except Exception:
+        session.rollback()
+        logger.exception("mashina fuel labeling (fresh) failed")
 
 
 def collect_matches(cycle_counts: dict[int, int] | None = None) -> list[PendingNotification]:

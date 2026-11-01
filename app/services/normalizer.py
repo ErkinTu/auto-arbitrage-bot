@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from app.services.fuel import fuel_group_from_lalafo
+from app.services.phones import normalize_phone
 from app.services.catalog import parse_vehicle_part, split_listing_year_suffix
 from app.services.images import extract_image_url, extract_image_urls
 
@@ -71,12 +73,24 @@ class NormalizedListing:
     image_url: str | None = None
     # Вся галерея — тоже вне `payload_hash`, по той же причине.
     image_urls: list[str] | None = None
+    # Группа топлива (services/fuel.py). Вне `payload_hash`: она выводится из
+    # `fuel_type` (тот в хэше), и новая колонка не должна пометить базу «updated».
+    # У mashina нормализатор её не знает (None) — ставит разметка через API.
+    fuel_group: str | None = None
+    # Телефон продавца (цифры) — вне `payload_hash`: контакт, не характеристика
+    # машины. `seller_phone_hidden` — продавец скрыл номер (lalafo `hide_phone`):
+    # синк стирает известный ранее.
+    seller_phone: str | None = None
+    seller_phone_hidden: bool = False
 
     def analytics_payload(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("safe_payload", None)
         data.pop("image_url", None)
         data.pop("image_urls", None)
+        data.pop("fuel_group", None)
+        data.pop("seller_phone", None)
+        data.pop("seller_phone_hidden", None)
         return data
 
     @property
@@ -390,6 +404,7 @@ def normalize_lalafo_listing(
         body_type=params.get("body"),
         engine_volume=_as_decimal(params.get("engine_volume")),
         fuel_type=params.get("fuel"),
+        fuel_group=fuel_group_from_lalafo(params.get("fuel")),
         gearbox=params.get("gearbox"),
         drive_type=params.get("drive"),
         steering_wheel=params.get("steering"),
@@ -408,6 +423,8 @@ def normalize_lalafo_listing(
         safe_payload=_lalafo_safe_payload(raw),
         image_url=extract_image_url(raw),
         image_urls=extract_image_urls(raw) or None,
+        seller_phone=None if raw.get("hide_phone") else normalize_phone(raw.get("mobile")),
+        seller_phone_hidden=bool(raw.get("hide_phone")),
     )
 
 

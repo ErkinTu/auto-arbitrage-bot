@@ -223,10 +223,25 @@ class BotLike(Protocol):
 def _remember_photo(url: str, sent: object) -> None:
     photos = getattr(sent, "photo", None)
     if photos:
-        _photo_ids[url] = photos[-1].file_id
-        _photo_ids.move_to_end(url)
-        while len(_photo_ids) > PHOTO_CACHE_SIZE:
-            _photo_ids.popitem(last=False)
+        remember_photo_id(url, photos[-1].file_id)
+
+
+# Кэш общий с «📷 Все фото» (handlers.photos_cb): главное фото альбома — та же
+# ссылка, что у карточки, и повторный альбом не качается с CDN заново.
+def cached_photo_id(url: str) -> str | None:
+    return _photo_ids.get(url)
+
+
+def remember_photo_id(url: str, file_id: str) -> None:
+    _photo_ids[url] = file_id
+    _photo_ids.move_to_end(url)
+    while len(_photo_ids) > PHOTO_CACHE_SIZE:
+        _photo_ids.popitem(last=False)
+
+
+def forget_photo_ids(urls: list[str]) -> None:
+    for url in urls:
+        _photo_ids.pop(url, None)
 
 
 async def _send_photo(bot: BotLike, message: OutgoingMessage) -> None:

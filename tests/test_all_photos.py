@@ -8,19 +8,21 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
 import app.bot.db as botdb
 import app.db.session as dbsession
-from app.bot import handlers, photos
+from app.bot import handlers, notifier, photos
 from app.bot.keyboards import PhotosCB, UnhideCB, card_kb, has_photos_button, hidden_kb
 from app.bot.matching import PendingNotification
 from app.bot.notifier import build_outgoing
-from app.models import Listing
+from app.models import Listing, ListingStatusHistory
 from app.services.images import MAX_GALLERY, extract_image_urls
 from app.services.normalizer import normalize_lalafo_listing, normalize_mashina_listing
 from app.services.sync import run_sync
@@ -294,6 +296,7 @@ class _AlbumMessage(_HandlerMessage):
         self.albums: list[list[str]] = []
         self.single_photos: list[str] = []
         self.reply_to: list[int] = []
+        self.text_reply_to: list[int | None] = []
 
     async def answer_media_group(self, media, reply_to_message_id=None, **kwargs):
         self.albums.append([item.media for item in media])
@@ -303,8 +306,21 @@ class _AlbumMessage(_HandlerMessage):
         self.single_photos.append(photo)
         self.reply_to.append(reply_to_message_id)
 
+    async def answer(self, text, reply_markup=None, reply_to_message_id=None, **kwargs):
+        self.answers.append((text, reply_markup))
+        self.text_reply_to.append(reply_to_message_id)
 
-def _gallery(urls, source_name="lalafo.kg") -> botdb.Gallery:
+
+NOW = datetime.now(timezone.utc)
+STALE = NOW - timedelta(hours=7)  # дольше BOT_PHOTOS_RECHECK_HOURS=6
+
+
+PHONE = "996500328668"
+
+
+def _gallery(
+    urls, source_name="lalafo.kg", is_active=True, last_seen_at=NOW, seller_phone=PHONE
+) -> botdb.Gallery:
     return botdb.Gallery(
         listing_id=42,
         urls=urls,
@@ -312,24 +328,58 @@ def _gallery(urls, source_name="lalafo.kg") -> botdb.Gallery:
         source_name=source_name,
         external_id="101",
         url=URL,
-        is_active=True,
+        is_active=is_active,
+        last_seen_at=last_seen_at,
+        seller_phone=seller_phone,
     )
 
 
-def _press(monkeypatch, gallery, fetched=None, gone=False):
+def _reset_memory() -> None:
     photos._recent.clear()
+    photos._albums_sent.clear()
+    notifier._photo_ids.clear()
+
+
+def _press(
+    monkeypatch,
+    gallery,
+    fetched=None,
+    gone=False,
+    error=None,
+    marked=None,
+    reset=True,
+    phone=None,
+    phone_hidden=False,
+    saved_phones=None,
+):
+    if reset:
+        _reset_memory()
+    else:
+        photos._recent.clear()  # дебаунс — не предмет этих тестов
     saved: list[list[str]] = []
     fetch_calls: list[str] = []
+    marked = [] if marked is None else marked
     monkeypatch.setattr(handlers.db, "listing_gallery", lambda listing_id: gallery)
     monkeypatch.setattr(handlers.db, "save_gallery", lambda listing_id, urls: saved.append(urls))
+    monkeypatch.setattr(
+        handlers.db,
+        "mark_listing_gone",
+        lambda listing_id, reason, status_id=None: marked.append((listing_id, reason, status_id)),
+    )
+    saved_phones = [] if saved_phones is None else saved_phones
+    monkeypatch.setattr(
+        handlers.db, "save_seller_phone", lambda listing_id, value: saved_phones.append(value)
+    )
 
     def fake_fetch(source_name, external_id, url):
         fetch_calls.append(external_id)
         if gone:
-            raise photos.ListingGone
-        return fetched or []
+            raise gone if isinstance(gone, photos.ListingGone) else photos.ListingGone()
+        if error is not None:
+            raise error
+        return photos.Card(urls=fetched or [], phone=phone, phone_hidden=phone_hidden)
 
-    monkeypatch.setattr(handlers.photos, "fetch_gallery", fake_fetch)
+    monkeypatch.setattr(handlers.photos, "fetch_card", fake_fetch)
     message = _AlbumMessage()
     query = _Query(message)
     asyncio.run(handlers.photos_cb(query, PhotosCB(listing_id=42)))
@@ -400,7 +450,7 @@ def test_handler_survives_rejected_album(monkeypatch) -> None:
     )
     message = _Rejecting()
     asyncio.run(handlers.photos_cb(_Query(message), PhotosCB(listing_id=42)))
-    assert message.answers[0][0] == handlers.PHOTOS_FAILED_TEXT
+    assert [text for text, _ in message.answers] == [handlers.PHOTOS_FAILED_TEXT]  # без «Связаться»
 
 
 def test_db_gallery_round_trip(monkeypatch) -> None:
@@ -414,6 +464,315 @@ def test_db_gallery_round_trip(monkeypatch) -> None:
 
     gallery = botdb.listing_gallery(listing_id)
     assert gallery.urls == [] and gallery.source_name == "lalafo.kg" and gallery.external_id == "101"
+    assert (gallery.brand_name, gallery.model_name, gallery.year, gallery.price_usd) == (
+        "Toyota",
+        "Camry",
+        2016,
+        15000.0,
+    )
     botdb.save_gallery(listing_id, ["https://x/a", "https://x/b"])
     assert botdb.listing_gallery(listing_id).urls == ["https://x/a", "https://x/b"]
     assert botdb.listing_gallery(999_999) is None
+
+
+# --- снятые объявления (план 01.11.2026, п. А) -----------------------------------------
+
+TWO = ["https://img.example/a.jpeg", "https://img.example/b.jpeg"]
+
+
+def test_needs_recheck_only_for_long_unseen() -> None:
+    assert not photos.needs_recheck(NOW - timedelta(hours=5), hours=6, now=NOW)
+    assert photos.needs_recheck(NOW - timedelta(hours=7), hours=6, now=NOW)
+    assert photos.needs_recheck(None, hours=6, now=NOW)
+    naive = (NOW - timedelta(hours=7)).replace(tzinfo=None)  # SQLite
+    assert photos.needs_recheck(naive, hours=6, now=NOW)
+    assert not photos.needs_recheck(None, hours=0, now=NOW)  # выключатель
+
+
+def test_inactive_listing_gets_no_album_and_no_request(monkeypatch) -> None:
+    """Регрессия 01.11.2026: альбом уходил и у снятого — флаг читался, но не проверялся."""
+    message, _, _, fetch_calls = _press(monkeypatch, _gallery(TWO, is_active=False))
+    assert message.answers[0][0] == handlers.PHOTOS_GONE_TEXT
+    assert message.albums == [] and fetch_calls == []
+
+
+def test_fresh_listing_with_gallery_is_not_rechecked(monkeypatch) -> None:
+    message, _, _, fetch_calls = _press(monkeypatch, _gallery(TWO, last_seen_at=NOW - timedelta(hours=1)))
+    assert fetch_calls == []
+    assert message.albums == [TWO]
+
+
+def test_stale_listing_removed_on_source_is_marked_and_gets_no_album(monkeypatch) -> None:
+    marked: list = []
+    message, _, saved, fetch_calls = _press(
+        monkeypatch,
+        _gallery(TWO, last_seen_at=STALE),
+        gone=photos.ListingGone("card_inactive", 8),
+        marked=marked,
+    )
+    assert fetch_calls == ["101"]
+    assert marked == [(42, "card_inactive", 8)]
+    assert message.answers[0][0] == handlers.PHOTOS_GONE_TEXT
+    assert message.albums == [] and saved == []
+
+
+def test_stale_listing_source_error_falls_back_to_db_gallery(monkeypatch) -> None:
+    """Таймаут/5xx/прокси ≠ «снято»: альбом из базы, флаг не трогаем."""
+    marked: list = []
+    message, _, saved, fetch_calls = _press(
+        monkeypatch, _gallery(TWO, last_seen_at=STALE), error=httpx.ConnectTimeout("t"), marked=marked
+    )
+    assert fetch_calls == ["101"]
+    assert marked == [] and saved == []
+    assert message.albums == [TWO]
+
+
+def test_stale_listing_alive_refreshes_gallery(monkeypatch) -> None:
+    fresh = TWO + ["https://img.example/c.jpeg"]
+    message, _, saved, _ = _press(monkeypatch, _gallery(TWO, last_seen_at=STALE), fetched=fresh)
+    assert saved == [fresh]
+    assert message.albums == [fresh]
+
+
+def test_stale_listing_same_gallery_is_not_rewritten(monkeypatch) -> None:
+    _, _, saved, fetch_calls = _press(monkeypatch, _gallery(TWO, last_seen_at=STALE), fetched=list(TWO))
+    assert fetch_calls == ["101"] and saved == []
+
+
+def test_lalafo_card_with_dead_status_counts_as_gone(monkeypatch) -> None:
+    """lalafo отдаёт снятое с 200 и status_id 8 (сайт — 410), как разбирает валидатор."""
+    _patch_parser(monkeypatch, _FakeLalafo(detail={"id": 101, "status_id": 8, "images": [LALAFO_MAIN]}))
+    with pytest.raises(photos.ListingGone) as caught:
+        photos.fetch_gallery("lalafo.kg", "101", URL)
+    assert (caught.value.reason, caught.value.status_id) == ("card_inactive", 8)
+
+
+@pytest.mark.parametrize("status", [404, 410, 417])
+def test_lalafo_http_gone_reason_is_card_gone(monkeypatch, status: int) -> None:
+    _patch_parser(monkeypatch, _FakeLalafo(status=status))
+    with pytest.raises(photos.ListingGone) as caught:
+        photos.fetch_gallery("lalafo.kg", "101", URL)
+    assert caught.value.reason == "card_gone"
+
+
+def test_mark_listing_gone_writes_like_validator(monkeypatch) -> None:
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    run_sync(session, _FeedParser([_lalafo_item(None)], {101: _lalafo_item(None)}), source, target, mode="fresh")
+    listing_id = session.scalar(select(Listing.id).where(Listing.external_id == "101"))
+    monkeypatch.setattr(botdb, "SessionLocal", sessionmaker(bind=session.get_bind()))
+
+    assert botdb.mark_listing_gone(listing_id, "card_inactive", 8)
+    assert not botdb.mark_listing_gone(listing_id, "card_gone")  # повтор — не дублируем историю
+
+    session.expire_all()
+    listing = session.get(Listing, listing_id)
+    assert listing.is_active is False
+    history = session.scalars(
+        select(ListingStatusHistory).where(
+            ListingStatusHistory.listing_id == listing_id,
+            ListingStatusHistory.event_type == "deactivated",
+        )
+    ).all()
+    assert len(history) == 1
+
+
+# --- «Связаться на сайте» после альбома (план 01.11.2026, п. Д) ------------------------
+
+
+def _camry(**overrides) -> botdb.Gallery:
+    gallery = _gallery(TWO, **overrides)
+    gallery.brand_name, gallery.model_name, gallery.year, gallery.price_usd = "Toyota", "Camry", 2018, 15000.0
+    return gallery
+
+
+def test_album_is_followed_by_spoiler_number_and_whatsapp_button(monkeypatch) -> None:
+    message, _, _, fetch_calls = _press(monkeypatch, _camry())
+    assert message.albums == [TWO] and fetch_calls == []  # номер уже в базе
+    [(text, markup)] = message.answers
+    assert text == "Toyota Camry · 2018 · $15 000\n📞 <tg-spoiler>+996 500 328 668</tg-spoiler>"
+    [[button]] = markup.inline_keyboard
+    assert button.text == handlers.PHOTOS_WHATSAPP_BUTTON
+    assert button.url.startswith("https://wa.me/996500328668?text=")
+    from urllib.parse import unquote
+
+    greeting = unquote(button.url.split("?text=", 1)[1])
+    assert greeting == (
+        "Здравствуйте! Пишу по объявлению Toyota Camry · 2018 · $15 000 на lalafo.kg. Ещё продаётся?"
+    )
+    assert message.text_reply_to == [555]  # тоже ответом на карточку
+
+
+def test_mashina_number_is_fetched_after_album_and_remembered(monkeypatch) -> None:
+    saved: list = []
+    message, _, _, fetch_calls = _press(
+        monkeypatch, _camry(source_name="mashina.kg", seller_phone=None), phone=PHONE, saved_phones=saved
+    )
+    assert message.albums == [TWO]  # фото не ждали телефона
+    assert fetch_calls == ["101"] and saved == [PHONE]
+    assert message.answers[0][1].inline_keyboard[0][0].url.startswith("https://wa.me/996500328668")
+
+
+def test_without_number_contact_line_points_to_site(monkeypatch) -> None:
+    saved: list = []
+    message, *_ = _press(monkeypatch, _camry(seller_phone=None), saved_phones=saved)
+    [(text, markup)] = message.answers
+    assert text == "Toyota Camry · 2018 · $15 000"
+    [[button]] = markup.inline_keyboard
+    assert (button.text, button.url) == (handlers.PHOTOS_CONTACT_BUTTON, URL)
+    assert saved == []  # в ответе номера нет — нечего записывать
+
+
+def test_number_hidden_by_seller_is_erased_and_not_shown(monkeypatch) -> None:
+    saved: list = []
+    message, *_ = _press(
+        monkeypatch,
+        _camry(last_seen_at=STALE),
+        fetched=TWO,
+        phone_hidden=True,
+        saved_phones=saved,
+    )
+    assert saved == [None]
+    text, markup = message.answers[0]
+    assert "📞" not in text and markup.inline_keyboard[0][0].text == handlers.PHOTOS_CONTACT_BUTTON
+
+
+def test_phone_switch_off_restores_site_button_without_requests(monkeypatch) -> None:
+    monkeypatch.setattr(handlers.get_settings(), "bot_seller_phone_enabled", False)
+    message, _, _, fetch_calls = _press(monkeypatch, _camry(seller_phone=None))
+    assert fetch_calls == []
+    assert message.answers[0][1].inline_keyboard[0][0].text == handlers.PHOTOS_CONTACT_BUTTON
+
+
+def test_listing_removed_when_fetching_number_after_album(monkeypatch) -> None:
+    marked: list = []
+    message, *_ = _press(monkeypatch, _camry(seller_phone=None), gone=True, marked=marked)
+    assert message.albums == [TWO]
+    assert marked and message.answers[-1][0] == handlers.PHOTOS_GONE_TEXT
+
+
+def test_contact_line_falls_back_to_source_title_and_escapes() -> None:
+    from app.bot.messages import photos_contact_text
+
+    gallery = _gallery(TWO)
+    gallery.title, gallery.year = "Lada <2107>: 1.5 л", None
+    assert photos_contact_text(gallery) == "Lada &lt;2107&gt;"
+
+
+def test_no_contact_line_when_album_is_not_sent(monkeypatch) -> None:
+    message, *_ = _press(monkeypatch, _gallery(TWO, is_active=False))
+    assert [text for text, _ in message.answers] == [handlers.PHOTOS_GONE_TEXT]
+
+
+# --- лимит альбомов и кэш file_id (план 01.11.2026, п. Г) -------------------------------
+
+
+def test_album_limit_window_and_wait() -> None:
+    _reset_memory()
+    for minute in range(3):
+        photos.record_album(1, now=minute * 60.0)
+    assert photos.album_wait_minutes(1, limit=4, now=180.0) == 0
+    assert photos.album_wait_minutes(1, limit=3, now=180.0) == 57  # первый выйдет на 60-й мин
+    assert photos.album_wait_minutes(2, limit=3, now=180.0) == 0  # другой человек
+    assert photos.album_wait_minutes(1, limit=3, now=3600.0) == 0  # окно сдвинулось
+    assert photos.album_wait_minutes(1, limit=0, now=180.0) == 0  # выключатель
+
+
+def test_handler_stops_at_album_limit_without_touching_source(monkeypatch) -> None:
+    monkeypatch.setattr(handlers.get_settings(), "bot_photos_albums_per_hour", 2)
+    _reset_memory()
+    stale = _gallery(TWO, last_seen_at=STALE)
+    for _ in range(2):
+        message, _, _, _ = _press(monkeypatch, _gallery(TWO), reset=False)
+        assert message.albums == [TWO]
+    message, _, _, fetch_calls = _press(monkeypatch, stale, fetched=TWO, reset=False)
+    assert message.albums == [] and fetch_calls == []
+    text, markup = message.answers[0]
+    assert text.startswith("За час можно открыть 2 альбома")
+    assert markup.inline_keyboard[0][0].url == URL
+
+
+def test_gone_listing_does_not_spend_album_limit(monkeypatch) -> None:
+    _reset_memory()
+    _press(monkeypatch, _gallery(TWO, is_active=False), reset=False)
+    assert photos._albums_sent == {}
+
+
+class _Sent:
+    def __init__(self, file_id: str) -> None:
+        self.photo = [SimpleNamespace(file_id="small"), SimpleNamespace(file_id=file_id)]
+
+
+class _CachingMessage(_AlbumMessage):
+    def __init__(self, reject_file_ids: bool = False) -> None:
+        super().__init__()
+        self.reject_file_ids = reject_file_ids
+
+    async def answer_media_group(self, media, reply_to_message_id=None, **kwargs):
+        from aiogram.exceptions import TelegramBadRequest
+
+        items = [item.media for item in media]
+        if self.reject_file_ids and any(i.startswith("fid-") for i in items):
+            raise TelegramBadRequest(method=SimpleNamespace(), message="wrong file identifier")
+        self.albums.append(items)
+        return [_Sent(f"fid-{n}") for n, _ in enumerate(items)]
+
+
+def test_album_remembers_file_ids_and_reuses_them() -> None:
+    _reset_memory()
+    first = _CachingMessage()
+    asyncio.run(handlers._send_album(first, TWO, 555))
+    assert first.albums == [TWO]
+    assert notifier.cached_photo_id(TWO[0]) == "fid-0"  # крупный размер, а не превью
+
+    second = _CachingMessage()
+    asyncio.run(handlers._send_album(second, TWO, 555))
+    assert second.albums == [["fid-0", "fid-1"]]  # повтор — без CDN
+
+
+def test_album_falls_back_to_urls_when_file_id_is_rejected() -> None:
+    _reset_memory()
+    notifier.remember_photo_id(TWO[0], "fid-old")
+    message = _CachingMessage(reject_file_ids=True)
+    asyncio.run(handlers._send_album(message, TWO, 555))
+    assert message.albums == [TWO]
+    assert notifier.cached_photo_id(TWO[0]) == "fid-0"
+
+
+def test_photos_limit_text_plurals() -> None:
+    from app.bot.messages import photos_limit_text
+
+    assert photos_limit_text(30, 1) == (
+        "За час можно открыть 30 альбомов с фото — лимит исчерпан. "
+        "Следующий — через 1 минуту. Пока все фото — на сайте объявления."
+    )
+    assert "21 альбом " in photos_limit_text(21, 5) and "5 минут." in photos_limit_text(21, 5)
+
+
+# --- телефон продавца (п. Ж плана 01.11.2026) ---------------------------------------------
+
+
+def test_mashina_page_phone_is_parsed() -> None:
+    page = (
+        '{\\"slug\\":\\"phone\\",\\"name\\":\\"Телефон\\",'
+        '\\"value\\":\\"996500328668\\",\\"meta\\":null}'
+    )
+    assert photos.mashina_phone_from_page(page) == "996500328668"
+    assert photos.mashina_phone_from_page("<html>без телефона</html>") is None
+
+
+def test_fetch_card_reads_lalafo_phone_and_respects_hidden(monkeypatch) -> None:
+    _patch_parser(monkeypatch, _FakeLalafo(detail={"id": 101, "mobile": "+996 500 328 668"}))
+    card = photos.fetch_card("lalafo.kg", "101", URL)
+    assert (card.phone, card.phone_hidden) == ("996500328668", False)
+    _patch_parser(monkeypatch, _FakeLalafo(detail={"id": 101, "mobile": "+996500328668", "hide_phone": True}))
+    card = photos.fetch_card("lalafo.kg", "101", URL)
+    assert (card.phone, card.phone_hidden) == (None, True)
+
+
+def test_fetch_card_reads_mashina_phone(monkeypatch) -> None:
+    page = "https://mashina.kg/details/toyota-camry-1"
+    html = _mashina_page(MASHINA_IMAGES) + '\\"slug\\":\\"phone\\",\\"value\\":\\"+996 555 12 34 56\\"'
+    _patch_mashina_http(monkeypatch, _FakeResponse(page, text=html))
+    card = photos.fetch_card("mashina.kg", "1", page)
+    assert card.phone == "996555123456" and len(card.urls) == len(MASHINA_IMAGES)

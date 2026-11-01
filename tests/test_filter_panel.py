@@ -22,7 +22,7 @@ import app.bot.db as botdb
 from app.bot import filter_panel as fp
 from app.bot import handlers
 from app.bot.db import BrandDTO, FilterDTO, ModelDTO
-from app.bot.keyboards import CUSTOM_PRESET, FilterEditCB, PresetCB, filters_kb
+from app.bot.keyboards import CUSTOM_PRESET, FilterAddCB, FilterEditCB, PresetCB, filters_kb
 from app.bot.states import FilterPanel
 from app.db.base import Base
 from app.models import BotUser, Brand, CarModel, SentNotification, UserFilter
@@ -221,7 +221,7 @@ def _dto(**overrides) -> FilterDTO:
 
 
 def test_draft_round_trip_keeps_every_field() -> None:
-    item = _dto()
+    item = _dto(fuel_groups="hybrid,electric")
     fields = fp.filter_fields(fp.draft_from_filter(item))
     assert fields == {
         "brand_id": 1,
@@ -236,6 +236,7 @@ def test_draft_round_trip_keeps_every_field() -> None:
         "region": LOCAL,
         "brand_group": None,
         "max_age_years": None,
+        "fuel_groups": "hybrid,electric",
     }
 
 
@@ -340,12 +341,56 @@ def test_update_of_foreign_or_missing_filter_is_lookup_error(sessions) -> None:
     assert botdb.get_filter(2, mine_id) is None
 
 
-def test_my_filters_has_edit_and_delete_per_filter() -> None:
+def test_my_filters_has_edit_and_delete_per_filter_and_add_last() -> None:
     rows = filters_kb([_dto(id=5), _dto(id=6)]).inline_keyboard
     assert [[b.text for b in row] for row in rows] == [
         ["✏️ Изменить 1", "🗑 Удалить 1"],
         ["✏️ Изменить 2", "🗑 Удалить 2"],
+        ["➕ Добавить фильтр"],
     ]
+    assert rows[-1][0].callback_data == FilterAddCB().pack()
+
+
+class _AddMessage:
+    def __init__(self) -> None:
+        self.answers: list[tuple[str, object]] = []
+
+    async def answer(self, text, reply_markup=None, **kwargs):
+        self.answers.append((text, reply_markup))
+
+
+def _press_add(monkeypatch, used: int, limit: int = 5) -> _AddMessage:
+    monkeypatch.setattr(
+        handlers.db, "filters_quota", lambda telegram_id: botdb.FiltersQuota(used=used, limit=limit)
+    )
+    message = _AddMessage()
+    query = SimpleNamespace(message=message, from_user=SimpleNamespace(id=1))
+
+    async def answer(*args, **kwargs):
+        return None
+
+    query.answer = answer
+    state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+    asyncio.run(state.set_state(FilterPanel.active))
+    asyncio.run(handlers.cb_add_filter(query, state))
+    assert asyncio.run(state.get_state()) is None  # недописанная панель не мешает
+    return message
+
+
+def test_add_button_opens_presets_like_add_filter(monkeypatch) -> None:
+    [(text, markup)] = _press_add(monkeypatch, used=2).answers
+    assert text == handlers.PRESETS_PROMPT_TEXT
+    assert any(
+        b.callback_data == PresetCB(code=CUSTOM_PRESET).pack()
+        for row in markup.inline_keyboard
+        for b in row
+    )
+
+
+def test_add_button_at_limit_explains_instead_of_panel(monkeypatch) -> None:
+    [(text, markup)] = _press_add(monkeypatch, used=5).answers
+    assert text == handlers.filters_limit_text(5, 5)
+    assert markup is None
 
 
 # --- сценарий через хендлеры ------------------------------------------------------------

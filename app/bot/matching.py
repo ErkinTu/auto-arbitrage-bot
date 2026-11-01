@@ -25,6 +25,7 @@ from app.models import (
     Source,
     UserFilter,
 )
+from app.services.fuel import unpack_fuel_groups
 from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
 from app.services.filter_presets import load_brand_groups, min_year_for_age
@@ -323,6 +324,12 @@ def filter_matches(
     # пуш по неполной геолокации хуже тишины — как и с прочими границами фильтра).
     if user_filter.region is not None and not region_matches(listing.city, user_filter.region):
         return False
+    # Топливо (план 01.11.2026, п. Е): неизвестная группа под выбранные типы не
+    # попадает — как и прочие границы фильтра.
+    if user_filter.fuel_groups and listing.fuel_group not in unpack_fuel_groups(
+        user_filter.fuel_groups
+    ):
+        return False
     return True
 
 
@@ -343,6 +350,7 @@ def _match_signature(user_filter: UserFilter) -> tuple:
         user_filter.region,
         user_filter.brand_group,
         user_filter.max_age_years,
+        user_filter.fuel_groups,
     )
 
 

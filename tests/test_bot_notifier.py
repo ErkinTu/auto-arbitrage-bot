@@ -127,7 +127,7 @@ def test_format_notification_matches_owner_layout() -> None:
         "💰 $15 900 · на 18% ниже рынка (выгода ≈ $3 500)",
         "Рынок: $19 400 — по 31 похожей машине",
         "98 000 км · Бишкек",
-        '<a href="https://www.mashina.kg/details/toyota-camry-1/">Открыть на mashina.kg</a>',
+        "mashina.kg",  # источник простым текстом; ссылка — кнопкой «Открыть ↗»
     ]
 
 
@@ -141,7 +141,7 @@ def test_format_notification_has_no_placeholders_or_service_phrase() -> None:
     assert "—" not in text
     assert "Новое объявление" not in text
     assert "Рынок" not in text and "ниже рынка" not in text
-    assert text.startswith("<b>Toyota Camry · 2018</b>\n💰 $15 900\n<a ")
+    assert text == "<b>Toyota Camry · 2018</b>\n💰 $15 900\nmashina.kg"
 
 
 def test_format_notification_says_ниже_рынка_not_средней() -> None:

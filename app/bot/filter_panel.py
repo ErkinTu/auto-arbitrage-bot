@@ -1,4 +1,4 @@
-"""Панель фильтра: одно сообщение, 7 шагов со статусом (план 31.10.2026, п. 2.7).
+"""Панель фильтра: одно сообщение, 8 шагов со статусом (план 31.10.2026, п. 2.7).
 
 Замена пошагового визарда, где на каждый шаг приходило новое сообщение, а
 готовый фильтр можно было только удалить. Здесь — чистые функции без aiogram:
@@ -15,6 +15,9 @@
 Решения владельца (31.10.2026): «ниже рынка» с процентом — один шаг (5/10/20/не
 важно); фильтр без марки разрешён, но с подсказкой про низкий приоритет;
 редактирование — кнопкой ✏️ в «Мои фильтры» и командой /edit_filter.
+
+Шаг 8 «Топливо» (план 01.11.2026, п. Е) — единственный с выбором нескольких
+вариантов: нажатие переключает тип и оставляет на шаге, «Все типы» сбрасывает.
 """
 
 from __future__ import annotations
@@ -29,6 +32,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.messages import format_filter_line
 from app.services.filter_presets import BRAND_GROUPS, brand_group_label
+from app.services.fuel import (
+    FUEL_GROUPS,
+    FUEL_LABELS,
+    fuel_groups_label,
+    pack_fuel_groups,
+    unpack_fuel_groups,
+)
 from app.services.regions import ALL_CARS_CODE, LOCAL, REGION_CHOICES, REGION_LABELS
 
 # Границы ручного ввода — те же, что были у визарда.
@@ -36,8 +46,27 @@ MIN_YEAR = 1950
 MAX_MILEAGE_KM = 1_500_000
 MAX_PRICE_USD = 5_000_000
 
-STEP_BRAND, STEP_MODEL, STEP_YEARS, STEP_MILEAGE, STEP_PRICE, STEP_MARKET, STEP_REGION = range(1, 8)
-STEPS = (STEP_BRAND, STEP_MODEL, STEP_YEARS, STEP_MILEAGE, STEP_PRICE, STEP_MARKET, STEP_REGION)
+(
+    STEP_BRAND,
+    STEP_MODEL,
+    STEP_YEARS,
+    STEP_MILEAGE,
+    STEP_PRICE,
+    STEP_MARKET,
+    STEP_REGION,
+    STEP_FUEL,
+) = range(1, 9)
+# 8 — и предел Telegram на кнопки в одном ряду (ряд «1…8» под панелью).
+STEPS = (
+    STEP_BRAND,
+    STEP_MODEL,
+    STEP_YEARS,
+    STEP_MILEAGE,
+    STEP_PRICE,
+    STEP_MARKET,
+    STEP_REGION,
+    STEP_FUEL,
+)
 STEP_TITLES = {
     STEP_BRAND: "Марка",
     STEP_MODEL: "Модель",
@@ -46,6 +75,7 @@ STEP_TITLES = {
     STEP_PRICE: "Цена",
     STEP_MARKET: "Рынок",
     STEP_REGION: "Регион",
+    STEP_FUEL: "Топливо",
 }
 # Шаги, где принимается ввод текстом.
 TEXT_STEPS = (STEP_YEARS, STEP_MILEAGE, STEP_PRICE)
@@ -106,6 +136,7 @@ def draft_from_filter(item) -> dict:
         "below_market_percent": item.below_market_percent,
         "region": item.region,
         "skip_foreign": item.skip_foreign,
+        "fuel_groups": item.fuel_groups,
         # Сохранённый фильтр — каждый шаг уже решён, «любой» тоже.
         "done": list(STEPS),
     }
@@ -127,6 +158,7 @@ def filter_fields(draft: dict) -> dict:
         "region": draft.get("region"),
         "brand_group": None if draft.get("brand_id") else draft.get("brand_group"),
         "max_age_years": draft.get("max_age_years"),
+        "fuel_groups": draft.get("fuel_groups"),
     }
 
 
@@ -145,6 +177,7 @@ def summary(draft: dict) -> str:
         region=fields["region"],
         brand_group=fields["brand_group"],
         max_age_years=fields["max_age_years"],
+        fuel_groups=fields["fuel_groups"],
     )
 
 
@@ -194,6 +227,8 @@ def step_value(draft: dict, step: int) -> str | None:
         if region == LOCAL:
             return None  # по умолчанию
         return REGION_LABELS.get(region, "все авто, вкл. зарубежные") if region else "все авто, вкл. зарубежные"
+    if step == STEP_FUEL:
+        return fuel_groups_label(draft.get("fuel_groups"))
     raise ValueError(step)
 
 
@@ -205,6 +240,7 @@ _EMPTY_LABELS = {
     STEP_PRICE: "любая",
     STEP_MARKET: "не важно",
     STEP_REGION: "вся КР",
+    STEP_FUEL: "все типы",
 }
 
 _PROMPTS = {
@@ -215,6 +251,10 @@ _PROMPTS = {
     STEP_PRICE: "Максимальная цена, $. Пример: <code>15000</code> или <code>15к</code>.",
     STEP_MARKET: "Присылать только авто дешевле средней цены по рынку?",
     STEP_REGION: "Откуда показывать авто. ⚠️ У зарубежных цена обычно без растаможки.",
+    STEP_FUEL: (
+        "Тип топлива — можно отметить несколько. Плагин-гибриды — в «Гибрид». "
+        "Если топливо в объявлении не указано, по выбранным типам оно не придёт."
+    ),
 }
 
 
@@ -329,6 +369,14 @@ def render_keyboard(
         for code, label in REGION_CHOICES:
             _button(builder, _chosen(label, region == code), "region", code)
         sizes.extend([1, *_pairs(len(REGION_CHOICES) - 1)])
+    elif step == STEP_FUEL:
+        chosen = unpack_fuel_groups(draft.get("fuel_groups"))
+        _button(builder, _chosen("🌐 Все типы", not chosen), "fuel", FUEL_ALL)
+        sizes.append(1)
+        for code in FUEL_GROUPS:
+            mark = "✅" if code in chosen else "▫️"
+            _button(builder, f"{mark} {FUEL_LABELS[code]}", "fuel", code)
+        sizes.extend(_pairs(len(FUEL_GROUPS)))
 
     for number in STEPS:
         _button(builder, f"[{number}]" if number == step else str(number), "step", number)
@@ -348,7 +396,7 @@ def _pairs(count: int) -> list[int]:
 
 
 def next_step(step: int) -> int:
-    return min(step + 1, STEP_REGION)
+    return min(step + 1, STEPS[-1])
 
 
 _ACTION_STEPS = {
@@ -360,23 +408,29 @@ _ACTION_STEPS = {
     "price": STEP_PRICE,
     "market": STEP_MARKET,
     "region": STEP_REGION,
+    "fuel": STEP_FUEL,
 }
+# Выбор нескольких вариантов: нажатие не уводит со шага.
+_STAY_ACTIONS = frozenset({"fuel"})
+FUEL_ALL = "all"
 
 
 def apply_choice(draft: dict, action: str, value: str) -> tuple[dict, bool]:
     """Применяет кнопку выбора; возвращает (черновик, перейти ли к следующему шагу).
 
+    Топливо — переключатель: черновик меняется, но шаг остаётся (False).
+
     Принятый выбор отмечает шаг пройденным; «Все марки» и группа — ещё и шаг
     модели (выбирать её не из чего). Неизвестное значение (старая кнопка,
     подделанный callback) не меняет черновик.
     """
-    new, advance = _apply_choice(draft, action, value)
-    if not advance:
+    new, accepted = _apply_choice(draft, action, value)
+    if not accepted:
         return draft, False
     steps = [_ACTION_STEPS[action]]
     if action in ("brand", "group") and not new.get("brand_id"):
         steps.append(STEP_MODEL)
-    return mark_done(new, *steps), True
+    return mark_done(new, *steps), action not in _STAY_ACTIONS
 
 
 def _apply_choice(draft: dict, action: str, value: str) -> tuple[dict, bool]:
@@ -439,6 +493,17 @@ def _apply_choice(draft: dict, action: str, value: str) -> tuple[dict, bool]:
             return draft, False
         # Явно выбранный регион отменяет legacy-флаг «без зарубежных».
         draft["skip_foreign"] = False
+        return draft, True
+    if action == "fuel":
+        if value == FUEL_ALL:
+            draft["fuel_groups"] = None
+        elif value in FUEL_LABELS:
+            chosen = set(unpack_fuel_groups(draft.get("fuel_groups")))
+            chosen ^= {value}
+            # Пусто или все пять — это «все типы» (None), см. pack_fuel_groups.
+            draft["fuel_groups"] = pack_fuel_groups(chosen)
+        else:
+            return draft, False
         return draft, True
     return draft, False
 
