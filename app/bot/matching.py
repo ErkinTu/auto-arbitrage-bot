@@ -275,6 +275,15 @@ def is_complete_listing(listing: Listing, now: datetime | None = None) -> bool:
     return listing.mileage_km >= MIN_PLAUSIBLE_MILEAGE_KM or listing.year >= current_year - 1
 
 
+def has_real_photo(listing: Listing) -> bool:
+    """Есть ли у объявления настоящее главное фото (не пусто и не заглушка).
+
+    Без фото пуш уходит голой текстовой карточкой — владелец решил 02.11.2026
+    такие не слать вовсе.
+    """
+    return real_photo(listing.image_url) is not None
+
+
 def is_plausible_discount(below_percent: float | None, max_percent: float) -> bool:
     """Скидка к рынку правдоподобна (max_percent <= 0 — без отсечки)."""
     return max_percent <= 0 or below_percent is None or below_percent <= max_percent
@@ -544,7 +553,7 @@ def match_new_listings(
     max_per_user_delayed: int = 0,
     delayed_lag_minutes: int = 0,
     flush_deadline: datetime | None = None,
-    require_complete: bool = False,
+    require_photo: bool = False,
     max_below_percent: float = 0,
     cycle_counts: dict[int, int] | None = None,
 ) -> list[PendingNotification]:
@@ -575,7 +584,8 @@ def match_new_listings(
     не применяется вовсе (аварийный выключатель тарифов). Частота циклов при этом
     не меняется — сдвинуто только окно кандидатов.
 
-    require_complete — только объявления с полными данными (`is_complete_listing`);
+    require_photo — только объявления с настоящим фото (`has_real_photo`);
+    пробег и прочая полнота для пуша не требуются (решение владельца 02.11.2026);
     max_below_percent (>0) — скидка больше этой считается мусором и не уходит.
 
     flush_deadline — момент последнего цикла на сегодня (см. `window_end_utc`).
@@ -592,8 +602,8 @@ def match_new_listings(
     """
     listings = find_new_listings(session, since, max_age_hours=max_age_hours)
     now = utcnow()
-    if require_complete:
-        listings = [listing for listing in listings if is_complete_listing(listing, now)]
+    if require_photo:
+        listings = [listing for listing in listings if has_real_photo(listing)]
     if not listings:
         return []
     event_times = qualifying_event_times(session, since)
