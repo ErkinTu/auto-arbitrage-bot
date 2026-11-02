@@ -1346,6 +1346,7 @@ def preview_for_filter(filter_id: int, exclude_ids=frozenset()) -> list[PendingN
             delayed_lag_minutes=settings.delayed_tier_lag_minutes,
             max_below_percent=settings.bot_max_below_market_percent,
             exclude_listing_ids=frozenset(exclude_ids),
+            require_photo=settings.bot_push_require_photo,
         )
 
 

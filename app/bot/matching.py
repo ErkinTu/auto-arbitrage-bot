@@ -275,6 +275,15 @@ def is_complete_listing(listing: Listing, now: datetime | None = None) -> bool:
     return listing.mileage_km >= MIN_PLAUSIBLE_MILEAGE_KM or listing.year >= current_year - 1
 
 
+def has_real_photo(listing: Listing) -> bool:
+    """Есть ли у объявления настоящее главное фото (не пусто и не заглушка).
+
+    Без фото пуш уходит голой текстовой карточкой — владелец решил 02.11.2026
+    такие не слать вовсе.
+    """
+    return real_photo(listing.image_url) is not None
+
+
 def is_plausible_discount(below_percent: float | None, max_percent: float) -> bool:
     """Скидка к рынку правдоподобна (max_percent <= 0 — без отсечки)."""
     return max_percent <= 0 or below_percent is None or below_percent <= max_percent
@@ -544,7 +553,7 @@ def match_new_listings(
     max_per_user_delayed: int = 0,
     delayed_lag_minutes: int = 0,
     flush_deadline: datetime | None = None,
-    require_complete: bool = False,
+    require_photo: bool = False,
     max_below_percent: float = 0,
     cycle_counts: dict[int, int] | None = None,
 ) -> list[PendingNotification]:
@@ -575,7 +584,8 @@ def match_new_listings(
     не применяется вовсе (аварийный выключатель тарифов). Частота циклов при этом
     не меняется — сдвинуто только окно кандидатов.
 
-    require_complete — только объявления с полными данными (`is_complete_listing`);
+    require_photo — только объявления с настоящим фото (`has_real_photo`);
+    пробег и прочая полнота для пуша не требуются (решение владельца 02.11.2026);
     max_below_percent (>0) — скидка больше этой считается мусором и не уходит.
 
     flush_deadline — момент последнего цикла на сегодня (см. `window_end_utc`).
@@ -592,8 +602,8 @@ def match_new_listings(
     """
     listings = find_new_listings(session, since, max_age_hours=max_age_hours)
     now = utcnow()
-    if require_complete:
-        listings = [listing for listing in listings if is_complete_listing(listing, now)]
+    if require_photo:
+        listings = [listing for listing in listings if has_real_photo(listing)]
     if not listings:
         return []
     event_times = qualifying_event_times(session, since)
@@ -817,6 +827,7 @@ def preview_for_filter(
     delayed_lag_minutes: int = 0,
     max_below_percent: float = 0,
     exclude_listing_ids: frozenset[int] = frozenset(),
+    require_photo: bool = False,
 ) -> list[PendingNotification]:
     """Разовая подборка сразу после создания фильтра.
 
@@ -832,9 +843,9 @@ def preview_for_filter(
     обычной рассылкой. Сортировка — по величине отставания от рынка, чтобы в
     ограниченный лимит попало лучшее, а не случайное.
 
-    Только объявления с полными данными (`is_complete_listing`) и без
-    неправдоподобной скидки: это первое, что человек видит от фильтра, и
-    «Civic 1998, пробег не указан, −51%» убеждает в обратном.
+    Правила отбора — как у пушей (решение владельца 02.11.2026): любые
+    пробеги и без пробега, `require_photo` — только с настоящим фото, без
+    неправдоподобной скидки. Полные данные требует только витрина.
 
     Тариф с отставанием получает здесь верхнюю границу свежести: без неё обход
     тарифа сводился бы к «удалить фильтр и создать заново» — превью отдало бы
@@ -887,7 +898,9 @@ def preview_for_filter(
 
     scored: list[tuple[float, Listing, float | None, MarketEstimate | None]] = []
     for listing in candidates:
-        if listing.id in already_sent or not is_complete_listing(listing, now):
+        if listing.id in already_sent:
+            continue
+        if require_photo and not has_real_photo(listing):
             continue
         if not filter_matches(listing, user_filter, brand_groups, now=now):
             continue

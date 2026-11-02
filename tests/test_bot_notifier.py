@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from app.bot.matching import PendingNotification
@@ -248,7 +249,7 @@ def test_rich_cards_top_n_per_chat_get_photo() -> None:
     assert [message.photo_url for message in messages if message.chat_id == 2] == [None]
     # Новый текст и «Не то» — у всех карточек, не только у топа.
     assert all(message.text.startswith("<b>Toyota Camry: 2018 г.</b>") for message in messages)
-    assert _button_callbacks(chat1[4].reply_markup) == [HideCB(listing_id=4).pack()]
+    assert HideCB(listing_id=4).pack() in _button_callbacks(chat1[4].reply_markup)
     urls = [button.url for row in chat1[0].reply_markup.inline_keyboard for button in row if button.url]
     assert urls == [notes[0].url]
 
@@ -258,6 +259,17 @@ def test_rich_top_is_not_swallowed_by_digest() -> None:
     messages = build_outgoing(notes, rich_cards=3, group_min=3)
     assert [message.photo_url is not None for message in messages] == [True, True, True, False]
     assert messages[3].listing_id is None  # остальные три — одним списком
+
+
+@pytest.mark.parametrize("count", [4, 5])
+def test_singles_beyond_top_also_get_photo(count) -> None:
+    """Решение владельца 02.11.2026: 1–5 объявлений — все с фото, без голых
+    текстовых карточек; список начинается с rich_cards + group_min."""
+    notes = [_rich_note(chat_id=1, listing_id=index, brand_name="Toyota") for index in range(count)]
+    messages = build_outgoing(notes, rich_cards=3, group_min=3, batch_id=1)
+    assert len(messages) == count
+    assert all(message.photo_url is not None for message in messages)
+    assert all(message.listing_id is not None for message in messages)
 
 
 def test_send_notifications_sends_photo_for_top() -> None:

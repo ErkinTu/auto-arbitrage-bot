@@ -156,10 +156,11 @@ def test_photos_button_only_on_photo_cards_with_more_photos(overrides, expected)
     assert has_photos_button(message.reply_markup) is expected
 
 
-def test_photos_button_is_not_on_text_cards_beyond_the_top() -> None:
+def test_photos_button_is_also_on_text_cards_beyond_the_top() -> None:
     notes = [_note(listing_id=n, photo_count=5) for n in range(1, 5)]
     messages = build_outgoing(notes, rich_cards=3)
-    assert [has_photos_button(m.reply_markup) for m in messages] == [True, True, True, False]
+    assert [has_photos_button(m.reply_markup) for m in messages] == [True, True, True, True]
+    assert messages[3].photo_url is None  # текстом, но альбом запросить можно
 
 
 def test_photos_button_survives_hide_and_unhide(monkeypatch) -> None:

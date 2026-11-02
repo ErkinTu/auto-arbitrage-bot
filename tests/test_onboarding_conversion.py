@@ -70,7 +70,7 @@ def _settings(**overrides) -> SimpleNamespace:
         bot_below_avg_min_samples=2,
         bot_below_avg_factor=0.95,
         bot_max_below_market_percent=50.0,
-        bot_require_complete_listings=True,
+        bot_push_require_photo=True,
         scheduler_timezone="Asia/Bishkek",
         bot_active_start_hour=0,
         bot_active_end_hour=24,
@@ -560,7 +560,9 @@ def test_is_complete_listing(year, mileage, expected) -> None:
     assert is_complete_listing(listing, now) is expected
 
 
-def test_push_skips_incomplete_and_implausible(sessions) -> None:
+def test_push_requires_photo_not_mileage(sessions) -> None:
+    """Решение владельца 02.11.2026: пуш — по всем пробегам и без пробега, но
+    только с настоящим фото; мусорная скидка по-прежнему отсекается."""
     with sessions() as s:
         ids = _catalog(s)
         user = _user(s, 7, access_status="member")
@@ -578,12 +580,16 @@ def test_push_skips_incomplete_and_implausible(sessions) -> None:
         _listing(s, ids["Toyota"], external_id="junk", price="1500", event=True)  # −85%
         no_km = _listing(s, ids["Toyota"], external_id="nokm", price="8000", event=True)
         no_km.mileage_km = None
+        no_photo = _listing(s, ids["Toyota"], external_id="nophoto", price="8000", event=True)
+        no_photo.image_url = None
+        stub = _listing(s, ids["Toyota"], external_id="stub", price="8000", event=True)
+        stub.image_url = "https://s3.mashina.kg/assets/preview.png"  # заглушка mashina
         s.commit()
         since = _now() - timedelta(hours=2)
         pending = match_new_listings(
-            s, since, factor=0.95, min_samples=2, require_complete=True, max_below_percent=50
+            s, since, factor=0.95, min_samples=2, require_photo=True, max_below_percent=50
         )
-    assert [p.title for p in pending] == ["car ok"]
+    assert sorted(p.title for p in pending) == ["car nokm", "car ok"]
 
 
 def test_new_filter_skips_backlog_published_before_it(sessions) -> None:
