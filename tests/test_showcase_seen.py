@@ -113,6 +113,20 @@ def test_preview_without_exclusion_is_unchanged() -> None:
     assert len(preview) == 3
 
 
+def test_preview_uses_push_rules_photo_not_mileage() -> None:
+    """Решение владельца 02.11.2026: превью отбирает как пуши — без пробега
+    можно, без настоящего фото (пусто или заглушка mashina) нельзя."""
+    session, user_filter, listings = _preview_world()
+    listings[0].image_url = "https://s3.mashina.kg/images/2026-11-02/1/a.webp"
+    listings[0].mileage_km = None
+    listings[1].image_url = None
+    listings[2].image_url = "https://s3.mashina.kg/assets/preview.png"
+    listings[3].image_url = "https://s3.mashina.kg/images/2026-11-02/4/a.webp"
+    session.commit()
+    preview = preview_for_filter(session, user_filter.id, limit=10, require_photo=True)
+    assert {n.listing_id for n in preview} == {listings[0].id, listings[3].id}
+
+
 def test_db_preview_passes_exclusions_through(monkeypatch) -> None:
     captured = {}
     monkeypatch.setattr(
@@ -122,6 +136,7 @@ def test_db_preview_passes_exclusions_through(monkeypatch) -> None:
     monkeypatch.setattr(botdb, "SessionLocal", lambda: contextlib.nullcontext(object()))
     botdb.preview_for_filter(5, {7, 8})
     assert captured["exclude_listing_ids"] == frozenset({7, 8})
+    assert captured["require_photo"] is True
 
 
 # --- «ещё» стоит под последней карточкой --------------------------------------

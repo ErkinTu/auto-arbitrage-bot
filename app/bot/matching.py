@@ -827,6 +827,7 @@ def preview_for_filter(
     delayed_lag_minutes: int = 0,
     max_below_percent: float = 0,
     exclude_listing_ids: frozenset[int] = frozenset(),
+    require_photo: bool = False,
 ) -> list[PendingNotification]:
     """Разовая подборка сразу после создания фильтра.
 
@@ -842,9 +843,9 @@ def preview_for_filter(
     обычной рассылкой. Сортировка — по величине отставания от рынка, чтобы в
     ограниченный лимит попало лучшее, а не случайное.
 
-    Только объявления с полными данными (`is_complete_listing`) и без
-    неправдоподобной скидки: это первое, что человек видит от фильтра, и
-    «Civic 1998, пробег не указан, −51%» убеждает в обратном.
+    Правила отбора — как у пушей (решение владельца 02.11.2026): любые
+    пробеги и без пробега, `require_photo` — только с настоящим фото, без
+    неправдоподобной скидки. Полные данные требует только витрина.
 
     Тариф с отставанием получает здесь верхнюю границу свежести: без неё обход
     тарифа сводился бы к «удалить фильтр и создать заново» — превью отдало бы
@@ -897,7 +898,9 @@ def preview_for_filter(
 
     scored: list[tuple[float, Listing, float | None, MarketEstimate | None]] = []
     for listing in candidates:
-        if listing.id in already_sent or not is_complete_listing(listing, now):
+        if listing.id in already_sent:
+            continue
+        if require_photo and not has_real_photo(listing):
             continue
         if not filter_matches(listing, user_filter, brand_groups, now=now):
             continue
