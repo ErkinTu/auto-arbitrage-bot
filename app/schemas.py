@@ -471,6 +471,8 @@ class PublicPricePoint(BaseModel):
 class PublicListingDetail(PublicListing):
     images: list[str]
     price_history: list[PublicPricePoint]
+    # Гостю и пользователю без подписки история (график) не отдаётся.
+    price_history_locked: bool = False
 
 
 class PublicFeedPage(BaseModel):
@@ -481,3 +483,26 @@ class PublicFeedPage(BaseModel):
 class PublicFeedCount(BaseModel):
     count: int
     approximate: bool
+
+
+
+# --- Роли сайта (api/auth.py) --------------------------------------------------
+
+
+class SiteUser(BaseModel):
+    telegram_id: int
+    username: str | None
+    first_name: str | None
+
+
+class SiteAccess(BaseModel):
+    status: Literal["member", "subscriber", "trial", "revoked"]
+    active: bool
+    expires_at: datetime | None
+
+
+class SiteMe(BaseModel):
+    role: Literal["guest", "user", "subscriber", "admin"]
+    user: SiteUser | None
+    access: SiteAccess | None
+    session_expires_at: datetime | None = None

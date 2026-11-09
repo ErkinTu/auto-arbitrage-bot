@@ -87,6 +87,7 @@ from app.bot.messages import (
     SUBSCRIPTION_SOON_TEXT,
     SUBSCRIPTION_UNAVAILABLE_TEXT,
     admin_login_text,
+    site_login_text,
     block_added_text,
     block_limit_text,
     blocks_text,
@@ -1749,6 +1750,23 @@ async def _menu_show(message: Message, screen: ms.Screen) -> None:
     except TelegramBadRequest as error:
         if "message is not modified" not in str(error):
             raise
+
+
+@router.message(Command("login"))
+async def cmd_login(message: Message) -> None:
+    """Вход на сайт: одноразовая ссылка → сессия в куке. Роль на сайте
+    (пользователь / подписчик / админ) считается по доступу в боте."""
+    settings = get_settings()
+    if not settings.site_url:
+        return  # сайт ещё не запущен — команды для человека нет
+    token = await asyncio.to_thread(db.issue_site_login_token, message.from_user.id)
+    if token is None:
+        await message.answer("Сначала отправьте /start — затем /login.")
+        return
+    await message.answer(
+        site_login_text(settings.site_login_token_ttl_minutes),
+        reply_markup=pay_kb(settings.site_login_url(token), "🌐 Открыть сайт"),
+    )
 
 
 @router.message(Command("admin"))

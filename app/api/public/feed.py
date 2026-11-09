@@ -13,10 +13,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.api.roles import current_viewer
 from app.core.cache import cached_call
 from app.core.config import get_settings
 from app.db.session import get_session
 from app.schemas import PublicFeedCount, PublicFeedPage, PublicListing, PublicListingDetail
+from app.services.site_auth import Viewer, role_at_least
 from app.services.public_feed import (
     CursorError,
     Deal,
@@ -151,9 +153,15 @@ def get_listings(
 
 
 @router.get("/listings/{listing_id}", response_model=PublicListingDetail)
-def get_listing(listing_id: int, session: Session = Depends(get_session)) -> dict:
+def get_listing(
+    listing_id: int,
+    session: Session = Depends(get_session),
+    viewer: Viewer = Depends(current_viewer),
+) -> dict:
+    """Карточка. Оценка рынка — всем (решение владельца); график истории цены —
+    с подпиской: гостю приходит пустой список и `price_history_locked=true`."""
     try:
-        return cached_call(
+        item = cached_call(
             "public.listing",
             listing_detail,
             session,
@@ -162,3 +170,6 @@ def get_listing(listing_id: int, session: Session = Depends(get_session)) -> dic
         )
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    # Копия: объект из кэша общий для всех ролей — его не трогаем.
+    locked = not role_at_least(viewer.role, "subscriber")
+    return {**item, "price_history": [] if locked else item["price_history"], "price_history_locked": locked}

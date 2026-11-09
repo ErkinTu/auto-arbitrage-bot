@@ -2,11 +2,16 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.cache import cached_call
+from app.api.roles import require_subscriber
 from app.db.session import get_session
 from app.schemas import BrandStat, DashboardSummary
 from app.services.dashboard import get_brand_stats, get_dashboard_summary
 
-router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
+# Графики и аналитика — подписчикам (роли сайта, PLATFORM_ADR.md). Гейт на
+# роутере: новую ручку здесь нельзя завести открытой.
+router = APIRouter(
+    prefix="/api/v1/dashboard", tags=["dashboard"], dependencies=[Depends(require_subscriber)]
+)
 
 
 @router.get("/summary", response_model=DashboardSummary)

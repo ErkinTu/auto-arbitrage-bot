@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # должны запаздывать на полный TTL справочников.
     public_feed_cache_seconds: int = 30
     public_feed_max_limit: int = 48
+    # Вход на сайт через бота (`/login`): срок ссылки и сессии обычного
+    # пользователя. Админу сессия — `admin_session_ttl_hours` (короче).
+    site_login_token_ttl_minutes: int = 10
+    site_session_ttl_days: int = 30
 
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 
@@ -440,6 +444,9 @@ class Settings(BaseSettings):
     def admin_panel_enabled(self) -> bool:
         """Панель включена, только когда известен её публичный адрес."""
         return bool(self.admin_panel_url)
+
+    def site_login_url(self, token: str) -> str:
+        return f"{self.site_url.rstrip('/')}/login?t={token}"
 
     def admin_login_url(self, token: str) -> str:
         return f"{self.admin_panel_url.rstrip('/')}/login?t={token}"

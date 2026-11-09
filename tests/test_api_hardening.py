@@ -226,7 +226,11 @@ def test_dashboard_is_computed_once_per_ttl(client: TestClient, monkeypatch) -> 
             "last_seen_at": None,
         }
 
+    from app.api.roles import require_subscriber
+
     monkeypatch.setattr(dashboard_api, "get_dashboard_summary", fake_summary)
+    # Дашборд теперь только подписчикам — гейт здесь не предмет теста.
+    app.dependency_overrides[require_subscriber] = lambda: None
     for _ in range(5):
         client.get("/api/v1/dashboard/summary")
     assert len(calls) == 1

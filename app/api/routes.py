@@ -2,11 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.cache import cached_call
+from app.api.roles import require_subscriber
 from app.db.session import get_session
 from app.schemas import EstimateResponse, TrendResponse
 from app.services.analytics import estimate_price, price_trend
 
-router = APIRouter(prefix="/api/v1", tags=["analytics"])
+# Графики и аналитика — подписчикам (роли сайта, PLATFORM_ADR.md). Гейт на
+# роутере: новую ручку здесь нельзя завести открытой.
+router = APIRouter(
+    prefix="/api/v1", tags=["analytics"], dependencies=[Depends(require_subscriber)]
+)
 
 
 @router.get("/estimate", response_model=EstimateResponse)

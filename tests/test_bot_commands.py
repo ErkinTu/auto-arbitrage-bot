@@ -17,7 +17,9 @@ HANDLERS_SOURCE = Path(__file__).resolve().parents[1] / "app" / "bot" / "handler
 # Команды, которые в меню не показываем осознанно (см. docstring commands.py).
 # `admin` — привилегия: в автодополнении у всех она раскрывала бы сам факт
 # существования панели (`docs/admin/ADMIN_PANEL_PLAN.md`).
-INTENTIONALLY_HIDDEN = {"subscribe", "admin"}
+# login — в меню только при заданном SITE_URL (commands.menu_commands): до запуска
+# сайта команда молчит, и пункт меню выглядел бы поломкой.
+INTENTIONALLY_HIDDEN = {"subscribe", "admin", "login"}
 
 
 def _registered_commands() -> set[str]:
@@ -95,3 +97,15 @@ def test_telegram_failure_does_not_break_startup():
     bot = _FakeBot(error=RuntimeError("telegram is down"))
     asyncio.run(setup_bot_commands(bot))  # не должно бросить
     assert len(bot.calls) == 1
+
+
+
+def test_login_appears_in_menu_only_when_site_is_live(monkeypatch) -> None:
+    from app.bot.commands import menu_commands
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "site_url", "")
+    assert "login" not in {name for name, _ in menu_commands()}
+    monkeypatch.setattr(get_settings(), "site_url", "https://site.test")
+    names = [name for name, _ in menu_commands()]
+    assert "login" in names and names[-1] == "cancel"

@@ -312,7 +312,8 @@ def test_listing_detail(client) -> None:
     body = http.get(f"/api/v1/public/listings/{listing.id}").json()
     assert body["images"] == ["https://cdn.example/1.jpg", "https://cdn.example/2.jpg"]
     assert body["photo_count"] == 2
-    assert body["price_history"][0]["price_usd"] == 21000
+    # Гостю оценка есть, а график истории цены — только с подпиской.
+    assert body["price_history"] == [] and body["price_history_locked"] is True
     assert http.get("/api/v1/public/listings/424242").status_code == 404
 
 

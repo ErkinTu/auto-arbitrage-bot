@@ -2,11 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.cache import cached_call
+from app.api.roles import require_subscriber
 from app.db.session import get_session
 from app.schemas import VehicleSummary
 from app.services.vehicle_summary import Granularity, get_vehicle_summary
 
-router = APIRouter(prefix="/api/v1/market", tags=["market"])
+# Графики и аналитика — подписчикам (роли сайта, PLATFORM_ADR.md). Гейт на
+# роутере: новую ручку здесь нельзя завести открытой.
+router = APIRouter(
+    prefix="/api/v1/market", tags=["market"], dependencies=[Depends(require_subscriber)]
+)
 
 
 @router.get("/vehicle-summary", response_model=VehicleSummary)
