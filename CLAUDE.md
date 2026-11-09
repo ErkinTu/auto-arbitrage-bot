@@ -8,7 +8,8 @@
 MVP для сбора объявлений о продаже авто с **mashina.kg**, хранения истории
 цен и рыночной аналитики (оценка цены, графики, «ниже рынка»). Backend —
 Python (FastAPI + SQLAlchemy + PostgreSQL), Telegram-бот на aiogram.
-Отдельный фронт — Vue/Vite в соседнем каталоге `../analytics-front`.
+Отдельный фронт — `../analytics-front` (Nuxt-сайт `apps/web` + старая панель `src/`);
+**учёт фронт-разработки — там** (`CLAUDE.md`, `docs/FRONT_TODO.md`, `docs/FRONT_CHANGELOG.md`).
 
 Стек: Python ≥3.12, FastAPI+uvicorn, SQLAlchemy 2.0, psycopg3, aiogram 3,
 httpx, pydantic-settings. Зависимости через **uv**. Линт/тесты: ruff, pytest.
