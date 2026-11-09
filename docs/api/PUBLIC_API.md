@@ -90,7 +90,7 @@
 
 Аналитика поверх объявления — поле `market`: `avg_price_usd`, `samples`,
 `diff_usd`, `diff_percent`, `verdict` (`good|market|high` по порогу
-`PUBLIC_DEAL_THRESHOLD_PERCENT=3`). Расчёт — тот же, что у бота (пакетный
+`PUBLIC_DEAL_THRESHOLD_PERCENT=5`). Расчёт — тот же, что у бота (пакетный
 `batch_market_estimates`, тест на совпадение `test_batch_estimates_match_bot`);
 отклонение больше `BOT_MAX_BELOW_MARKET_PERCENT` — оценки нет (мусор цены).
 

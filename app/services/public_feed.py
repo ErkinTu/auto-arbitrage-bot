@@ -308,10 +308,12 @@ def batch_market_estimates(
 
 
 def _verdict(diff_percent: float) -> str:
+    """Строго больше порога: ровно ±5 % — ещё «в рынке» (владелец 09.11.2026:
+    «выше/ниже рынка больше чем на 5 %»; внутри — карточка без бейджа)."""
     threshold = get_settings().public_deal_threshold_percent
-    if diff_percent <= -threshold:
+    if diff_percent < -threshold:
         return "good"
-    if diff_percent >= threshold:
+    if diff_percent > threshold:
         return "high"
     return "market"
 

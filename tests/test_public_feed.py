@@ -185,10 +185,13 @@ def test_verdict_threshold(db) -> None:
     Factory, ids = db
     with Factory() as s:
         _stat(s, ids, avg="20000")
+        _listing(s, ids, current_price_usd=Decimal("18000"))  # −10 % — выгодно
+        _listing(s, ids, current_price_usd=Decimal("19000"))  # −5 % ровно — в рынке
         _listing(s, ids, current_price_usd=Decimal("20400"))  # +2 % — в рынке
-        _listing(s, ids, current_price_usd=Decimal("21000"))  # +5 % — дорого
+        _listing(s, ids, current_price_usd=Decimal("21000"))  # +5 % ровно — в рынке
+        _listing(s, ids, current_price_usd=Decimal("21200"))  # +6 % — дорого
         items = feed_page(s, FeedFilter(), sort="price_asc")["items"]
-    assert [i["market"]["verdict"] for i in items] == ["market", "high"]
+    assert [i["market"]["verdict"] for i in items] == ["good", "market", "market", "market", "high"]
 
 
 def test_inactive_and_unrecognized_are_hidden_from_feed(db) -> None:

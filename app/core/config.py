@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     # переезд на свой домен — только смена переменной (PLATFORM_ADR.md § Домен).
     site_url: str = ""
     # Порог раскраски «выгодно / в рынке / дорого» по отклонению от средней, %.
-    public_deal_threshold_percent: float = 3.0
+    public_deal_threshold_percent: float = 5.0
     # Кэш ленты короче общего: она пополняется каждые 10 минут, и «Новые» не
     # должны запаздывать на полный TTL справочников.
     public_feed_cache_seconds: int = 30
