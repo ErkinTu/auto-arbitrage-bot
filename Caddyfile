@@ -59,3 +59,36 @@
 		-Server
 	}
 }
+
+# --- Внешний API для сайта (ВЫКЛЮЧЕН, ждёт решения владельца) ---------------
+# Раскомментировать вместе с запуском сайта; порядок — docs/api/PUBLIC_API.md §6.
+# Наружу — только белый список read-only ручек. admin/* и payments/* остаются
+# на своих доменах, /docs и /openapi.json сюда не попадают (API_DOCS_ENABLED=false).
+# Лимиты частоты держит само приложение (core/ratelimit.py) по реальному IP —
+# Caddy подставляет его в X-Forwarded-For, входящий от клиента отбрасывает.
+#
+# {$PUBLIC_API_DOMAIN} {
+# 	@public_api {
+# 		method GET HEAD OPTIONS
+# 		path /api/v1/catalog/* /api/v1/dashboard/* /api/v1/market/* /api/v1/estimate /api/v1/price-trend /health
+# 	}
+# 	handle @public_api {
+# 		request_body {
+# 			max_size 64KB
+# 		}
+# 		reverse_proxy api:8000 {
+# 			# Висящий бэкенд не должен держать соединения клиента бесконечно.
+# 			transport http {
+# 				response_header_timeout 15s
+# 			}
+# 		}
+# 	}
+# 	handle {
+# 		respond "Not found" 404
+# 	}
+# 	encode zstd gzip
+# 	header {
+# 		Strict-Transport-Security "max-age=31536000"
+# 		-Server
+# 	}
+# }

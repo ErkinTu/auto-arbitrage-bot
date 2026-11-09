@@ -38,7 +38,43 @@ class Settings(BaseSettings):
     default_max_items: int = 500
     default_sync_interval_minutes: int = 60
 
+    # Кэш ответов публичных справочников и аналитики (`core/cache.py`). Данные
+    # меняются раз в цикл бота (10 мин), так что 5 минут — безопасно. 0 = выкл.
     api_cache_ttl_seconds: int = 300
+    # Потолок записей в кэше: ключ = ручка + параметры, перебор параметров
+    # снаружи не должен раздуть память процесса.
+    api_cache_max_entries: int = 2000
+    # Сколько браузер/CDN может держать публичный GET (заголовок Cache-Control).
+    # Меньше серверного TTL: клиент не должен залипать на старых данных.
+    api_public_max_age_seconds: int = 60
+
+    # --- Внешний API: лимиты и защита (`core/ratelimit.py`, `core/http.py`) ----
+    # Swagger/OpenAPI. На проде выключать: схема — карта всех ручек для чужих.
+    api_docs_enabled: bool = True
+    # Потолок тела запроса. Самый большой легитимный — webhook Finik (~1-2 КБ).
+    api_max_body_bytes: int = 65_536
+    # Выключатель лимитов целиком (аварийный, не для прода).
+    rate_limit_enabled: bool = True
+    # Токен-бакет на IP: N запросов в минуту в среднем, всплеск до BURST.
+    # public — справочники/дашборд; heavy — оценка и графики (тяжёлые SQL);
+    # admin — панель (экран делает 5-10 запросов разом, лимит щедрый).
+    rate_limit_public_per_minute: int = 120
+    rate_limit_public_burst: int = 60
+    rate_limit_heavy_per_minute: int = 30
+    rate_limit_heavy_burst: int = 15
+    rate_limit_admin_per_minute: int = 600
+    rate_limit_admin_burst: int = 200
+    # Общий на всех потолок тяжёлых ручек: распределённый скрейпинг с сотни IP
+    # не должен положить базу, даже если каждый IP в своей норме. 0 = без него.
+    rate_limit_heavy_global_per_minute: int = 600
+    # Медленный запрос — warning в лог (с X-Request-ID), чтобы видеть, что
+    # тормозит, до того как начнутся таймауты. 0 = не логировать.
+    api_slow_request_ms: int = 1500
+    # Потолок одного SQL-запроса из API (мс). База общая с ботом и worker:
+    # тяжёлый запрос снаружи не должен держать её дольше этого. Ставится только
+    # соединениям процесса `api` (main.py); бот и worker его не получают —
+    # у rebuild-stats запросы законно длинные. 0 = без потолка.
+    api_statement_timeout_ms: int = 10_000
 
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 
