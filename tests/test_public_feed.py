@@ -481,3 +481,21 @@ def test_region_filter_over_http_and_junk_facets(client) -> None:
     assert {r["value"]: r["count"] for r in facets["regions"]} == {"bishkek": 1, "issykkul": 1, "foreign": 1}
     assert facets["regions"][0]["label"] == "Бишкек"
     assert all(g["value"] != "-1" for g in facets["gearboxes"])
+
+
+def test_similar_same_model_close_year_with_photo(client) -> None:
+    client, Factory, ids = client
+    with Factory() as s:
+        me = _listing(s, ids, year=2019, current_price_usd=Decimal("20000"))
+        close = _listing(s, ids, year=2019, current_price_usd=Decimal("20500"))
+        far_price = _listing(s, ids, year=2019, current_price_usd=Decimal("30000"))
+        older = _listing(s, ids, year=2017)
+        _listing(s, ids, year=2015)  # вне ±2
+        _listing(s, ids, year=2019, image_url=None)  # без фото
+        _listing(s, ids, brand_id=ids["lexus"], car_model_id=ids["rx"])  # другая модель
+        _listing(s, ids, year=2019, is_active=False)
+
+    r = client.get(f"/api/v1/public/listings/{me.id}/similar")
+    assert r.status_code == 200
+    assert [i["id"] for i in r.json()] == [close.id, far_price.id, older.id]
+    assert client.get("/api/v1/public/listings/999999/similar").status_code == 404

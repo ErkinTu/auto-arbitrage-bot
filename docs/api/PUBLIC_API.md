@@ -89,6 +89,7 @@
 | `GET /public/best` | «Лучшее сейчас»: свежие за 24 ч с фото, наибольшее отклонение вниз |
 | `GET /public/listings?ids=` | избранное (до 50), **включая снятые** (`is_active=false`) |
 | `GET /public/listings/{id}` | карточка: + галерея `images`, `price_history` |
+| `GET /public/listings/{id}/similar` | похожие: та же модель, год ±2, активные с фото, ближе по году и цене (`limit≤12`, по умолчанию 8) |
 
 Аналитика поверх объявления — поле `market`: `avg_price_usd`, `samples`,
 `diff_usd`, `diff_percent`, `verdict` (`good|market|high` по порогу

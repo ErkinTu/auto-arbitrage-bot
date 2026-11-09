@@ -707,6 +707,34 @@ def listing_detail(session: Session, listing_id: int) -> dict:
     return item
 
 
+SIMILAR_YEAR_SPAN = 2
+SIMILAR_CANDIDATES = 60
+
+
+def similar_listings(session: Session, listing_id: int, *, limit: int = 8) -> list[dict]:
+    """«Похожие предложения» на странице авто: та же модель, год ±2, активные
+    с фото; ближе по году и цене — выше. Без модели/года — пусто (не угадываем)."""
+    listing = session.get(Listing, listing_id)
+    if listing is None:
+        raise LookupError("Объявление не найдено")
+    if listing.car_model_id is None or listing.year is None:
+        return []
+    now = _now()
+    price = float(listing.current_price_usd or 0)
+    query = (
+        _base_query(FeedFilter(with_photo=True), now=now)
+        .where(
+            Listing.id != listing.id,
+            Listing.car_model_id == listing.car_model_id,
+            Listing.year.between(listing.year - SIMILAR_YEAR_SPAN, listing.year + SIMILAR_YEAR_SPAN),
+        )
+        .order_by(func.abs(Listing.year - listing.year), func.abs(Listing.current_price_usd - price))
+        .limit(SIMILAR_CANDIDATES)
+    )
+    rows = list(session.scalars(query).all())[:limit]
+    return _enrich(session, rows, now)
+
+
 def best_now(session: Session, *, limit: int = 12) -> list[dict]:
     """«Лучшее сейчас»: самые большие скидки к рынку среди свежих с фото.
 

@@ -34,6 +34,7 @@ from app.services.public_feed import (
     feed_page,
     listing_detail,
     listings_by_ids,
+    similar_listings,
 )
 
 router = APIRouter(prefix="/api/v1/public", tags=["public"])
@@ -230,3 +231,23 @@ def get_listing(
     # Копия: объект из кэша общий для всех ролей — его не трогаем.
     locked = not role_at_least(viewer.role, "subscriber")
     return {**item, "price_history": [] if locked else item["price_history"], "price_history_locked": locked}
+
+
+@router.get("/listings/{listing_id}/similar", response_model=list[PublicListing])
+def get_similar(
+    listing_id: int,
+    limit: Annotated[int, Query(ge=1, le=12)] = 8,
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    """Похожие предложения: та же модель, год ±2, активные с фото."""
+    try:
+        return cached_call(
+            "public.similar",
+            similar_listings,
+            session,
+            ttl=get_settings().public_feed_cache_seconds,
+            listing_id=listing_id,
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
