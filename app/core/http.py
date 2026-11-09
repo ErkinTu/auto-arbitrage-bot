@@ -20,7 +20,12 @@ logger = logging.getLogger("app.http")
 
 # Ответы этих путей можно кэшировать браузеру/CDN: публичные справочники и
 # агрегаты, одинаковые для всех. Админка и платежи — никогда (`no-store`).
-_PUBLIC_CACHEABLE = ("/api/v1/catalog/", "/api/v1/dashboard/", "/api/v1/market/")
+_PUBLIC_CACHEABLE = (
+    "/api/v1/catalog/",
+    "/api/v1/dashboard/",
+    "/api/v1/market/",
+    "/api/v1/public/",
+)
 _NO_STORE = ("/api/v1/admin/", "/api/v1/payments/")
 
 _SECURITY_HEADERS = [

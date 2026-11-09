@@ -124,7 +124,12 @@ limiter = TokenBucketLimiter()
 #   /api/v1/payments/ — webhook Finik: защищён подписью, а отбитый 429 Finik
 #   повторит с задержкой до суток — это «деньги списаны, доступа нет».
 _EXEMPT_PREFIXES = ("/health", "/api/v1/payments/")
-_HEAVY_PREFIXES = ("/api/v1/market/", "/api/v1/estimate", "/api/v1/price-trend")
+_HEAVY_PREFIXES = (
+    "/api/v1/market/",
+    "/api/v1/estimate",
+    "/api/v1/price-trend",
+    "/api/v1/public/feed/count",
+)
 _ADMIN_PREFIX = "/api/v1/admin/"
 
 

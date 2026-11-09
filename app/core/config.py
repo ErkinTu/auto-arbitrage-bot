@@ -76,6 +76,17 @@ class Settings(BaseSettings):
     # у rebuild-stats запросы законно длинные. 0 = без потолка.
     api_statement_timeout_ms: int = 10_000
 
+    # --- Публичный сайт (services/public_feed.py, api/public/) -----------------
+    # Адрес сайта: канонические ссылки, Open Graph, sitemap. Пока sslip.io,
+    # переезд на свой домен — только смена переменной (PLATFORM_ADR.md § Домен).
+    site_url: str = ""
+    # Порог раскраски «выгодно / в рынке / дорого» по отклонению от средней, %.
+    public_deal_threshold_percent: float = 3.0
+    # Кэш ленты короче общего: она пополняется каждые 10 минут, и «Новые» не
+    # должны запаздывать на полный TTL справочников.
+    public_feed_cache_seconds: int = 30
+    public_feed_max_limit: int = 48
+
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 
     telegram_bot_token: str = ""

@@ -67,10 +67,10 @@
 # Лимиты частоты держит само приложение (core/ratelimit.py) по реальному IP —
 # Caddy подставляет его в X-Forwarded-For, входящий от клиента отбрасывает.
 #
-# {$PUBLIC_API_DOMAIN} {
+# {$SITE_DOMAIN} {   # пока skupka.63-182-28-250.sslip.io, потом свой домен
 # 	@public_api {
 # 		method GET HEAD OPTIONS
-# 		path /api/v1/catalog/* /api/v1/dashboard/* /api/v1/market/* /api/v1/estimate /api/v1/price-trend /health
+# 		path /api/v1/public/* /api/v1/catalog/* /api/v1/dashboard/* /api/v1/market/* /api/v1/estimate /api/v1/price-trend /health
 # 	}
 # 	handle @public_api {
 # 		request_body {
