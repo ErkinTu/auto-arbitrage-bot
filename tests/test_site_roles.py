@@ -217,3 +217,14 @@ def test_admin_via_site_session_sees_admin_api(env, monkeypatch) -> None:
     assert me["role"] == "admin"
     assert client.get("/api/v1/admin/users").status_code == 200
     assert client.get("/api/v1/market/vehicle-summary?brand_id=1&model_id=1&year=2019").status_code == 404  # админ ≥ подписчик: гейт пройден
+
+
+def test_dev_login_refuses_non_local_site(monkeypatch) -> None:
+    """Тестовые юзеры (в т.ч. админ) не должны появиться на проде случайно."""
+    import argparse
+
+    from app.cli import command_dev_login
+
+    monkeypatch.setattr(get_settings(), "site_url", "https://skupka.63-182-28-250.sslip.io")
+    with pytest.raises(SystemExit, match="не localhost"):
+        command_dev_login(argparse.Namespace(role=None, i_know_this_is_not_prod=False))

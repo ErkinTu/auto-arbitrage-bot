@@ -323,6 +323,63 @@ def command_grant_subscription(args: argparse.Namespace) -> None:
         )
 
 
+def command_dev_login(args: argparse.Namespace) -> None:
+    """Ссылки входа на сайт за тестовых пользователей — для локальной проверки ролей.
+
+    Заводит (или переиспользует) трёх пользователей с несуществующими
+    telegram_id 9_000_000_001..003 — по одному на роль: без подписки,
+    подписчик (подписка на 30 дней), админ — и печатает одноразовые ссылки.
+    Гость — просто открыть сайт без входа.
+
+    Только для локального стенда: SITE_URL обязан указывать на localhost.
+    На проде такие пользователи (особенно с is_superuser) недопустимы — без
+    `--i-know-this-is-not-prod` команда откажет.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.core.config import get_settings
+    from app.db.session import SessionLocal
+    from app.models import BotUser
+    from app.services.site_auth import issue_login_token
+
+    settings = get_settings()
+    local = settings.site_url.startswith(("http://localhost", "http://127.0.0.1"))
+    if not settings.site_url:
+        raise SystemExit("SITE_URL пуст — задайте SITE_URL=http://localhost:3000 в .env")
+    if not local and not args.i_know_this_is_not_prod:
+        raise SystemExit(f"SITE_URL={settings.site_url} — не localhost. Это похоже на прод: отказ.")
+
+    now = datetime.now(timezone.utc)
+    roles = {
+        "user": dict(telegram_id=9_000_000_001, first_name="Тест · без подписки", username="dev_user"),
+        "subscriber": dict(telegram_id=9_000_000_002, first_name="Тест · подписчик", username="dev_subscriber"),
+        "admin": dict(telegram_id=9_000_000_003, first_name="Тест · админ", username="dev_admin"),
+    }
+    with SessionLocal() as session:
+        print("Гость: просто откройте", settings.site_url)
+        for role, fields in roles.items():
+            if args.role and args.role != role:
+                continue
+            user = session.scalar(select(BotUser).where(BotUser.telegram_id == fields["telegram_id"]))
+            if user is None:
+                user = BotUser(**fields)
+                session.add(user)
+            # Состояние роли выставляем каждый раз — тестовый юзер мог «протухнуть».
+            user.access_status = "subscriber" if role == "subscriber" else "revoked"
+            user.subscription_expires_at = now + timedelta(days=30) if role == "subscriber" else None
+            user.trial_expires_at = None
+            user.is_superuser = role == "admin"
+            user.last_access_check_at = now
+            # Тестовые юзеры не должны получать рассылки бота.
+            user.is_active = False
+            session.commit()
+            token = issue_login_token(session, user.telegram_id)
+            print(f"{role:>10}: {settings.site_login_url(token)}")
+    print(f"Ссылки живут {settings.site_login_token_ttl_minutes} мин и открываются один раз.")
+
+
 def command_funnel(args: argparse.Namespace) -> None:
     """Воронка: старты → триалы → пейвол → платежи → оплаты.
 
@@ -686,6 +743,13 @@ def parser() -> argparse.ArgumentParser:
     funnel = sub.add_parser("funnel", help="Bot funnel: starts -> trials -> payments -> paid")
     funnel.add_argument("--days", type=int, default=30)
     funnel.set_defaults(func=command_funnel)
+
+    dev_login = sub.add_parser(
+        "dev-login", help="Local only: login links for test users of each site role"
+    )
+    dev_login.add_argument("--role", choices=["user", "subscriber", "admin"])
+    dev_login.add_argument("--i-know-this-is-not-prod", action="store_true")
+    dev_login.set_defaults(func=command_dev_login)
     return main
 
 
