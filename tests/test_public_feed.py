@@ -428,3 +428,32 @@ def test_facets_and_spec_params_over_http(client) -> None:
     ok = client.get("/api/v1/public/feed", params={"body_type": "Sedan,SUV", "customs": "cleared"})
     assert ok.status_code == 200
     assert client.get("/api/v1/public/feed", params={"customs": "maybe"}).status_code == 422
+
+
+def test_histograms_bucket_overflow_and_ignore_own_range(db) -> None:
+    from app.services.public_feed import feed_histograms
+
+    Factory, ids = db
+    with Factory() as s:
+        _listing(s, ids, current_price_usd=Decimal("1500"), year=1980, mileage_km=5_000)
+        _listing(s, ids, current_price_usd=Decimal("3999"), year=2019, mileage_km=None)
+        _listing(s, ids, current_price_usd=Decimal("250000"), year=2019, mileage_km=900_000)
+        _listing(s, ids, current_price_usd=Decimal("20000"), year=2019, brand_id=ids["lexus"],
+                 car_model_id=ids["rx"])
+        h = feed_histograms(s, FeedFilter(price_from=3000, brand_ids=[ids["toyota"]]))
+
+    price = h["price"]
+    assert (price["min"], price["step"], price["max"]) == (0, 2_000, 50_000)
+    # Свой диапазон (price_from) не применён, марка — применена (Lexus не считается).
+    assert price["counts"][0] == 1 and price["counts"][1] == 1 and price["counts"][-1] == 1
+    assert sum(price["counts"]) == 3
+    # Год до 1995 — в первую корзину; пробег NULL не считается, 900k — в последнюю.
+    assert h["year"]["counts"][0] == 0  # 1980 отрезан price_from=3000 (цена 1500)
+    assert sum(h["mileage"]["counts"]) == 1 and h["mileage"]["counts"][-1] == 1
+
+
+def test_histograms_over_http(client) -> None:
+    client, _, _ = client
+    r = client.get("/api/v1/public/feed/histograms", params={"price_from": 1000})
+    assert r.status_code == 200
+    assert set(r.json()) == {"price", "year", "mileage"}

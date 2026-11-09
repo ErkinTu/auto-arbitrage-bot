@@ -17,7 +17,7 @@ from app.api.roles import current_viewer
 from app.core.cache import cached_call
 from app.core.config import get_settings
 from app.db.session import get_session
-from app.schemas import PublicFeedCount, PublicFeedFacets, PublicFeedPage, PublicListing, PublicListingDetail
+from app.schemas import PublicFeedCount, PublicFeedFacets, PublicFeedHistograms, PublicFeedPage, PublicListing, PublicListingDetail
 from app.services.site_auth import Viewer, role_at_least
 from app.services.public_feed import (
     CursorError,
@@ -27,6 +27,7 @@ from app.services.public_feed import (
     best_now,
     feed_count,
     feed_facets,
+    feed_histograms,
     feed_page,
     listing_detail,
     listings_by_ids,
@@ -138,6 +139,23 @@ def get_feed_count(
         "public.feed_count",
         feed_count,
     feed_facets,
+    feed_histograms,
+        session,
+        ttl=get_settings().public_feed_cache_seconds,
+        flt=flt,
+    )
+
+
+@router.get("/feed/histograms", response_model=PublicFeedHistograms)
+def get_feed_histograms(
+    flt: Annotated[FeedFilter, Depends(feed_filter)],
+    session: Session = Depends(get_session),
+) -> dict:
+    """Гистограммы цены/года/пробега под ползунки — с учётом остальных фильтров
+    (свой диапазон каждой не применяется). Политика лимита heavy, как у count."""
+    return cached_call(
+        "public.feed_histograms",
+        feed_histograms,
         session,
         ttl=get_settings().public_feed_cache_seconds,
         flt=flt,

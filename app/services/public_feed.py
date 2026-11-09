@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import base64
 import binascii
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 
-from sqlalchemy import Select, and_, exists, func, or_, select, true
+from sqlalchemy import Integer, Select, and_, cast, exists, func, or_, select, true
 from sqlalchemy.orm import Session, aliased
 
 from app.bot.matching import MarketEstimate, market_estimate
@@ -682,3 +682,74 @@ def best_now(session: Session, *, limit: int = 12) -> list[dict]:
     ]
     items.sort(key=lambda item: item["market"]["diff_percent"])
     return items[:limit]
+
+
+# --- гистограммы для ползунков ----------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class HistogramScale:
+    """Шкала ползунка: `bins` корзин по `step` от `min`. Последняя корзина —
+    «и больше» (у цены и пробега длинный хвост), первая — «и меньше» (год)."""
+
+    min: int
+    step: int
+    bins: int
+
+    @property
+    def max(self) -> int:
+        return self.min + self.step * (self.bins - 1)
+
+
+def histogram_scales(now: datetime | None = None) -> dict[str, HistogramScale]:
+    year_now = (now or _now()).year
+    return {
+        "price": HistogramScale(min=0, step=2_000, bins=26),  # 0 … 50 000+ $
+        "year": HistogramScale(min=1995, step=1, bins=year_now - 1995 + 1),  # ≤1995 … текущий
+        "mileage": HistogramScale(min=0, step=10_000, bins=31),  # 0 … 300 000+ км
+    }
+
+
+_HIST_COLUMNS = {
+    "price": ("current_price_usd", ("price_from", "price_to")),
+    "year": ("year", ("year_from", "year_to")),
+    "mileage": ("mileage_km", ("mileage_from", "mileage_to")),
+}
+
+
+def _histogram(session: Session, flt: FeedFilter, key: str, scale: HistogramScale, now: datetime) -> list[int]:
+    column_name, bounds = _HIST_COLUMNS[key]
+    # Свой диапазон не применяем (иначе за ползунком пусто), остальные фильтры — да.
+    own_free = replace(flt, **{name: None for name in bounds})
+    sub = _base_query(own_free, now=now).subquery()
+    column = sub.c[column_name]
+    # `//` — целочисленное деление и в Postgres, и в SQLite (не `/`: SQLAlchemy 2
+    # делает из него деление с дробью). Отрицательное (год < min) уходит в 0.
+    # Корзина считается во внутреннем запросе, группировка — по её имени: иначе
+    # Postgres сравнивает выражения в SELECT и GROUP BY с разными параметрами.
+    bucket = (
+        select(((cast(column, Integer) - scale.min) // scale.step).label("b"))
+        .where(column.is_not(None))
+        .subquery()
+    )
+    rows = session.execute(select(bucket.c.b, func.count()).group_by(bucket.c.b)).all()
+    counts = [0] * scale.bins
+    for index, count in rows:
+        counts[min(max(int(index), 0), scale.bins - 1)] += count
+    return counts
+
+
+def feed_histograms(session: Session, flt: FeedFilter) -> dict:
+    """Распределение цены, года и пробега под ползунки панели фильтров — с
+    учётом остальных фильтров. Фильтр по оценке (`deal`) не учитывается: он не
+    выражается в SQL, а гистограмма — подсказка формы, не счётчик."""
+    now = _now()
+    result = {}
+    for key, scale in histogram_scales(now).items():
+        result[key] = {
+            "min": scale.min,
+            "max": scale.max,
+            "step": scale.step,
+            "counts": _histogram(session, flt, key, scale, now),
+        }
+    return result

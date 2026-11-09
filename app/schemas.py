@@ -486,6 +486,22 @@ class PublicFeedCount(BaseModel):
     approximate: bool
 
 
+class PublicHistogram(BaseModel):
+    """Корзины по `step` от `min` до `max`: последняя — «`max` и больше»,
+    первая у года — «`min` и раньше»."""
+
+    min: int
+    max: int
+    step: int
+    counts: list[int]
+
+
+class PublicFeedHistograms(BaseModel):
+    price: PublicHistogram
+    year: PublicHistogram
+    mileage: PublicHistogram
+
+
 class PublicFacetItem(BaseModel):
     value: str
     count: int
