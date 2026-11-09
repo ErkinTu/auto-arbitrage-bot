@@ -17,7 +17,7 @@ from app.api.roles import current_viewer
 from app.core.cache import cached_call
 from app.core.config import get_settings
 from app.db.session import get_session
-from app.schemas import PublicFeedCount, PublicFeedPage, PublicListing, PublicListingDetail
+from app.schemas import PublicFeedCount, PublicFeedFacets, PublicFeedPage, PublicListing, PublicListingDetail
 from app.services.site_auth import Viewer, role_at_least
 from app.services.public_feed import (
     CursorError,
@@ -26,6 +26,7 @@ from app.services.public_feed import (
     Sort,
     best_now,
     feed_count,
+    feed_facets,
     feed_page,
     listing_detail,
     listings_by_ids,
@@ -48,6 +49,11 @@ def _int_list(raw: str | None, *, name: str, max_items: int = 20) -> list[int]:
     return values
 
 
+def _str_list(raw: str | None, *, max_items: int = 20) -> list[str]:
+    """«Седан,Хэтчбек» → отсортированный список без дублей (ключ кэша стабилен)."""
+    return sorted({part.strip() for part in (raw or "").split(",") if part.strip()})[:max_items]
+
+
 def feed_filter(
     brand_ids: Annotated[str | None, Query(max_length=200, description="через запятую")] = None,
     model_id: Annotated[int | None, Query(ge=1)] = None,
@@ -61,19 +67,23 @@ def feed_filter(
     mileage_to: Annotated[int | None, Query(ge=0, le=2_000_000)] = None,
     seller_type: Annotated[str | None, Query(pattern="^(private|dealer)$")] = None,
     fuel: Annotated[str | None, Query(max_length=80, description="через запятую")] = None,
+    body_type: Annotated[str | None, Query(max_length=300, description="через запятую, значения из /feed/facets")] = None,
+    gearbox: Annotated[str | None, Query(max_length=300, description="через запятую")] = None,
+    drive: Annotated[str | None, Query(max_length=300, description="через запятую")] = None,
+    steering: Annotated[str | None, Query(max_length=120, description="через запятую")] = None,
+    customs: Annotated[str | None, Query(pattern="^(cleared|not_cleared)$")] = None,
     with_photo: bool = False,
     new_24h: bool = False,
     price_dropped: bool = False,
     deal: Deal = "any",
 ) -> FeedFilter:
-    city_list = [c.strip() for c in (cities or "").split(",") if c.strip()][:20]
     fuels = [f.strip() for f in (fuel or "").split(",") if f.strip()]
     if any(f not in _FUELS for f in fuels):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "fuel: неизвестный тип")
     return FeedFilter(
         brand_ids=sorted(set(_int_list(brand_ids, name="brand_ids"))),
         model_id=model_id,
-        cities=sorted(set(city_list)),
+        cities=_str_list(cities),
         source=source,
         price_from=price_from,
         price_to=price_to,
@@ -83,6 +93,11 @@ def feed_filter(
         mileage_to=mileage_to,
         seller_type=seller_type,
         fuel_groups=sorted(set(fuels)),
+        body_types=_str_list(body_type),
+        gearboxes=_str_list(gearbox),
+        drive_types=_str_list(drive),
+        steering=_str_list(steering),
+        customs=customs,
         with_photo=with_photo,
         new_24h=new_24h,
         price_dropped=price_dropped,
@@ -122,10 +137,18 @@ def get_feed_count(
     return cached_call(
         "public.feed_count",
         feed_count,
+    feed_facets,
         session,
         ttl=get_settings().public_feed_cache_seconds,
         flt=flt,
     )
+
+
+@router.get("/feed/facets", response_model=PublicFeedFacets)
+def get_feed_facets(session: Session = Depends(get_session)) -> dict:
+    """Значения для чипов фильтра: кузов, КПП, привод, руль, города, растаможка.
+    Меняются медленно — общий TTL справочников (`API_CACHE_TTL_SECONDS`)."""
+    return cached_call("public.feed_facets", feed_facets, session)
 
 
 @router.get("/best", response_model=list[PublicListing])

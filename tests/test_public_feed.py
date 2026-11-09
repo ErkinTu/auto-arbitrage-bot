@@ -382,3 +382,49 @@ def test_batch_estimates_match_bot(db) -> None:
             else:
                 assert got is not None and got.samples == bot.samples
                 assert abs(got.avg_usd - bot.avg_usd) < 1e-6
+
+
+def test_spec_filters_ignore_case_and_skip_unknown(db) -> None:
+    Factory, ids = db
+    with Factory() as s:
+        sedan = _listing(s, ids, body_type="Sedan", gearbox="Automatic", drive_type="AWD",
+                         steering_wheel="Left", customs_status="cleared")
+        sedan_lower = _listing(s, ids, body_type="sedan ", gearbox="automatic")
+        suv = _listing(s, ids, body_type="SUV", gearbox="Manual", customs_status="not_cleared")
+        unknown = _listing(s, ids, body_type=None, gearbox=None)
+
+        def found(**kw) -> set[int]:
+            return {i["id"] for i in feed_page(s, FeedFilter(**kw))["items"]}
+
+        assert found(body_types=["Sedan"]) == {sedan.id, sedan_lower.id}
+        assert found(body_types=["sedan", "SUV"]) == {sedan.id, sedan_lower.id, suv.id}
+        assert found(gearboxes=["Manual"]) == {suv.id}
+        assert found(drive_types=["awd"]) == {sedan.id}
+        assert found(steering=["Left"]) == {sedan.id}
+        assert found(customs="cleared") == {sedan.id}
+        assert found(customs="not_cleared") == {suv.id}
+        assert unknown.id not in found(body_types=["Sedan", "SUV"])
+
+
+def test_facets_merge_spellings_and_drop_rare(db, monkeypatch) -> None:
+    from app.services import public_feed
+
+    monkeypatch.setattr(public_feed, "FACET_MIN_COUNT", 2)
+    Factory, ids = db
+    with Factory() as s:
+        for body in ["Sedan", "Sedan", "sedan", "SUV", "SUV", "Limo"]:
+            _listing(s, ids, body_type=body)
+        _listing(s, ids, body_type="Ghost", is_active=False)
+        _listing(s, ids, body_type="Ghost", is_active=False)
+        facets = public_feed.feed_facets(s)
+    assert facets["body_types"] == [{"value": "Sedan", "count": 3}, {"value": "SUV", "count": 2}]
+    assert facets["cities"] == [{"value": "Бишкек", "count": 6}]
+    assert [c["value"] for c in facets["customs"]] == ["cleared", "not_cleared"]
+
+
+def test_facets_and_spec_params_over_http(client) -> None:
+    client, _, _ = client
+    assert client.get("/api/v1/public/feed/facets").status_code == 200
+    ok = client.get("/api/v1/public/feed", params={"body_type": "Sedan,SUV", "customs": "cleared"})
+    assert ok.status_code == 200
+    assert client.get("/api/v1/public/feed", params={"customs": "maybe"}).status_code == 422

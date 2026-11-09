@@ -486,6 +486,23 @@ class PublicFeedCount(BaseModel):
     approximate: bool
 
 
+class PublicFacetItem(BaseModel):
+    value: str
+    count: int
+
+
+class PublicFeedFacets(BaseModel):
+    """Значения для чипов панели фильтров (из базы). `value` — что слать в
+    одноимённый параметр ленты; сравнение там без учёта регистра."""
+
+    body_types: list[PublicFacetItem]
+    gearboxes: list[PublicFacetItem]
+    drive_types: list[PublicFacetItem]
+    steering: list[PublicFacetItem]
+    cities: list[PublicFacetItem]
+    customs: list[PublicFacetItem]
+
+
 
 # --- Роли сайта (api/auth.py) --------------------------------------------------
 

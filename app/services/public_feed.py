@@ -68,6 +68,13 @@ class FeedFilter:
     mileage_to: int | None = None
     seller_type: str | None = None  # "private" | "dealer"
     fuel_groups: list[str] = field(default_factory=list)
+    # Характеристики — строки источника как есть («Седан», «Автомат»…); значения
+    # для чипов сайт берёт из `feed_facets`, сравнение — без учёта регистра.
+    body_types: list[str] = field(default_factory=list)
+    gearboxes: list[str] = field(default_factory=list)
+    drive_types: list[str] = field(default_factory=list)
+    steering: list[str] = field(default_factory=list)
+    customs: str | None = None  # "cleared" | "not_cleared"
     with_photo: bool = False
     new_24h: bool = False
     price_dropped: bool = False
@@ -107,12 +114,21 @@ def decode_cursor(sort: Sort, cursor: str) -> tuple[object, int]:
 # --- запрос -----------------------------------------------------------------
 
 
-def _base_query(flt: FeedFilter, *, now: datetime) -> Select:
-    """Активные объявления с распознанной маркой/моделью/годом и ценой."""
-    conditions = [
-        # Именно `= true`, не `IS true`: частичный индекс `ix_listing_feed_fresh`
-        # объявлен `WHERE is_active`, и `IS true` планировщик с ним не сопоставляет
-        # (замер на копии прода: полный проход 90 мс против индекса).
+def _text_in(column, values: list[str]):
+    """Строка источника — одно из значений: точно или без учёта регистра и
+    крайних пробелов (lower() в Postgres знает кириллицу; точное — для SQLite
+    в тестах и для индекса по city). NULL не попадает: фильтр не врёт."""
+    return or_(
+        column.in_(values),
+        func.lower(func.trim(column)).in_([v.strip().lower() for v in values]),
+    )
+
+
+def _feed_conditions() -> list:
+    """Что вообще попадает в ленту. Именно `= true`, не `IS true`: частичный
+    индекс `ix_listing_feed_fresh` объявлен `WHERE is_active`, и `IS true`
+    планировщик с ним не сопоставляет (замер на копии прода: 90 мс против индекса)."""
+    return [
         Listing.is_active == true(),
         Listing.brand_id.is_not(None),
         Listing.car_model_id.is_not(None),
@@ -120,19 +136,27 @@ def _base_query(flt: FeedFilter, *, now: datetime) -> Select:
         Listing.current_price_usd.is_not(None),
         Listing.current_price_usd > 0,
     ]
+
+
+def _base_query(flt: FeedFilter, *, now: datetime) -> Select:
+    """Активные объявления с распознанной маркой/моделью/годом и ценой."""
+    conditions = _feed_conditions()
     if flt.brand_ids:
         conditions.append(Listing.brand_id.in_(flt.brand_ids))
     if flt.model_id is not None:
         conditions.append(Listing.car_model_id == flt.model_id)
     if flt.cities:
-        # Точное совпадение или без учёта регистра (lower() в Postgres знает
-        # кириллицу; точное — на случай SQLite в тестах и для индекса по city).
-        conditions.append(
-            or_(
-                Listing.city.in_(flt.cities),
-                func.lower(Listing.city).in_([c.lower() for c in flt.cities]),
-            )
-        )
+        conditions.append(_text_in(Listing.city, flt.cities))
+    for column, values in (
+        (Listing.body_type, flt.body_types),
+        (Listing.gearbox, flt.gearboxes),
+        (Listing.drive_type, flt.drive_types),
+        (Listing.steering_wheel, flt.steering),
+    ):
+        if values:
+            conditions.append(_text_in(column, values))
+    if flt.customs:
+        conditions.append(Listing.customs_status == flt.customs)
     if flt.source:
         conditions.append(
             Listing.source_id.in_(select(Source.id).where(Source.name.ilike(f"{flt.source}%")))
@@ -539,6 +563,63 @@ def feed_count(session: Session, flt: FeedFilter) -> dict:
         return {"count": matched, "approximate": False}
     # Экстраполяция по свежей выборке: честно помечаем как приблизительное.
     return {"count": round(matched / len(rows) * total), "approximate": True}
+
+
+# --- значения для чипов фильтра ---------------------------------------------
+
+# Сколько значений отдаём и с какого числа объявлений: у источников бывают
+# опечатки и экзотика («Лимузин» × 2) — чипом они только шумят.
+FACET_LIMIT = 24
+CITY_FACET_LIMIT = 40
+FACET_MIN_COUNT = 5
+
+
+def _facet(session: Session, column, *, limit: int) -> list[dict]:
+    """Значения колонки по активной ленте: варианты написания («седан» /
+    «Седан ») склеиваются, подпись — самое частое написание. Фильтр потом
+    сравнивает без учёта регистра (`_text_in`), так что чип ловит все варианты."""
+    rows = session.execute(
+        select(column, func.count())
+        .where(*_feed_conditions(), column.is_not(None))
+        .group_by(column)
+    ).all()
+    merged: dict[str, dict] = {}
+    for raw, count in rows:
+        label = str(raw).strip()
+        if not label:
+            continue
+        key = label.casefold()
+        slot = merged.setdefault(key, {"value": label, "count": 0, "_best": 0})
+        slot["count"] += count
+        if count > slot["_best"]:
+            slot["value"], slot["_best"] = label, count
+    items = sorted(merged.values(), key=lambda x: (-x["count"], x["value"]))
+    return [
+        {"value": i["value"], "count": i["count"]} for i in items if i["count"] >= FACET_MIN_COUNT
+    ][:limit]
+
+
+def feed_facets(session: Session) -> dict:
+    """Значения для панели фильтров сайта — из базы, не захардкоженным списком.
+    Считается по всей активной ленте (без учёта выбранных фильтров): набор чипов
+    не прыгает при каждом нажатии. Кэшируется на уровне ручки."""
+    customs = dict(
+        session.execute(
+            select(Listing.customs_status, func.count())
+            .where(*_feed_conditions())
+            .group_by(Listing.customs_status)
+        ).all()
+    )
+    return {
+        "body_types": _facet(session, Listing.body_type, limit=FACET_LIMIT),
+        "gearboxes": _facet(session, Listing.gearbox, limit=FACET_LIMIT),
+        "drive_types": _facet(session, Listing.drive_type, limit=FACET_LIMIT),
+        "steering": _facet(session, Listing.steering_wheel, limit=FACET_LIMIT),
+        "cities": _facet(session, Listing.city, limit=CITY_FACET_LIMIT),
+        "customs": [
+            {"value": key, "count": customs.get(key, 0)} for key in ("cleared", "not_cleared")
+        ],
+    }
 
 
 def listings_by_ids(session: Session, ids: list[int]) -> list[dict]:
