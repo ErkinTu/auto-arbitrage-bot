@@ -357,6 +357,18 @@ def _price_drops(session: Session, listings: list[Listing], now: datetime) -> di
     return drops
 
 
+def hd_image(url: str | None) -> str | None:
+    """Крупный вариант фото для сайта.
+
+    mashina хранит у нас `…_medium.webp` (360×480 — хватает Telegram), а рядом
+    по тому же хэшу лежит `…_large.webp` (675×900; ключ `big` в их API).
+    Проверено на живых объявлениях 09.11.2026. lalafo уже отдаёт `original`.
+    """
+    if url and "mashina.kg/" in url and "_medium." in url:
+        return url.replace("_medium.", "_large.")
+    return url
+
+
 def _source_key(source_name: str) -> str:
     return source_name.split(".")[0].lower()
 
@@ -398,6 +410,8 @@ def serialize(
         "source": _source_key(source_name),
         "source_url": listing_public_url(listing.source_slug, listing.external_id),
         "image_url": real_photo(listing.image_url),
+        # Для srcset: браузер сам выберет 360 или 675 px под экран.
+        "image_url_hd": hd_image(real_photo(listing.image_url)),
         "photo_count": max(len(gallery), 1 if real_photo(listing.image_url) else 0),
         "price_usd": round(price_usd) if price_usd is not None else None,
         "price_kgs": price_kgs,
@@ -549,9 +563,9 @@ def listing_detail(session: Session, listing_id: int) -> dict:
         raise LookupError("Объявление не найдено")
     item = items[0]
     listing = session.get(Listing, listing_id)
-    gallery = [url for url in (listing.image_urls or []) if real_photo(url)]
-    if not gallery and item["image_url"]:
-        gallery = [item["image_url"]]
+    gallery = [hd_image(url) for url in (listing.image_urls or []) if real_photo(url)]
+    if not gallery and item["image_url_hd"]:
+        gallery = [item["image_url_hd"]]
     history = session.execute(
         select(ListingPriceHistory.observed_at, ListingPriceHistory.price_usd)
         .where(

@@ -83,7 +83,11 @@ def test_menu_has_no_duplicates():
 # --- публикация -------------------------------------------------------------
 
 
-def test_setup_publishes_all_commands_in_order():
+def test_setup_publishes_all_commands_in_order(monkeypatch):
+    from app.core.config import get_settings
+
+    # Без сайта меню = BOT_COMMANDS; с SITE_URL добавится /login (свой тест ниже).
+    monkeypatch.setattr(get_settings(), "site_url", "")
     bot = _FakeBot()
     asyncio.run(setup_bot_commands(bot))
 

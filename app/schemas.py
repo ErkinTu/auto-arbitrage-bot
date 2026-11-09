@@ -452,6 +452,7 @@ class PublicListing(BaseModel):
     source: str
     source_url: str
     image_url: str | None
+    image_url_hd: str | None
     photo_count: int
     price_usd: int | None
     price_kgs: int | None

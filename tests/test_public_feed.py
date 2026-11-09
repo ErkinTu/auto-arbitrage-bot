@@ -301,6 +301,15 @@ def test_favorites_include_inactive(client) -> None:
     assert [(i["id"], i["is_active"]) for i in items] == [(sold.id, False), (live.id, True)]
 
 
+def test_hd_image_for_mashina_only() -> None:
+    from app.services.public_feed import hd_image
+
+    assert hd_image("https://s3.mashina.kg/images/x/abc_medium.webp") == "https://s3.mashina.kg/images/x/abc_large.webp"
+    lalafo = "https://img5.lalafo.com/i/posters/original/a7/68/fe/x.jpeg"
+    assert hd_image(lalafo) == lalafo
+    assert hd_image(None) is None
+
+
 def test_listing_detail(client) -> None:
     http, Factory, ids = client
     with Factory() as s:
