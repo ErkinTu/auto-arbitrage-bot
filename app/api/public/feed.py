@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.db.session import get_session
 from app.schemas import PublicFeedCount, PublicFeedFacets, PublicFeedHistograms, PublicFeedPage, PublicListing, PublicListingDetail
 from app.services.regions import REGION_LABELS
+from app.services.specs import SPEC_GROUPS, raw_values_for
 from app.services.site_auth import Viewer, role_at_least
 from app.services.public_feed import (
     CursorError,
@@ -29,6 +30,7 @@ from app.services.public_feed import (
     feed_count,
     cities_for_regions,
     feed_cities,
+    feed_spec_values,
     feed_facets,
     feed_histograms,
     feed_page,
@@ -72,10 +74,10 @@ def feed_filter(
     mileage_to: Annotated[int | None, Query(ge=0, le=2_000_000)] = None,
     seller_type: Annotated[str | None, Query(pattern="^(private|dealer)$")] = None,
     fuel: Annotated[str | None, Query(max_length=80, description="через запятую")] = None,
-    body_type: Annotated[str | None, Query(max_length=300, description="через запятую, значения из /feed/facets")] = None,
-    gearbox: Annotated[str | None, Query(max_length=300, description="через запятую")] = None,
-    drive: Annotated[str | None, Query(max_length=300, description="через запятую")] = None,
-    steering: Annotated[str | None, Query(max_length=120, description="через запятую")] = None,
+    body_type: Annotated[str | None, Query(max_length=200, description="коды групп через запятую: sedan, suv, … (/feed/facets)")] = None,
+    gearbox: Annotated[str | None, Query(max_length=100, description="automatic, manual, cvt, robot")] = None,
+    drive: Annotated[str | None, Query(max_length=60, description="front, rear, awd")] = None,
+    steering: Annotated[str | None, Query(max_length=30, description="left, right")] = None,
     customs: Annotated[str | None, Query(pattern="^(cleared|not_cleared)$")] = None,
     region: Annotated[str | None, Query(max_length=200, description="коды регионов через запятую: bishkek, chuy, …, foreign")] = None,
     with_photo: bool = False,
@@ -90,6 +92,21 @@ def feed_filter(
     regions = _str_list(region)
     if any(r not in REGION_LABELS or r == "local" for r in regions):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "region: неизвестный регион")
+    specs: dict[str, list[str] | None] = {}
+    for field_name, raw in (("body_type", body_type), ("gearbox", gearbox), ("drive_type", drive), ("steering_wheel", steering)):
+        codes = _str_list(raw)
+        allowed = {code for code, _, _ in SPEC_GROUPS[field_name]}
+        if any(c not in allowed for c in codes):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{field_name}: неизвестное значение")
+        specs[field_name] = (
+            raw_values_for(
+                field_name,
+                cached_call("public.feed_spec_values", feed_spec_values, session, field_name=field_name),
+                codes,
+            )
+            if codes
+            else None
+        )
     region_cities = None
     if regions:
         cities_map = cached_call("public.feed_cities", feed_cities, session)
@@ -107,10 +124,10 @@ def feed_filter(
         mileage_to=mileage_to,
         seller_type=seller_type,
         fuel_groups=sorted(set(fuels)),
-        body_types=_str_list(body_type),
-        gearboxes=_str_list(gearbox),
-        drive_types=_str_list(drive),
-        steering=_str_list(steering),
+        body_types=specs["body_type"],
+        gearboxes=specs["gearbox"],
+        drive_types=specs["drive_type"],
+        steering=specs["steering_wheel"],
         customs=customs,
         regions=regions,
         region_cities=region_cities,

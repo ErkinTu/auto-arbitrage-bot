@@ -34,6 +34,7 @@ from app.services.exchange import get_latest_usd_rate
 from app.services.images import real_photo
 from app.services.regions import REGION_LABELS, is_foreign, region_matches, region_of
 from app.services.sources import listing_public_url
+from app.services.specs import group_labels, spec_group
 from app.services.stats import mileage_bucket
 
 Sort = Literal["fresh", "price_asc", "price_desc"]
@@ -70,10 +71,12 @@ class FeedFilter:
     fuel_groups: list[str] = field(default_factory=list)
     # Характеристики — строки источника как есть («Седан», «Автомат»…); значения
     # для чипов сайт берёт из `feed_facets`, сравнение — без учёта регистра.
-    body_types: list[str] = field(default_factory=list)
-    gearboxes: list[str] = field(default_factory=list)
-    drive_types: list[str] = field(default_factory=list)
-    steering: list[str] = field(default_factory=list)
+    # None — без фильтра; список (даже пустой) — только эти строки. API раскрывает
+    # в них группы (`services/specs.py`): пустой список = группа без объявлений.
+    body_types: list[str] | None = None
+    gearboxes: list[str] | None = None
+    drive_types: list[str] | None = None
+    steering: list[str] | None = None
     customs: str | None = None  # "cleared" | "not_cleared"
     # Регионы как в боте (bishkek, chuy, …, foreign — `services/regions.py`).
     # API раскрывает их в точный список городов из базы (`region_cities`):
@@ -161,7 +164,7 @@ def _base_query(flt: FeedFilter, *, now: datetime) -> Select:
         (Listing.drive_type, flt.drive_types),
         (Listing.steering_wheel, flt.steering),
     ):
-        if values:
+        if values is not None:
             conditions.append(_text_in(column, values))
     if flt.customs:
         conditions.append(Listing.customs_status == flt.customs)
@@ -609,6 +612,32 @@ def _facet(session: Session, column, *, limit: int) -> list[dict]:
     ][:limit]
 
 
+def feed_spec_values(session: Session, field_name: str) -> dict[str, int]:
+    """Все написания характеристики в активной ленте с числом объявлений."""
+    column = getattr(Listing, field_name)
+    rows = session.execute(
+        select(column, func.count())
+        .where(*_feed_conditions(), column.is_not(None))
+        .group_by(column)
+    ).all()
+    return {value: count for value, count in rows}
+
+
+def _group_facet(session: Session, field_name: str) -> list[dict]:
+    """Чипы-группы (`services/specs.py`) с суммой объявлений по всем написаниям."""
+    counts: dict[str, int] = {}
+    for raw, count in feed_spec_values(session, field_name).items():
+        code = spec_group(field_name, raw)
+        if code:
+            counts[code] = counts.get(code, 0) + count
+    labels = group_labels(field_name)
+    return [
+        {"value": code, "label": labels[code], "count": counts[code]}
+        for code in labels
+        if counts.get(code, 0) >= FACET_MIN_COUNT
+    ]
+
+
 def feed_cities(session: Session) -> dict[str, int]:
     """Все города активной ленты с числом объявлений (для регионов). Кэш — у вызывающих."""
     rows = session.execute(
@@ -653,10 +682,10 @@ def feed_facets(session: Session) -> dict:
     )
     return {
         "regions": _region_facet(session),
-        "body_types": _facet(session, Listing.body_type, limit=FACET_LIMIT),
-        "gearboxes": _facet(session, Listing.gearbox, limit=FACET_LIMIT),
-        "drive_types": _facet(session, Listing.drive_type, limit=FACET_LIMIT),
-        "steering": _facet(session, Listing.steering_wheel, limit=FACET_LIMIT),
+        "body_types": _group_facet(session, "body_type"),
+        "gearboxes": _group_facet(session, "gearbox"),
+        "drive_types": _group_facet(session, "drive_type"),
+        "steering": _group_facet(session, "steering_wheel"),
         "cities": _facet(session, Listing.city, limit=CITY_FACET_LIMIT),
         "customs": [
             {"value": key, "count": customs.get(key, 0)} for key in ("cleared", "not_cleared")

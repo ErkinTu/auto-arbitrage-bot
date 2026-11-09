@@ -406,18 +406,21 @@ def test_spec_filters_ignore_case_and_skip_unknown(db) -> None:
         assert unknown.id not in found(body_types=["Sedan", "SUV"])
 
 
-def test_facets_merge_spellings_and_drop_rare(db, monkeypatch) -> None:
+def test_facets_group_spellings_and_drop_rare(db, monkeypatch) -> None:
     from app.services import public_feed
 
     monkeypatch.setattr(public_feed, "FACET_MIN_COUNT", 2)
     Factory, ids = db
     with Factory() as s:
-        for body in ["Sedan", "Sedan", "sedan", "SUV", "SUV", "Limo"]:
+        for body in ["Седан", "седан", "Кроссовер", "внедорожник 5 дв.", "Лимузин", "-1"]:
             _listing(s, ids, body_type=body)
-        _listing(s, ids, body_type="Ghost", is_active=False)
-        _listing(s, ids, body_type="Ghost", is_active=False)
+        _listing(s, ids, body_type="Купе", is_active=False)
+        _listing(s, ids, body_type="Купе", is_active=False)
         facets = public_feed.feed_facets(s)
-    assert facets["body_types"] == [{"value": "Sedan", "count": 3}, {"value": "SUV", "count": 2}]
+    assert facets["body_types"] == [
+        {"value": "sedan", "label": "Седан", "count": 2},
+        {"value": "suv", "label": "Внедорожник / кроссовер", "count": 2},
+    ]
     assert facets["cities"] == [{"value": "Бишкек", "count": 6}]
     assert [c["value"] for c in facets["customs"]] == ["cleared", "not_cleared"]
 
@@ -425,8 +428,9 @@ def test_facets_merge_spellings_and_drop_rare(db, monkeypatch) -> None:
 def test_facets_and_spec_params_over_http(client) -> None:
     client, _, _ = client
     assert client.get("/api/v1/public/feed/facets").status_code == 200
-    ok = client.get("/api/v1/public/feed", params={"body_type": "Sedan,SUV", "customs": "cleared"})
+    ok = client.get("/api/v1/public/feed", params={"body_type": "sedan,suv", "customs": "cleared"})
     assert ok.status_code == 200
+    assert client.get("/api/v1/public/feed", params={"body_type": "Sedan"}).status_code == 422
     assert client.get("/api/v1/public/feed", params={"customs": "maybe"}).status_code == 422
 
 
@@ -499,3 +503,21 @@ def test_similar_same_model_close_year_with_photo(client) -> None:
     assert r.status_code == 200
     assert [i["id"] for i in r.json()] == [close.id, far_price.id, older.id]
     assert client.get("/api/v1/public/listings/999999/similar").status_code == 404
+
+
+def test_spec_groups_over_http_cover_all_spellings(client) -> None:
+    client, Factory, ids = client
+    with Factory() as s:
+        a = _listing(s, ids, body_type="Кроссовер", gearbox="Типтроник")
+        b = _listing(s, ids, body_type="внедорожник 5 дв.", gearbox="автомат")
+        c = _listing(s, ids, body_type="седан", gearbox="механика")
+
+    def ids_for(**params) -> set[int]:
+        r = client.get("/api/v1/public/feed", params=params)
+        assert r.status_code == 200, r.text
+        return {i["id"] for i in r.json()["items"]}
+
+    assert ids_for(body_type="suv") == {a.id, b.id}
+    assert ids_for(gearbox="automatic") == {a.id, b.id}
+    assert ids_for(gearbox="manual", body_type="sedan") == {c.id}
+    assert ids_for(drive="awd") == set()  # группа без объявлений — пусто, а не «всё»
