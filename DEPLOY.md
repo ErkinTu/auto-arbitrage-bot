@@ -243,6 +243,12 @@ rsync -avn -e "ssh -i $KEY" --exclude '.env' --exclude '.venv' --exclude '.git' 
   переменную — синхронизируй её и в локальный `.env.example`, но НЕ заливай
   локальный `.env` на прод.
 - База при `up -d --build` **не трогается** (данные в volume `postgres_data`).
+- **Правка `.env` пересоздаёт и Postgres** (`env_file: .env` есть и у него):
+  следующий `docker compose up -d …` перезапустит базу, и цикл бота, идущий в
+  этот момент, упадёт (`AdminShutdown` / `PendingRollbackError`), следующий
+  пройдёт сам. Поймано на выкате 09.11.2026. Чтобы не трогать базу — `docker
+  compose up -d --no-deps --build api` (или `bot`/`worker`), и выкатывать между
+  циклами бота.
 - На будущее чище — приватный git-репозиторий и `git pull` на сервере вместо
   rsync (тогда `.env` держат отдельно, а не заливают из локали).
 

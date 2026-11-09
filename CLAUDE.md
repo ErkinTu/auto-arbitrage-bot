@@ -41,7 +41,7 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   `postgres:5432` публикуются только на `127.0.0.1` (через
   `API_HOST`/`POSTGRES_HOST`, дефолт localhost). Наружу открывать нельзя без
   reverse-proxy+auth. См. `DEPLOY.md`. **Защита API** (ветка
-  `feature/public-api-hardening`, 09.11.2026, на проде нет): лимит частоты по
+  `feature/public-api-hardening`, на проде с 09.11.2026): лимит частоты по
   IP (`core/ratelimit.py`), кэш ответов (`core/cache.py`), заголовки/потолок
   тела/`X-Request-ID` (`core/http.py`), `statement_timeout` только процессу
   `api`. Лимиты держатся на реальном IP — uvicorn обязан идти с
