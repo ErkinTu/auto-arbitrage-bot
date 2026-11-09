@@ -67,3 +67,13 @@
   индекс ленты, таблицы сессий) — между циклами бота.
 - SEO: `sitemap.xml`, `robots.txt`, Open Graph по умолчанию; CSP-заголовки сайта.
 - Мониторинг: Sentry фронта, внешний пинг `/health/ready`; e2e-тесты (Playwright), CI.
+
+## Сделано 09.11.2026 (вечер) — бэкенд-часть
+
+Ветки: `feature/roles` → `feature/deal-threshold-5` → `feature/feed-filters` (не запушены, на проде нет).
+
+- `PUBLIC_DEAL_THRESHOLD_PERCENT=5`, вердикт — строго больше порога.
+- Фильтры ленты `body_type`, `gearbox`, `drive`, `steering`, `customs` и ручка
+  `/public/feed/facets` (значения чипов и города из базы). Осталось: проверить
+  разнобой написаний mashina/lalafo на копии базы; проверить, бывает ли >20 фото
+  (`MAX_GALLERY`). Фронт-часть — `../analytics-front/docs/FRONT_CHANGELOG.md`.
