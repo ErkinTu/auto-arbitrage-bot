@@ -1,6 +1,6 @@
 # ADR: админка + analytics-front → единая платформа под сайт
 
-**Статус:** предложено 09.11.2026, ждёт решения владельца. Код не переносили —
+**Статус:** **принято 09.11.2026** — монорепо, сайт на **Nuxt 4** (SSR ради SEO карточек и страниц марок), админка остаётся Vue SPA. Код не переносили —
 только подготовка (бэкенд `feature/public-api-hardening`, фронт
 `analytics-front@feature/resilient-http`).
 
@@ -102,6 +102,22 @@ analytics-front/            → переименовать в skupka-web (поз
 **До этапа 2 нужно решение владельца** по юридическому риску публичной ленты
 с чужими объявлениями (`PROJECT_ANALYSIS_SUMMARY.md §4.7`): показывать карточку
 целиком или только аналитику + ссылку на источник.
+
+## Стек (утверждён 09.11.2026)
+
+База: Vue 3.5, Vite, Pinia, Tailwind 4 (есть) + **@tanstack/vue-query** (кэш
+серверных данных, SWR, повторы), **@vueuse/core**, **openapi-typescript +
+openapi-fetch** (типы из схемы FastAPI), **valibot**, **unplugin-icons** (lucide).
+Сайт: **Nuxt 4**, **@nuxt/image**, **@tanstack/vue-virtual** (лента),
+**Reka UI** (доступные примитивы), **vaul-vue** (нижняя панель), **embla-carousel-vue**,
+**uPlot** (графики сайта; echarts — только админка), **@vite-pwa/nuxt**.
+Качество: Vitest + @vue/test-utils, Playwright, MSW, ESLint/oxlint,
+@sentry/vue, size-limit (бюджет первого экрана 150 КБ gzip).
+Не берём: axios, moment/dayjs (есть `Intl`), lodash, Vuetify/Element/Quasar.
+
+Дизайн-система — `../demo/DESIGN_SYSTEM.md` + `../demo/tokens.css` (ветка
+`design/strict-premium` репо `demo`): токены двух тем, компоненты ядра, список
+доработок доступности, которых нет в демо.
 
 ## Последствия
 
