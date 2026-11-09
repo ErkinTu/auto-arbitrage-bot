@@ -505,12 +505,14 @@ class PublicFeedHistograms(BaseModel):
 class PublicFacetItem(BaseModel):
     value: str
     count: int
+    label: str | None = None  # подпись, если value — код (регионы)
 
 
 class PublicFeedFacets(BaseModel):
     """Значения для чипов панели фильтров (из базы). `value` — что слать в
     одноимённый параметр ленты; сравнение там без учёта регистра."""
 
+    regions: list[PublicFacetItem]
     body_types: list[PublicFacetItem]
     gearboxes: list[PublicFacetItem]
     drive_types: list[PublicFacetItem]

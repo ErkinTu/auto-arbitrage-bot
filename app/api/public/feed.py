@@ -18,6 +18,7 @@ from app.core.cache import cached_call
 from app.core.config import get_settings
 from app.db.session import get_session
 from app.schemas import PublicFeedCount, PublicFeedFacets, PublicFeedHistograms, PublicFeedPage, PublicListing, PublicListingDetail
+from app.services.regions import REGION_LABELS
 from app.services.site_auth import Viewer, role_at_least
 from app.services.public_feed import (
     CursorError,
@@ -26,6 +27,8 @@ from app.services.public_feed import (
     Sort,
     best_now,
     feed_count,
+    cities_for_regions,
+    feed_cities,
     feed_facets,
     feed_histograms,
     feed_page,
@@ -73,14 +76,23 @@ def feed_filter(
     drive: Annotated[str | None, Query(max_length=300, description="через запятую")] = None,
     steering: Annotated[str | None, Query(max_length=120, description="через запятую")] = None,
     customs: Annotated[str | None, Query(pattern="^(cleared|not_cleared)$")] = None,
+    region: Annotated[str | None, Query(max_length=200, description="коды регионов через запятую: bishkek, chuy, …, foreign")] = None,
     with_photo: bool = False,
     new_24h: bool = False,
     price_dropped: bool = False,
     deal: Deal = "any",
+    session: Session = Depends(get_session),
 ) -> FeedFilter:
     fuels = [f.strip() for f in (fuel or "").split(",") if f.strip()]
     if any(f not in _FUELS for f in fuels):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "fuel: неизвестный тип")
+    regions = _str_list(region)
+    if any(r not in REGION_LABELS or r == "local" for r in regions):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "region: неизвестный регион")
+    region_cities = None
+    if regions:
+        cities_map = cached_call("public.feed_cities", feed_cities, session)
+        region_cities = cities_for_regions(cities_map, regions)
     return FeedFilter(
         brand_ids=sorted(set(_int_list(brand_ids, name="brand_ids"))),
         model_id=model_id,
@@ -99,6 +111,8 @@ def feed_filter(
         drive_types=_str_list(drive),
         steering=_str_list(steering),
         customs=customs,
+        regions=regions,
+        region_cities=region_cities,
         with_photo=with_photo,
         new_24h=new_24h,
         price_dropped=price_dropped,
@@ -138,6 +152,8 @@ def get_feed_count(
     return cached_call(
         "public.feed_count",
         feed_count,
+    cities_for_regions,
+    feed_cities,
     feed_facets,
     feed_histograms,
         session,

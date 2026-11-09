@@ -457,3 +457,27 @@ def test_histograms_over_http(client) -> None:
     r = client.get("/api/v1/public/feed/histograms", params={"price_from": 1000})
     assert r.status_code == 200
     assert set(r.json()) == {"price", "year", "mileage"}
+
+
+def test_region_filter_over_http_and_junk_facets(client) -> None:
+    client, Factory, ids = client
+    with Factory() as s:
+        bish = _listing(s, ids, city="Бишкек", gearbox="-1")
+        karakol = _listing(s, ids, city="Каракол")
+        china = _listing(s, ids, city="Китай")
+        village = _listing(s, ids, city="с. Неизвестное")
+
+    def ids_for(**params) -> set[int]:
+        r = client.get("/api/v1/public/feed", params=params)
+        assert r.status_code == 200, r.text
+        return {i["id"] for i in r.json()["items"]}
+
+    assert ids_for(region="bishkek") == {bish.id}
+    assert ids_for(region="issykkul,foreign") == {karakol.id, china.id}
+    assert village.id not in ids_for(region="chuy")
+    assert client.get("/api/v1/public/feed", params={"region": "mars"}).status_code == 422
+
+    facets = client.get("/api/v1/public/feed/facets").json()
+    assert {r["value"]: r["count"] for r in facets["regions"]} == {"bishkek": 1, "issykkul": 1, "foreign": 1}
+    assert facets["regions"][0]["label"] == "Бишкек"
+    assert all(g["value"] != "-1" for g in facets["gearboxes"])

@@ -82,9 +82,9 @@
 
 | Ручка | Назначение |
 |---|---|
-| `GET /public/feed` | лента; `sort=fresh\|price_asc\|price_desc`, `limit≤48`, `cursor` (keyset, не OFFSET); фильтры: `brand_ids`, `model_id`, `cities`, `source=mashina\|lalafo`, `price_from/to`, `year_from/to`, `mileage_from/to` (NULL-пробег под диапазон не попадает), `seller_type=private\|dealer`, `fuel`, `body_type`, `gearbox`, `drive`, `steering` (через запятую, значения из `/feed/facets`, без учёта регистра; NULL не попадает), `customs=cleared\|not_cleared`, `with_photo`, `new_24h`, `price_dropped`, `deal=any\|good\|not_high` |
+| `GET /public/feed` | лента; `sort=fresh\|price_asc\|price_desc`, `limit≤48`, `cursor` (keyset, не OFFSET); фильтры: `brand_ids`, `model_id`, `cities`, `source=mashina\|lalafo`, `price_from/to`, `year_from/to`, `mileage_from/to` (NULL-пробег под диапазон не попадает), `seller_type=private\|dealer`, `fuel`, `body_type`, `gearbox`, `drive`, `steering` (через запятую, значения из `/feed/facets`, без учёта регистра; NULL не попадает), `customs=cleared\|not_cleared`, `region` (коды как в боте: `bishkek`, `osh_city`, 7 областей, `foreign`; раскрываются в города по `services/regions.py`, нераспознанные сёла не попадают), `with_photo`, `new_24h`, `price_dropped`, `deal=any\|good\|not_high` |
 | `GET /public/feed/histograms` | гистограммы цены (0…50 000+ $, шаг 2000), года (≤1995…текущий), пробега (0…300 000+ км, шаг 10 000) под ползунки; те же фильтры, что у ленты, свой диапазон не применяется, `deal` не учитывается; лимит heavy |
-| `GET /public/feed/facets` | значения для чипов фильтра из базы: кузов, КПП, привод, руль, города (≥ 5 объявлений, варианты написания склеены), растаможка; кэш справочников |
+| `GET /public/feed/facets` | значения для чипов фильтра из базы: регионы (с подписью `label`), кузов, КПП, привод, руль, города (≥ 5 объявлений, варианты написания склеены, значения без букв вроде «-1» скрыты), растаможка; кэш справочников |
 | `GET /public/feed/count` | «Показать N авто»; при `deal≠any` и >1000 кандидатов — `approximate: true` |
 | `GET /public/best` | «Лучшее сейчас»: свежие за 24 ч с фото, наибольшее отклонение вниз |
 | `GET /public/listings?ids=` | избранное (до 50), **включая снятые** (`is_active=false`) |

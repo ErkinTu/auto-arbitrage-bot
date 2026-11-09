@@ -32,7 +32,7 @@ from app.core.config import get_settings
 from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, Source
 from app.services.exchange import get_latest_usd_rate
 from app.services.images import real_photo
-from app.services.regions import is_foreign
+from app.services.regions import REGION_LABELS, is_foreign, region_matches, region_of
 from app.services.sources import listing_public_url
 from app.services.stats import mileage_bucket
 
@@ -75,6 +75,11 @@ class FeedFilter:
     drive_types: list[str] = field(default_factory=list)
     steering: list[str] = field(default_factory=list)
     customs: str | None = None  # "cleared" | "not_cleared"
+    # Регионы как в боте (bishkek, chuy, …, foreign — `services/regions.py`).
+    # API раскрывает их в точный список городов из базы (`region_cities`):
+    # карта «город → область» живёт в Python, в SQL её не выразить.
+    regions: list[str] = field(default_factory=list)
+    region_cities: list[str] | None = None
     with_photo: bool = False
     new_24h: bool = False
     price_dropped: bool = False
@@ -147,6 +152,9 @@ def _base_query(flt: FeedFilter, *, now: datetime) -> Select:
         conditions.append(Listing.car_model_id == flt.model_id)
     if flt.cities:
         conditions.append(_text_in(Listing.city, flt.cities))
+    if flt.region_cities is not None:
+        # Пустой список (регион без объявлений) → ничего, а не «всё».
+        conditions.append(Listing.city.in_(flt.region_cities))
     for column, values in (
         (Listing.body_type, flt.body_types),
         (Listing.gearbox, flt.gearboxes),
@@ -586,7 +594,9 @@ def _facet(session: Session, column, *, limit: int) -> list[dict]:
     merged: dict[str, dict] = {}
     for raw, count in rows:
         label = str(raw).strip()
-        if not label:
+        # «-1» и прочие значения без букв — заглушка источника (mashina так
+        # пишет «не указано» в КПП и руле): чипом не показываем.
+        if not any(ch.isalpha() for ch in label):
             continue
         key = label.casefold()
         slot = merged.setdefault(key, {"value": label, "count": 0, "_best": 0})
@@ -597,6 +607,37 @@ def _facet(session: Session, column, *, limit: int) -> list[dict]:
     return [
         {"value": i["value"], "count": i["count"]} for i in items if i["count"] >= FACET_MIN_COUNT
     ][:limit]
+
+
+def feed_cities(session: Session) -> dict[str, int]:
+    """Все города активной ленты с числом объявлений (для регионов). Кэш — у вызывающих."""
+    rows = session.execute(
+        select(Listing.city, func.count())
+        .where(*_feed_conditions(), Listing.city.is_not(None))
+        .group_by(Listing.city)
+    ).all()
+    return {city: count for city, count in rows}
+
+
+def cities_for_regions(cities: dict[str, int], regions: list[str]) -> list[str]:
+    """Точные написания городов из базы, попадающие под выбранные регионы."""
+    return sorted(c for c in cities if any(region_matches(c, r) for r in regions))
+
+
+def _region_facet(session: Session) -> list[dict]:
+    """Регионы как в боте: Бишкек, Ош, 7 областей, «Зарубежные». Нераспознанные
+    сёла в регион не попадают (как у бота) — только под «все»."""
+    counts: dict[str, int] = {}
+    for city, count in feed_cities(session).items():
+        code = region_of(city)
+        if code:
+            counts[code] = counts.get(code, 0) + count
+    order = [code for code in REGION_LABELS if code != "local"]
+    return [
+        {"value": code, "label": REGION_LABELS[code], "count": counts.get(code, 0)}
+        for code in order
+        if counts.get(code, 0) > 0
+    ]
 
 
 def feed_facets(session: Session) -> dict:
@@ -611,6 +652,7 @@ def feed_facets(session: Session) -> dict:
         ).all()
     )
     return {
+        "regions": _region_facet(session),
         "body_types": _facet(session, Listing.body_type, limit=FACET_LIMIT),
         "gearboxes": _facet(session, Listing.gearbox, limit=FACET_LIMIT),
         "drive_types": _facet(session, Listing.drive_type, limit=FACET_LIMIT),
