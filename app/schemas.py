@@ -68,6 +68,21 @@ class BrandLiquidity(BaseModel):
     median_days: float
 
 
+class TopModel(BaseModel):
+    brand_id: int
+    brand: str
+    model_id: int
+    model: str
+    active: int
+    new_7d: int
+    median_price_usd: int
+    p25_price_usd: int
+    p75_price_usd: int
+    median_year: int | None
+    median_mileage_km: int | None
+    price_change_30d: float | None
+
+
 class MarketOverview(BaseModel):
     """Графики раздела «Аналитика» сайта (services/market_overview.py)."""
 

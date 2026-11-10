@@ -90,3 +90,28 @@ def test_price_distribution_for_market_and_brand() -> None:
     assert market["total"] == 25 and market["bins"]
     bmw = mo.price_distribution(session, brand_id=ids["BMW"])
     assert bmw["total"] == 5 and bmw["median_usd"] == 62_000.0
+
+
+def test_top_models_ranks_by_volume_with_prices_and_trend() -> None:
+    from datetime import date
+
+    from app.models import DailyMarketStat
+
+    session, ids = _session()
+    now = datetime.now(timezone.utc)
+    for price in (10_000, 12_000, 14_000):
+        _listing(session, ids["Toyota"], seen=now, price=price)
+    _listing(session, ids["BMW"], seen=now - timedelta(days=30), price=50_000)
+    today = date.today()
+    for day, med in ((today, 11_000), (today - timedelta(days=30), 10_000)):
+        session.add(DailyMarketStat(
+            stat_date=day, brand_id=ids["Toyota"], car_model_id=ids["Toyota"], year=2018,
+            mileage_bucket="50-100k", customs_status="unknown", avg_price_usd=Decimal(med),
+            median_price_usd=Decimal(med), min_price_usd=Decimal(med), max_price_usd=Decimal(med), sample_count=12,
+        ))
+    session.flush()
+    toyota, bmw = mo.top_models(session)
+    assert (toyota["model"], toyota["active"], toyota["new_7d"]) == ("Toyota-m", 3, 3)
+    assert toyota["median_price_usd"] == 12_000 and toyota["p25_price_usd"] == 11_000
+    assert toyota["price_change_30d"] == 10.0
+    assert bmw["new_7d"] == 0 and bmw["price_change_30d"] is None

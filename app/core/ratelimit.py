@@ -132,6 +132,7 @@ _HEAVY_PREFIXES = (
     "/api/v1/public/feed/histograms",
     "/api/v1/public/estimate",
     "/api/v1/dashboard/market",
+    "/api/v1/dashboard/top-models",
 )
 _ADMIN_PREFIX = "/api/v1/admin/"
 

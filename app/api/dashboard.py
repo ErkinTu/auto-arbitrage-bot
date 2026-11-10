@@ -4,9 +4,9 @@ from sqlalchemy.orm import Session
 from app.core.cache import cached_call
 from app.api.roles import require_subscriber
 from app.db.session import get_session
-from app.schemas import BrandStat, DashboardSummary, MarketOverview
+from app.schemas import BrandStat, DashboardSummary, MarketOverview, TopModel
 from app.services.dashboard import get_brand_stats, get_dashboard_summary
-from app.services.market_overview import market_overview
+from app.services.market_overview import market_overview, top_models
 
 # Графики и аналитика — подписчикам (роли сайта, PLATFORM_ADR.md). Гейт на
 # роутере: новую ручку здесь нельзя завести открытой.
@@ -32,3 +32,9 @@ def dashboard_market(
 ) -> dict:
     """Поступления по дням, распределение цен (рынок или марка), срок до снятия."""
     return cached_call("dashboard.market", market_overview, session, brand_id=brand_id)
+
+
+@router.get("/top-models", response_model=list[TopModel])
+def dashboard_top_models(session: Session = Depends(get_session)) -> list[dict]:
+    """30 самых массовых моделей: объём, цены, типичный год/пробег, приток, тренд 30 дн."""
+    return cached_call("dashboard.top_models", top_models, session)
