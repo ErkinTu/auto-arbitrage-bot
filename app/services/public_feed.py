@@ -37,7 +37,15 @@ from app.services.sources import listing_public_url
 from app.services.specs import group_labels, spec_group
 from app.services.stats import mileage_bucket
 
-Sort = Literal["fresh", "price_asc", "price_desc"]
+Sort = Literal["fresh", "price_asc", "price_desc", "similar"]
+
+# «Похожие на объявление» (sort=similar&near=<id>, кнопки «Искать дальше» на
+# странице авто, 10.11.2026): ближе по цене, году и пробегу — выше. Вес года —
+# 6 % цены за год, пробега — 1/3 цены за 100 тыс. км; неизвестный год/пробег —
+# штраф как за 5 лет / 100 тыс. км. Пагинация — смещением: ключ сортировки
+# вычисляемый, а выдача и так узкая (фильтр по марке/цене/году).
+_SIMILAR_YEAR_WEIGHT = 0.06
+_SIMILAR_KM_WEIGHT = 1 / 300_000
 Deal = Literal["any", "good", "not_high"]
 
 # Сколько кандидатов просматриваем максимум, когда фильтр зависит от оценки
@@ -511,6 +519,57 @@ def _deal_ok(item: dict, deal: Deal) -> bool:
 # --- публичные функции ------------------------------------------------------
 
 
+def _similar_offset(cursor: str | None) -> int:
+    if not cursor:
+        return 0
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        kind, key, _ = base64.urlsafe_b64decode(padded.encode()).decode().split("|")
+        if kind != "similar":
+            raise CursorError("cursor belongs to another sort")
+        return max(0, int(key))
+    except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
+        raise CursorError("bad cursor") from exc
+
+
+def _similar_cursor(offset: int) -> str:
+    return base64.urlsafe_b64encode(f"similar|{offset}|0".encode()).decode().rstrip("=")
+
+
+def _similar_score(ref: Listing):
+    price = float(ref.current_price_usd)
+    score = func.abs(Listing.current_price_usd - price) / price
+    if ref.year:
+        score = score + func.coalesce(func.abs(Listing.year - ref.year), 5) * _SIMILAR_YEAR_WEIGHT
+    if ref.mileage_km is not None:
+        score = score + func.coalesce(func.abs(Listing.mileage_km - ref.mileage_km), 100_000) * _SIMILAR_KM_WEIGHT
+    return score
+
+
+def _similar_page(session: Session, base: Select, flt: FeedFilter, ref: Listing, *, limit: int, cursor: str | None, now) -> dict:
+    offset = _similar_offset(cursor)
+    ordered = base.where(Listing.id != ref.id).order_by(_similar_score(ref), Listing.id)
+    items: list[dict] = []
+    scanned = 0
+    while len(items) < limit:
+        batch = limit + 1 if flt.deal == "any" else _DEAL_SCAN_BATCH
+        rows = list(session.scalars(ordered.offset(offset + scanned).limit(batch)).all())
+        if not rows:
+            return {"items": items, "next_cursor": None}
+        for row, item in zip(rows, _enrich(session, rows, now)):
+            scanned += 1
+            if _deal_ok(item, flt.deal):
+                items.append(item)
+                if len(items) == limit:
+                    break
+        if len(rows) < batch and len(items) < limit:
+            return {"items": items, "next_cursor": None}
+        if flt.deal == "any" or scanned >= _DEAL_SCAN_MAX:
+            break
+    more = session.scalars(ordered.offset(offset + scanned).limit(1)).first() is not None
+    return {"items": items, "next_cursor": _similar_cursor(offset + scanned) if more else None}
+
+
 def feed_page(
     session: Session,
     flt: FeedFilter,
@@ -518,11 +577,18 @@ def feed_page(
     sort: Sort = "fresh",
     limit: int = 24,
     cursor: str | None = None,
+    near: int | None = None,
 ) -> dict:
     now = _now()
     base = _base_query(flt, now=now)
     items: list[dict] = []
     next_cursor: str | None = None
+
+    if sort == "similar":
+        ref = session.get(Listing, near) if near else None
+        if ref is not None and ref.current_price_usd:
+            return _similar_page(session, base, flt, ref, limit=limit, cursor=cursor, now=now)
+        sort, cursor = "fresh", None  # не на что равняться — обычная лента с начала
 
     if flt.deal == "any":
         rows = list(session.scalars(_order(base, sort, cursor).limit(limit + 1)).all())

@@ -521,3 +521,25 @@ def test_spec_groups_over_http_cover_all_spellings(client) -> None:
     assert ids_for(gearbox="automatic") == {a.id, b.id}
     assert ids_for(gearbox="manual", body_type="sedan") == {c.id}
     assert ids_for(drive="awd") == set()  # группа без объявлений — пусто, а не «всё»
+
+
+def test_similar_sort_orders_by_closeness_and_excludes_reference(db) -> None:
+    """«Искать дальше» на странице авто: ближе по цене/году/пробегу — выше."""
+    Factory, ids = db
+    with Factory() as s:
+        ref = _listing(s, ids, current_price_usd=Decimal("20000"), year=2018, mileage_km=100_000)
+        far = _listing(s, ids, current_price_usd=Decimal("35000"), year=2023, mileage_km=10_000)
+        near = _listing(s, ids, current_price_usd=Decimal("20500"), year=2018, mileage_km=110_000)
+        mid = _listing(s, ids, current_price_usd=Decimal("23000"), year=2017, mileage_km=150_000)
+        order: list[int] = []
+        cursor = None
+        while True:
+            page = feed_page(s, FeedFilter(), sort="similar", near=ref.id, limit=2, cursor=cursor)
+            order += [i["id"] for i in page["items"]]
+            cursor = page["next_cursor"]
+            if not cursor:
+                break
+        assert order == [near.id, mid.id, far.id]
+        # Образца нет — обычная лента (свежие), без ошибки.
+        fallback = feed_page(s, FeedFilter(), sort="similar", near=999_999, limit=10)
+        assert len(fallback["items"]) == 4

@@ -144,6 +144,7 @@ def get_feed(
     sort: Sort = "fresh",
     limit: Annotated[int, Query(ge=1, le=100)] = 24,
     cursor: Annotated[str | None, Query(max_length=200)] = None,
+    near: Annotated[int | None, Query(ge=1, description="sort=similar: id объявления-образца")] = None,
     session: Session = Depends(get_session),
 ) -> dict:
     limit = min(limit, get_settings().public_feed_max_limit)
@@ -157,6 +158,7 @@ def get_feed(
             sort=sort,
             limit=limit,
             cursor=cursor,
+            near=near if sort == "similar" else None,
         )
     except CursorError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неверный курсор") from exc
