@@ -537,6 +537,33 @@ def _enrich_or_skip(
         return raw
 
 
+def _schedule_feed_reveal(session: Session, listings: list[Listing], *, now: datetime | None = None) -> None:
+    """Плавное появление новых на сайте (решение владельца 11.11.2026).
+
+    Бот шлёт новинки сразу, а лента сайта показывает их по одной, равномерно в
+    течение `SITE_FEED_SPREAD_SECONDS` после обхода: `listings.feed_at` —
+    момент, с которого объявление видно в ленте (`public_feed._base_query`).
+    Порядок появления = порядок `first_seen_at`, поэтому каждое новое встаёт
+    в «Свежих» наверх, а не в середину. Очередь общая: следующий обход (другая
+    марка, другой источник) встаёт после уже запланированных, но окно
+    не растягивается дальше `now + spread` (иначе очередь копилась бы).
+    NULL у старых строк — видно сразу. 0 — выключено.
+    """
+    spread = get_settings().site_feed_spread_seconds
+    if spread <= 0 or not listings:
+        return
+    now = now or utcnow()
+    tail = session.scalar(select(func.max(Listing.feed_at)).where(Listing.feed_at > now))
+    if tail is not None and tail.tzinfo is None:
+        tail = tail.replace(tzinfo=timezone.utc)
+    start = max(now, tail or now)
+    end = now + timedelta(seconds=spread)
+    step = (end - start) / len(listings) if end > start else timedelta(seconds=1)
+    ordered = sorted(listings, key=lambda item: (item.first_seen_at or now, item.id or 0))
+    for index, listing in enumerate(ordered, start=1):
+        listing.feed_at = start + step * index
+
+
 def run_sync(
     session: Session,
     parser: ParserAdapter,
@@ -559,6 +586,7 @@ def run_sync(
     session.add(run)
     session.commit()
     session.refresh(run)
+    new_listings: list[Listing] = []
 
     created_period = period_override or target.fresh_period if mode == "fresh" else None
     page_size = page_size_override or target.page_size
@@ -623,8 +651,10 @@ def run_sync(
                             raw.get("title"),
                         )
                         continue
-                    event, _ = _apply_listing(session, source, run, item)
+                    event, applied = _apply_listing(session, source, run, item)
                     seen_external_ids.add(item.external_id)
+                    if event == "new" and applied is not None:
+                        new_listings.append(applied)
                     tail_event = event
                     run.processed_count += 1
                     if event == "new":
@@ -690,6 +720,7 @@ def run_sync(
         # interfere with the worker's iter_due_targets scheduling.
         if update_target_bookkeeping:
             target.last_success_at = utcnow()
+        _schedule_feed_reveal(session, new_listings)
         run.status = "completed"
         run.finished_at = utcnow()
         session.commit()

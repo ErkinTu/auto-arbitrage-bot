@@ -155,8 +155,13 @@ def _feed_conditions() -> list:
 
 
 def _base_query(flt: FeedFilter, *, now: datetime) -> Select:
-    """Активные объявления с распознанной маркой/моделью/годом и ценой."""
+    """Активные объявления с распознанной маркой/моделью/годом и ценой.
+
+    Новое объявление видно с `feed_at` — плавное появление после обхода
+    (`sync._schedule_feed_reveal`); NULL — сразу.
+    """
     conditions = _feed_conditions()
+    conditions.append(or_(Listing.feed_at.is_(None), Listing.feed_at <= now))
     if flt.brand_ids:
         conditions.append(Listing.brand_id.in_(flt.brand_ids))
     if flt.model_id is not None:

@@ -177,6 +177,9 @@ class Listing(Base, TimestampMixin):
     # страницы авто, телефоны замаскированы; вне payload_hash.
     description: Mapped[str | None] = mapped_column(Text)
     description_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # С какого момента новое объявление видно в ленте сайта (плавное появление,
+    # sync._schedule_feed_reveal); NULL — сразу. Бот этим полем не пользуется.
+    feed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
     seller_type: Mapped[str | None] = mapped_column(String(30))
     is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

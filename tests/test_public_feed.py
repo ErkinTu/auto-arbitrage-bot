@@ -555,3 +555,33 @@ def test_similar_sort_orders_by_closeness_and_excludes_reference(db) -> None:
         # Образца нет — обычная лента (свежие), без ошибки.
         fallback = feed_page(s, FeedFilter(), sort="similar", near=999_999, limit=10)
         assert len(fallback["items"]) == 4
+
+
+def test_new_listings_appear_gradually_in_order(db, monkeypatch) -> None:
+    """Плавное появление (11.11.2026): новые встают в ленту по одной за 5 минут
+    после обхода, в порядке first_seen — каждое наверх «Свежих»."""
+    from app.services import sync
+
+    monkeypatch.setattr(sync.get_settings(), "site_feed_spread_seconds", 300)
+    Factory, ids = db
+    now = _now()
+    with Factory() as s:
+        old = _listing(s, ids, first_seen_at=now - timedelta(hours=1))
+        batch = [_listing(s, ids, first_seen_at=now - timedelta(seconds=30 - i)) for i in range(3)]
+        sync._schedule_feed_reveal(s, batch, now=now)
+        s.commit()
+        reveal = [b.feed_at for b in batch]
+        assert reveal == sorted(reveal)
+        assert reveal[-1] <= now + timedelta(seconds=301)
+
+        def visible(at):
+            monkeypatch.setattr("app.services.public_feed._now", lambda: at)
+            return [i["id"] for i in feed_page(s, FeedFilter(), limit=10)["items"]]
+
+        assert visible(now) == [old.id]  # сразу после обхода — ещё ни одного
+        assert visible(now + timedelta(seconds=110)) == [batch[0].id, old.id]  # первое — наверх
+        assert visible(now + timedelta(seconds=301)) == [batch[2].id, batch[1].id, batch[0].id, old.id]
+        # Следующий обход встаёт в очередь после запланированных, в пределах окна.
+        more = [_listing(s, ids, first_seen_at=now)]
+        sync._schedule_feed_reveal(s, more, now=now)
+        assert more[0].feed_at > reveal[-1] - timedelta(seconds=1)

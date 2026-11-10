@@ -127,6 +127,8 @@ def _upgrade_postgres_schema() -> None:
         # Описание продавца для сайта (11.11.2026, services/descriptions.py).
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS description TEXT",
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS description_fetched_at TIMESTAMPTZ",
+        # Плавное появление новых в ленте сайта (11.11.2026, sync._schedule_feed_reveal).
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS feed_at TIMESTAMPTZ",
         # Телефон продавца для «WhatsApp» под альбомом (01.11.2026); nullable,
         # без бэкфилла — lalafo заполнит лента, mashina — нажатия.
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_phone VARCHAR(20)",

@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # Кэш ленты короче общего: она пополняется каждые 10 минут, и «Новые» не
     # должны запаздывать на полный TTL справочников.
     public_feed_cache_seconds: int = 30
+    # Новые объявления появляются в ленте сайта по одному за это время после
+    # обхода (sync._schedule_feed_reveal); 0 — сразу, как раньше.
+    site_feed_spread_seconds: int = 300
     public_feed_max_limit: int = 48
     # Вход на сайт через бота (`/login`): срок ссылки и сессии обычного
     # пользователя. Админу сессия — `admin_session_ttl_hours` (короче).
