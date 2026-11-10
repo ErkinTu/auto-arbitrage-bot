@@ -122,7 +122,7 @@ def _nice_step(raw: float) -> float:
     return float(10 * magnitude)
 
 
-def _price_distribution(prices: list[float]) -> dict:
+def _price_distribution(prices: list[float], *, max_bins: int = 14) -> dict:
     """Гистограмма цен когорты «модель+год» — «где ваша машина на рынке».
 
     Границы — усы IQR (как у аномалий), а не min/max: одна машина за $300k
@@ -139,7 +139,7 @@ def _price_distribution(prices: list[float]) -> dict:
     hi = min(max(prices), q3 + 1.5 * iqr)
     if hi <= lo:
         hi = lo + 1
-    target = max(5, min(14, round(len(prices) ** 0.5)))
+    target = max(5, min(max_bins, round(len(prices) ** 0.5)))
     step = _nice_step((hi - lo) / target)
     start = (lo // step) * step
     count = max(1, int(-(-(hi - start) // step)))  # ceil

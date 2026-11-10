@@ -87,7 +87,8 @@ def price_distribution(session: Session, *, brand_id: int | None = None) -> dict
     if brand_id is not None:
         conditions.append(Listing.brand_id == brand_id)
     prices = [float(p) for p in session.scalars(select(Listing.current_price_usd).where(*conditions))]
-    result = _price_distribution(prices)
+    # Рынок большой (~100 тыс. цен) — корзин больше, чем у оценки одной модели.
+    result = _price_distribution(prices, max_bins=24)
     result["median_usd"] = round(median(prices), 2) if prices else None
     return result
 
