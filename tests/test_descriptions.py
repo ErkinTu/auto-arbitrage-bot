@@ -24,7 +24,8 @@ def test_clean_masks_phones_but_keeps_prices_and_years() -> None:
     assert d.clean_description("   ") is None
 
 
-def test_description_fetched_once_then_from_db(db, monkeypatch) -> None:  # noqa: F811
+def test_description_fetched_once_and_kept(db, monkeypatch) -> None:  # noqa: F811
+    """Запасной запрос к странице — один раз; дальше описание из базы бессрочно."""
     Factory, ids = db
     calls = []
 
@@ -37,11 +38,19 @@ def test_description_fetched_once_then_from_db(db, monkeypatch) -> None:  # noqa
         listing = _listing(s, ids)
         first = d.listing_description(s, listing.id)
         assert first["text"] == f"Отличное состояние, тел. {d.PHONE_MASK}"
+        d.listing_description(s, listing.id, now=datetime.now(timezone.utc) + timedelta(days=365))
+        assert calls == [listing.id]
+
+
+def test_empty_description_not_rechecked(db, monkeypatch) -> None:  # noqa: F811
+    Factory, ids = db
+    calls = []
+    monkeypatch.setattr(d, "_fetch", lambda source, listing, url: calls.append(1) or None)
+    with Factory() as s:
+        listing = _listing(s, ids)
         d.listing_description(s, listing.id)
-        assert calls == [listing.id]  # второй раз — из базы
-        later = datetime.now(timezone.utc) + d.REFRESH_AFTER + timedelta(hours=1)
-        d.listing_description(s, listing.id, now=later)
-        assert len(calls) == 2  # срок вышел — обновили
+        d.listing_description(s, listing.id, now=datetime.now(timezone.utc) + timedelta(days=30))
+        assert calls == [1]  # «описания нет» запомнили; появится — допишет обход
 
 
 def test_source_error_keeps_old_text(db, monkeypatch) -> None:  # noqa: F811

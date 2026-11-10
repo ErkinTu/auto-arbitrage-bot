@@ -1,13 +1,16 @@
 """Описание продавца для страницы авто на сайте (заметка владельца 11.11.2026).
 
-В ленте источников описания нет (у mashina вообще, у lalafo — только в
-карточке), поэтому берём его **по запросу** — когда человек открыл страницу
-авто — и храним в `listings.description` на `REFRESH_AFTER` (повтор — только
-после этого срока):
+Описание пишет **обход**, из ответа, который он и так получает
+(`sync._set_current_fields`):
 
-- **mashina** — у API нет карточки, берём страницу объявления (~450 КБ, тот
-  же запрос, что «Все фото» в боте): поле `description` рядом с `title` в
-  экранированных данных Next.js. Проверено 11.11.2026.
+- **mashina** — поле `description` есть в ленте API (замер 11.11.2026: 31 из
+  31). Новые получают его в цикле бота, старые — при полном обходе worker-а.
+  Запасной путь, если в базе пусто (объявление ещё не попало в полный обход):
+  страница объявления по открытию (~450 КБ; 11.11.2026 mashina.kg отвечала
+  ~40 с) — с таймаутом `MASHINA_PAGE_TIMEOUT`, не ждём дольше. Пробуем один
+  раз на объявление: «описания нет» тоже запоминаем (`description_fetched_at`),
+  дальше его допишет обход. Сбой источника — повтор не раньше чем через 5 мин
+  (кэш ручки). **Хранится бессрочно** — срока нет, обновляет только обход.
 - **lalafo** — **без отдельных запросов**: описание приходит в карточке, которую
   обход и так дотягивает для новых и подешевевших (`sync._enrich_or_skip`), и
   пишется в базу там же (`sync._set_current_fields`). Запрос к lalafo идёт
@@ -26,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -35,7 +38,7 @@ from app.models import Listing, Source
 
 logger = logging.getLogger(__name__)
 
-REFRESH_AFTER = timedelta(days=3)
+MASHINA_PAGE_TIMEOUT = 15  # секунд: страница mashina бывает очень медленной
 MAX_LENGTH = 4000
 PHONE_MASK = "[номер скрыт]"
 
@@ -82,7 +85,7 @@ def _fetch(source_name: str, listing: Listing, url: str) -> str | None:
     from app.services.sources import LALAFO, MASHINA
 
     if source_name == MASHINA:
-        return mashina_description_from_page(_fetch_mashina_page(url, timeout=8))
+        return mashina_description_from_page(_fetch_mashina_page(url, timeout=MASHINA_PAGE_TIMEOUT))
     if source_name == LALAFO and get_settings().site_description_lalafo_on_demand and can_fetch(source_name):
         from app.parsers.lalafo import LalafoParser
 
@@ -105,7 +108,9 @@ def listing_description(session: Session, listing_id: int, *, now: datetime | No
     fetched = listing.description_fetched_at
     if fetched is not None and fetched.tzinfo is None:
         fetched = fetched.replace(tzinfo=timezone.utc)
-    if fetched is not None and now - fetched < REFRESH_AFTER or not listing.is_active:
+    if not listing.is_active or listing.description or fetched is not None:
+        # Описание хранится бессрочно (обновляет обход); уже проверяли и его
+        # нет — тоже не ходим снова; снятое — не ходим.
         return {"text": listing.description, "fetched_at": fetched}
     source = session.get(Source, listing.source_id)
     from app.services.sources import LALAFO

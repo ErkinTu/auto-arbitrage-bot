@@ -84,13 +84,16 @@ def _set_current_fields(listing: Listing, item: NormalizedListing) -> None:
         listing.seller_phone = None
     elif item.seller_phone:
         listing.seller_phone = item.seller_phone
-    # Описание lalafo — из той же карточки, без отдельного запроса через прокси
-    # (services/descriptions.py). Пустое не затирает известное.
+    # Описание — из того же ответа (mashina — лента, lalafo — карточка), без
+    # отдельных запросов (services/descriptions.py). Пустое не затирает
+    # известное; неизменное не пишем — полный обход видит каждое объявление.
     if item.description:
         from app.services.descriptions import clean_description
 
-        listing.description = clean_description(item.description)
-        listing.description_fetched_at = utcnow()
+        cleaned = clean_description(item.description)
+        if cleaned != listing.description or listing.description_fetched_at is None:
+            listing.description = cleaned
+            listing.description_fetched_at = utcnow()
     listing.customs_status = item.customs_status
     listing.seller_type = item.seller_type
     listing.is_verified_seller = item.is_verified_seller

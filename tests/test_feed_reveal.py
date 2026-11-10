@@ -50,3 +50,19 @@ def test_lalafo_sync_stores_description_from_card_it_already_fetches() -> None:
     assert parser.detail_calls == [101]  # один запрос карточки — как и раньше
     assert listing.description == "Без ДТП. Звоните [номер скрыт]"
     assert listing.description_fetched_at is not None
+
+
+def test_mashina_sync_stores_description_from_feed() -> None:
+    """Описание mashina — прямо из ленты API, без запроса страницы."""
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    source.name = "mashina.kg"
+    session.commit()
+    raw = {**_mashina_raw(), "description": "Один хозяин, тел +996 555 123 456"}
+    run_sync(session, _MashinaFeed([raw], {}), source, target, mode="fresh")
+    listing = session.scalar(select(Listing))
+    assert listing.description == "Один хозяин, тел [номер скрыт]"
+    stamp = listing.description_fetched_at
+    run_sync(session, _MashinaFeed([{**raw, "title": "Toyota Camry 70 2.5 AT!"}], {}), source, target, mode="fresh")
+    session.refresh(listing)
+    assert listing.description_fetched_at == stamp  # не изменилось — не переписываем
