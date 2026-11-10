@@ -9,12 +9,15 @@
 - **Распределение цен** — гистограмма активных «годных для аналитики» цен, всего
   рынка или одной марки. Корзины — те же, что у оценки
   (`vehicle_summary._price_distribution`: усы IQR, хвосты отдельно).
-- **Срок до снятия** — медиана дней от `first_seen_at` до `deactivated_at` у
-  снятых за последние `LIQUIDITY_DAYS` дней, по маркам. Это «сколько висело
-  объявление», а не «за сколько продали»: снятие бывает и без продажи, а у
-  lalafo снятое замечаем с задержкой валидатора (до 3 суток). Снятых по
-  «зависанию» (>30 дней без подтверждения) не отличить по строке — поэтому
-  медиана, а не среднее.
+- **Сколько висит объявление** — медиана дней от `first_seen_at` до
+  `last_seen_at` (последний раз видели живым) у снятых за `LIQUIDITY_DAYS`
+  дней, по маркам, **только mashina**. Почему так (замер на локальной базе
+  10.11.2026): по `deactivated_at` у всех марок выходило ~66 дней — там
+  задержка обнаружения (у «зависших» +30 дней фолбэка); а lalafo мы обходим
+  только по свежим, и снятое объявление «видели последний раз» почти в момент
+  публикации (медиана 0,5 дня). У mashina полный обход раз в неделю — сроки
+  15–26 дней и различаются по маркам. Это «сколько было в продаже», а не «за
+  сколько продали»: снятие бывает и без продажи; точность — до недели обхода.
 
 Цены и сроки собираем списком и считаем в Python: это два столбца, а
 `percentile_cont` по произвольным корзинам переносимо не выразить. Ответ
@@ -31,6 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Brand, Listing, Source
+from app.services.sources import MASHINA
 from app.services.vehicle_summary import _price_distribution
 
 INTAKE_DAYS = 30
@@ -91,18 +95,21 @@ def price_distribution(session: Session, *, brand_id: int | None = None) -> dict
 def liquidity_by_brand(session: Session, *, days: int = LIQUIDITY_DAYS) -> list[dict]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
     rows = session.execute(
-        select(Brand.name, Listing.first_seen_at, Listing.deactivated_at)
+        select(Brand.name, Listing.first_seen_at, Listing.last_seen_at)
         .join(Brand, Brand.id == Listing.brand_id)
+        .join(Source, Source.id == Listing.source_id)
         .where(
+            Source.name == MASHINA,
             Listing.is_active.is_(False),
             Listing.deactivated_at.is_not(None),
             Listing.deactivated_at >= since,
             Listing.first_seen_at.is_not(None),
+            Listing.last_seen_at.is_not(None),
         )
     ).all()
     durations: dict[str, list[float]] = defaultdict(list)
-    for name, seen, gone in rows:
-        span = (_utc(gone) - _utc(seen)).total_seconds() / 86400
+    for name, seen, last in rows:
+        span = (_utc(last) - _utc(seen)).total_seconds() / 86400
         if span >= 0:
             durations[name].append(span)
     items = [

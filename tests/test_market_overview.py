@@ -34,14 +34,14 @@ def _session() -> tuple[Session, dict[str, int]]:
 _n = 0
 
 
-def _listing(session, brand_id, *, source_id=1, seen, active=True, gone=None, price=20_000):
+def _listing(session, brand_id, *, source_id=1, seen, active=True, gone=None, last=None, price=20_000):
     global _n
     _n += 1
     session.add(
         Listing(
             source_id=source_id, external_id=f"x{_n}", brand_id=brand_id, car_model_id=brand_id,
             title="t", year=2018, current_price_usd=Decimal(price), is_active=active,
-            analytics_eligible=True, first_seen_at=seen, last_seen_at=seen, deactivated_at=gone,
+            analytics_eligible=True, first_seen_at=seen, last_seen_at=last or seen, deactivated_at=gone,
             payload_hash=f"h{_n}",
         )
     )
@@ -66,8 +66,13 @@ def test_liquidity_needs_enough_samples_and_uses_median(monkeypatch) -> None:
     monkeypatch.setattr(mo, "LIQUIDITY_MIN_SAMPLES", 3)
     now = datetime.now(timezone.utc)
     for days in (2, 4, 40):  # выброс 40 дней не тянет медиану
-        _listing(session, ids["Toyota"], seen=now - timedelta(days=days + 1), active=False, gone=now - timedelta(days=1))
+        seen = now - timedelta(days=days + 10)
+        # Срок — до последнего раза, когда видели живым, а не до снятия (+ задержка обнаружения).
+        _listing(session, ids["Toyota"], seen=seen, last=seen + timedelta(days=days), active=False, gone=now - timedelta(days=1))
     _listing(session, ids["BMW"], seen=now - timedelta(days=5), active=False, gone=now)  # мало данных
+    # lalafo не считаем: видим их почти только в момент публикации.
+    for _ in range(3):
+        _listing(session, ids["BMW"], source_id=2, seen=now - timedelta(days=9), active=False, gone=now)
     session.flush()
     [toyota] = mo.liquidity_by_brand(session)
     assert toyota["brand"] == "Toyota" and toyota["removed"] == 3 and toyota["median_days"] == 4.0
