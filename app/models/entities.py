@@ -173,6 +173,10 @@ class Listing(Base, TimestampMixin):
     # API, стирается при деактивации (services/phones.py). lalafo — из ленты
     # (`mobile`, если не `hide_phone`), mashina — со страницы по нажатию.
     seller_phone: Mapped[str | None] = mapped_column(String(20))
+    # Описание продавца для сайта (services/descriptions.py): по запросу со
+    # страницы авто, телефоны замаскированы; вне payload_hash.
+    description: Mapped[str | None] = mapped_column(Text)
+    description_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
     seller_type: Mapped[str | None] = mapped_column(String(30))
     is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

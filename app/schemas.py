@@ -496,6 +496,13 @@ class PublicMarket(BaseModel):
     verdict: Literal["good", "market", "high"]
 
 
+class PublicDescription(BaseModel):
+    """Описание продавца (телефоны замаскированы); text=None — описания нет."""
+
+    text: str | None
+    fetched_at: datetime | None
+
+
 class PublicListing(BaseModel):
     id: int
     brand: str

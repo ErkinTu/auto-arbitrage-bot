@@ -17,7 +17,7 @@ from app.api.roles import current_viewer
 from app.core.cache import cached_call
 from app.core.config import get_settings
 from app.db.session import get_session
-from app.schemas import PublicFeedCount, PublicFeedFacets, PublicFeedHistograms, PublicFeedPage, PublicListing, PublicListingDetail
+from app.schemas import PublicDescription, PublicFeedCount, PublicFeedFacets, PublicFeedHistograms, PublicFeedPage, PublicListing, PublicListingDetail
 from app.services.regions import REGION_LABELS
 from app.services.specs import SPEC_GROUPS, raw_values_for
 from app.services.site_auth import Viewer, role_at_least
@@ -246,6 +246,18 @@ def get_listing(
     # Копия: объект из кэша общий для всех ролей — его не трогаем.
     locked = not role_at_least(viewer.role, "subscriber")
     return {**item, "price_history": [] if locked else item["price_history"], "price_history_locked": locked}
+
+
+@router.get("/listings/{listing_id}/description", response_model=PublicDescription)
+def get_description(listing_id: int, session: Session = Depends(get_session)) -> dict:
+    """Описание продавца — по запросу со страницы авто (services/descriptions.py).
+    Кэш 5 мин: одновременные открытия одной машины — один запрос к источнику."""
+    from app.services.descriptions import listing_description
+
+    try:
+        return cached_call("public.description", listing_description, session, listing_id=listing_id)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
 
 
 @router.get("/listings/{listing_id}/similar", response_model=list[PublicListing])
