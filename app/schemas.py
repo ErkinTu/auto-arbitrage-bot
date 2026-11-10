@@ -1,3 +1,5 @@
+from typing import Literal
+
 from datetime import date, datetime
 
 from pydantic import BaseModel
@@ -400,6 +402,22 @@ class MileageInfo(BaseModel):
     adjustment_usd: float
 
 
+class PriceBin(BaseModel):
+    from_usd: float
+    to_usd: float
+    count: int
+
+
+class PriceDistribution(BaseModel):
+    """Гистограмма цен когорты: корзины в усах IQR + хвосты отдельно."""
+
+    step: float
+    bins: list[PriceBin]
+    below: int
+    above: int
+    total: int
+
+
 class VehicleSummary(BaseModel):
     vehicle: VehicleHeader
     currency: str
@@ -412,6 +430,132 @@ class VehicleSummary(BaseModel):
     mileage: MileageInfo
     representative_listing: RepresentativeListing | None
     anomalies: AnomalySummary
+    price_distribution: PriceDistribution
     granularity: str
     trend: list[VehicleSummaryTrendPoint]
     intake: list[VehicleIntakePoint]
+
+
+# --- Публичный сайт (api/public/) --------------------------------------------
+# Это контракт с фронтом: из этих моделей генерируются TS-типы
+# (openapi-typescript). Полей с ПДн (seller_phone) здесь нет и быть не должно —
+# тест tests/test_public_feed.py::test_no_personal_data_in_public_schema.
+
+
+class PublicMarket(BaseModel):
+    avg_price_usd: int
+    samples: int
+    diff_usd: int
+    diff_percent: float
+    verdict: Literal["good", "market", "high"]
+
+
+class PublicListing(BaseModel):
+    id: int
+    brand: str
+    model: str
+    year: int | None
+    mileage_km: int | None
+    engine_volume: float | None
+    fuel_group: str | None
+    gearbox: str | None
+    body_type: str | None
+    drive_type: str | None
+    steering_wheel: str | None
+    customs_status: str | None
+    city: str | None
+    is_foreign: bool
+    seller_type: str | None
+    source: str
+    source_url: str
+    image_url: str | None
+    image_url_hd: str | None
+    photo_count: int
+    price_usd: int | None
+    price_kgs: int | None
+    price_drop_usd: int | None
+    market: PublicMarket | None
+    published_at: datetime
+    first_seen_at: datetime
+    is_active: bool
+    deactivated_at: datetime | None
+
+
+class PublicPricePoint(BaseModel):
+    at: datetime
+    price_usd: int
+
+
+class PublicListingDetail(PublicListing):
+    images: list[str]
+    price_history: list[PublicPricePoint]
+    # Гостю и пользователю без подписки история (график) не отдаётся.
+    price_history_locked: bool = False
+
+
+class PublicFeedPage(BaseModel):
+    items: list[PublicListing]
+    next_cursor: str | None
+
+
+class PublicFeedCount(BaseModel):
+    count: int
+    approximate: bool
+
+
+class PublicHistogram(BaseModel):
+    """Корзины по `step` от `min` до `max`: последняя — «`max` и больше»,
+    первая у года — «`min` и раньше»."""
+
+    min: int
+    max: int
+    step: int
+    counts: list[int]
+
+
+class PublicFeedHistograms(BaseModel):
+    price: PublicHistogram
+    year: PublicHistogram
+    mileage: PublicHistogram
+
+
+class PublicFacetItem(BaseModel):
+    value: str
+    count: int
+    label: str | None = None  # подпись, если value — код (регионы)
+
+
+class PublicFeedFacets(BaseModel):
+    """Значения для чипов панели фильтров (из базы). `value` — что слать в
+    одноимённый параметр ленты; сравнение там без учёта регистра."""
+
+    regions: list[PublicFacetItem]
+    body_types: list[PublicFacetItem]
+    gearboxes: list[PublicFacetItem]
+    drive_types: list[PublicFacetItem]
+    steering: list[PublicFacetItem]
+    cities: list[PublicFacetItem]
+    customs: list[PublicFacetItem]
+
+
+
+# --- Роли сайта (api/auth.py) --------------------------------------------------
+
+
+class SiteUser(BaseModel):
+    telegram_id: int
+    username: str | None
+    first_name: str | None
+
+
+class SiteAccess(BaseModel):
+    status: Literal["member", "subscriber", "trial", "revoked"]
+    active: bool
+    expires_at: datetime | None
+
+
+class SiteMe(BaseModel):
+    role: Literal["guest", "user", "subscriber", "admin"]
+    user: SiteUser | None
+    access: SiteAccess | None
+    session_expires_at: datetime | None = None

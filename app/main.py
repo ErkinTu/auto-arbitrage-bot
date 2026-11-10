@@ -7,10 +7,12 @@ from app.api.admin.catalog import router as admin_catalog_router
 from app.api.admin.listings import router as admin_listings_router
 from app.api.admin.overview import router as admin_overview_router
 from app.api.admin.users import router as admin_users_router
+from app.api.auth import router as auth_router
 from app.api.catalog import router as catalog_router
 from app.api.dashboard import router as dashboard_router
 from app.api.market import router as market_router
 from app.api.payments import router as payments_router
+from app.api.public.feed import router as public_feed_router
 from app.api.routes import router as analytics_router
 from app.core.config import get_settings
 from app.core.http import BodySizeLimitMiddleware, SecurityHeadersMiddleware
@@ -76,11 +78,16 @@ app.include_router(dashboard_router)
 app.include_router(catalog_router)
 app.include_router(market_router)
 app.include_router(payments_router)
+# Сайт: /api/v1/public/* — лента, карточка, избранное (только чтение, без ПДн).
+app.include_router(public_feed_router)
+# Вход на сайт через бота и роль посетителя (guest/user/subscriber/admin).
+app.include_router(auth_router)
 
 # Админ-панель подключается, только когда задан её публичный адрес. Выключатель
 # по умолчанию: на стенде без ADMIN_PANEL_URL ручек admin/* просто не существует
 # — 404, а не «есть, но с гейтом». Меньше поверхности там, где она не нужна.
-if settings.admin_panel_enabled:
+# Админские ручки нужны и старой панели, и разделу /admin сайта.
+if settings.admin_panel_enabled or settings.site_url:
     app.include_router(admin_auth_router)
     app.include_router(admin_users_router)
     app.include_router(admin_listings_router)

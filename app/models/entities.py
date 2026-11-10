@@ -444,6 +444,53 @@ class AdminSession(Base):
     )
 
 
+
+class SiteLoginToken(Base):
+    """Одноразовая ссылка входа на САЙТ — для любого пользователя бота.
+
+    Тот же принцип, что у `AdminLoginToken` (sha256, срок, гашение отметкой), но
+    отдельная таблица: админский вход на проде живёт своей жизнью, а роль на
+    сайте вычисляется при каждом запросе (`services/site_auth.py`), а не
+    фиксируется при входе. Команда в боте — `/login`.
+    """
+
+    __tablename__ = "site_login_tokens"
+    __table_args__ = (Index("ix_site_login_token_user_created", "user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class SiteSession(Base):
+    """Сессия сайта в httpOnly-куке `sk_session` (sha256 в базе, отзыв удалением).
+
+    Роль в сессии НЕ хранится: гость/пользователь/подписчик/админ считается
+    на каждом запросе по `bot_users` — истёкшая подписка или снятый флаг
+    админа действуют сразу, без перелогина.
+    """
+
+    __tablename__ = "site_sessions"
+    __table_args__ = (Index("ix_site_session_user", "user_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
 class UserEvent(Base):
     """Лог событий воронки: старт → триал → оплата.
 

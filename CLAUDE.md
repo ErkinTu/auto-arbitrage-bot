@@ -8,7 +8,8 @@
 MVP для сбора объявлений о продаже авто с **mashina.kg**, хранения истории
 цен и рыночной аналитики (оценка цены, графики, «ниже рынка»). Backend —
 Python (FastAPI + SQLAlchemy + PostgreSQL), Telegram-бот на aiogram.
-Отдельный фронт — Vue/Vite в соседнем каталоге `../analytics-front`.
+Отдельный фронт — `../analytics-front` (Nuxt-сайт `apps/web` + старая панель `src/`);
+**учёт фронт-разработки — там** (`CLAUDE.md`, `docs/FRONT_TODO.md`, `docs/FRONT_CHANGELOG.md`).
 
 Стек: Python ≥3.12, FastAPI+uvicorn, SQLAlchemy 2.0, psycopg3, aiogram 3,
 httpx, pydantic-settings. Зависимости через **uv**. Линт/тесты: ruff, pytest.
@@ -47,6 +48,11 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   `api`. Лимиты держатся на реальном IP — uvicorn обязан идти с
   `--proxy-headers`. Лимитер и кэш — память процесса: при `--workers > 1` — Redis.
   Аудит, контракт ленты для сайта, порядок открытия — `docs/api/PUBLIC_API.md`.
+- **Роли сайта** (ветка `feature/roles`, 09.11.2026, на проде нет): guest (лента
+  с оценкой) / user (вошёл через `/login` в боте) / subscriber (доступ как у
+  пушей: группа, оплата, триал — графики и аналитика) / admin (`is_superuser`).
+  Гейт — `api/roles.py` на роутере; роль считается на каждом запросе
+  (`services/site_auth.py`), в сессии не хранится. `PLATFORM_ADR.md § Роли`.
 - **Время.** Контейнеры в UTC; всё расписание код считает сам по
   `SCHEDULER_TIMEZONE` (`Asia/Bishkek`). Контейнерный TZ не трогать.
 - **Расписание встроено в сервисы**, cron не нужен (кроме бэкапов).
@@ -545,6 +551,7 @@ AWS Lightsail, проект в `/home/ubuntu/car-analytics`, docker без sudo.
 | `docs/admin/ADMIN_PANEL_PLAN.md` | Админ-панель: что сделано и как работает (§0), аудит, решения, что осталось. **Итерация 1 готова, в проде её нет** |
 | `docs/api/PUBLIC_API.md` | **Внешний API**: аудит 09.11.2026, лимиты/кэш, контракт ленты для сайта, порядок открытия |
 | `docs/planning/PLATFORM_ADR.md` | ADR: админка + фронт + сайт (монорепо, этапы, ветки) |
+| `docs/planning/SITE_TODO.md` | **Сайт: заметки владельца и что осталось** (09.11.2026) |
 | `docs/sources/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/sources/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `docs/payments/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `docs/payments/web-sdk-flow.png`, что нужно завести |

@@ -100,6 +100,15 @@ SUBSCRIPTION_UNAVAILABLE_TEXT = (
 )
 
 
+def site_login_text(ttl_minutes: int) -> str:
+    """Ссылка входа на сайт. Срок и одноразовость — прямо, как у админки."""
+    return (
+        "🌐 Вход на сайт\n\n"
+        f"Ссылка действует {ttl_minutes} мин и открывается один раз.\n"
+        "С подпиской на сайте открываются графики и аналитика рынка."
+    )
+
+
 def admin_login_text(ttl_minutes: int) -> str:
     """Сообщение со ссылкой входа в панель.
 

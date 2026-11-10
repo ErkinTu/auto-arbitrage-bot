@@ -85,17 +85,33 @@ class TTLCache:
 
 _MISS = object()
 
+
+def _freeze(value: Any) -> Any:
+    """Списки/датаклассы фильтра — в хэшируемый вид для ключа кэша."""
+    if isinstance(value, list):
+        return tuple(value)
+    if hasattr(value, "__dataclass_fields__"):
+        return tuple((name, _freeze(getattr(value, name))) for name in value.__dataclass_fields__)
+    return value
+
 response_cache = TTLCache()
 
 
-def cached_call(namespace: str, fn: Callable[..., T], session: Any, **params: Any) -> T:
+def cached_call(
+    namespace: str,
+    fn: Callable[..., T],
+    session: Any,
+    *,
+    ttl: float | None = None,
+    **params: Any,
+) -> T:
     """`fn(session, **params)` через кэш. Ключ — namespace + отсортированные
     параметры; сессия в ключ не входит (у каждого запроса своя)."""
     settings = get_settings()
-    key = (namespace, tuple(sorted(params.items())))
+    key = (namespace, tuple(sorted((k, _freeze(v)) for k, v in params.items())))
     return response_cache.get_or_compute(
         key,
         lambda: fn(session, **params),
-        ttl=settings.api_cache_ttl_seconds,
+        ttl=settings.api_cache_ttl_seconds if ttl is None else ttl,
         max_entries=settings.api_cache_max_entries,
     )

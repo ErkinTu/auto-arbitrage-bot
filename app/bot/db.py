@@ -1148,6 +1148,14 @@ def log_menu_open(telegram_id: int) -> None:
         session.commit()
 
 
+def issue_site_login_token(telegram_id: int) -> str | None:
+    """Ссылка входа на сайт для любого пользователя бота (services/site_auth.py)."""
+    from app.services.site_auth import issue_login_token
+
+    with SessionLocal() as session:
+        return issue_login_token(session, telegram_id)
+
+
 def issue_admin_login_token(telegram_id: int) -> str | None:
     """Выдаёт одноразовый токен входа в панель; None — если человек не админ.
 

@@ -20,8 +20,13 @@ logger = logging.getLogger("app.http")
 
 # Ответы этих путей можно кэшировать браузеру/CDN: публичные справочники и
 # агрегаты, одинаковые для всех. Админка и платежи — никогда (`no-store`).
-_PUBLIC_CACHEABLE = ("/api/v1/catalog/", "/api/v1/dashboard/", "/api/v1/market/")
-_NO_STORE = ("/api/v1/admin/", "/api/v1/payments/")
+# Одинаковы для всех — можно в общий кэш (CDN).
+_PUBLIC_CACHEABLE = ("/api/v1/catalog/", "/api/v1/public/")
+# Только подписчикам — кэш браузера этого человека, не общий.
+_PRIVATE_CACHEABLE = ("/api/v1/dashboard/", "/api/v1/market/")
+_NO_STORE = ("/api/v1/admin/", "/api/v1/payments/", "/api/v1/auth/")
+# Ответ зависит от роли (кука сессии) — общий кэш обязан различать по куке.
+_VARY_COOKIE = ("/api/v1/public/listings/",)
 
 _SECURITY_HEADERS = [
     (b"x-content-type-options", b"nosniff"),
@@ -42,10 +47,15 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
 def _cache_control(path: str, method: str, status: int) -> bytes | None:
     if path.startswith(_NO_STORE):
         return b"no-store"
-    if method == "GET" and status == 200 and path.startswith(_PUBLIC_CACHEABLE):
-        max_age = get_settings().api_public_max_age_seconds
-        if max_age > 0:
-            return f"public, max-age={max_age}".encode()
+    max_age = get_settings().api_public_max_age_seconds
+    if method != "GET" or status != 200 or max_age <= 0:
+        return None
+    if path.startswith(_VARY_COOKIE):
+        return f"private, max-age={max_age}".encode()
+    if path.startswith(_PUBLIC_CACHEABLE):
+        return f"public, max-age={max_age}".encode()
+    if path.startswith(_PRIVATE_CACHEABLE):
+        return f"private, max-age={max_age}".encode()
     return None
 
 
@@ -151,6 +161,8 @@ class SecurityHeadersMiddleware:
                 cache = _cache_control(path, method, status)
                 if cache and b"cache-control" not in present:
                     headers.append((b"cache-control", cache))
+                if path.startswith(_VARY_COOKIE):
+                    headers.append((b"vary", b"Cookie"))
                 headers.append((b"x-request-id", request_id.encode()))
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 headers.append((b"server-timing", f"app;dur={elapsed_ms:.1f}".encode()))
