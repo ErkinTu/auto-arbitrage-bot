@@ -808,7 +808,9 @@ SIMILAR_CANDIDATES = 60
 
 def similar_listings(session: Session, listing_id: int, *, limit: int = 8) -> list[dict]:
     """«Похожие предложения» на странице авто: та же модель, год ±2, активные
-    с фото; ближе по году и цене — выше. Без модели/года — пусто (не угадываем)."""
+    с фото; ближе по цене, году и **пробегу** — выше (та же мера, что у
+    `sort=similar`; пробег — заметка владельца 11.11.2026: Camry 2018 с 60 тыс.
+    и с 250 тыс. км — разные машины). Без модели/года — пусто (не угадываем)."""
     listing = session.get(Listing, listing_id)
     if listing is None:
         raise LookupError("Объявление не найдено")
@@ -823,7 +825,10 @@ def similar_listings(session: Session, listing_id: int, *, limit: int = 8) -> li
             Listing.car_model_id == listing.car_model_id,
             Listing.year.between(listing.year - SIMILAR_YEAR_SPAN, listing.year + SIMILAR_YEAR_SPAN),
         )
-        .order_by(func.abs(Listing.year - listing.year), func.abs(Listing.current_price_usd - price))
+        .order_by(
+            _similar_score(listing) if price else func.abs(Listing.year - listing.year),
+            Listing.id,
+        )
         .limit(SIMILAR_CANDIDATES)
     )
     rows = list(session.scalars(query).all())[:limit]

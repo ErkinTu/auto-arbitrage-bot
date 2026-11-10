@@ -501,8 +501,20 @@ def test_similar_same_model_close_year_with_photo(client) -> None:
 
     r = client.get(f"/api/v1/public/listings/{me.id}/similar")
     assert r.status_code == 200
-    assert [i["id"] for i in r.json()] == [close.id, far_price.id, older.id]
+    # Цена +50 % дальше, чем год −2 (6 % за год): единая мера близости.
+    assert [i["id"] for i in r.json()] == [close.id, older.id, far_price.id]
     assert client.get("/api/v1/public/listings/999999/similar").status_code == 404
+
+
+def test_similar_prefers_close_mileage(client) -> None:
+    """Пробег учитывается (11.11.2026): та же цена и год, но 250 тыс. км — ниже."""
+    client, Factory, ids = client
+    with Factory() as s:
+        me = _listing(s, ids, year=2019, mileage_km=60_000)
+        worn = _listing(s, ids, year=2019, mileage_km=250_000)
+        alike = _listing(s, ids, year=2019, mileage_km=70_000)
+    r = client.get(f"/api/v1/public/listings/{me.id}/similar")
+    assert [i["id"] for i in r.json()] == [alike.id, worn.id]
 
 
 def test_spec_groups_over_http_cover_all_spellings(client) -> None:
