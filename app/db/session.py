@@ -124,6 +124,8 @@ def _upgrade_postgres_schema() -> None:
         # fuel_type, mashina — разметкой через API).
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS fuel_group VARCHAR(16)",
         "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS fuel_groups VARCHAR(64)",
+        # Несколько марок в фильтре бота (10.11.2026, services/filter_brands.py).
+        "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS brand_ids VARCHAR(255)",
         # Телефон продавца для «WhatsApp» под альбомом (01.11.2026); nullable,
         # без бэкфилла — lalafo заполнит лента, mashina — нажатия.
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_phone VARCHAR(20)",

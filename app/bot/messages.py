@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.services.fuel import fuel_groups_label
 from app.services.phones import display_phone
 from app.services.access_schedule import ScheduleEntry
+from app.services.filter_brands import brands_label
 from app.services.filter_presets import brand_group_label
 from app.services.plans import PLANS, TIER_DELAYED, Plan
 from app.services.regions import REGION_LABELS
@@ -1042,9 +1043,12 @@ def format_filter_line(
     brand_group: str | None = None,
     max_age_years: int | None = None,
     fuel_groups: str | None = None,
+    brand_names: tuple[str, ...] | list[str] = (),
 ) -> str:
     if brand_name is not None:
         parts = [f"{brand_name} {model_name}" if model_name else f"{brand_name} (все модели)"]
+    elif len(brand_names) >= 2:
+        parts = [brands_label(brand_names)]
     elif brand_group_label(brand_group):
         parts = [brand_group_label(brand_group)]
     else:

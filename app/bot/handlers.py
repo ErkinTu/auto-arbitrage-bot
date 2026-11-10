@@ -130,6 +130,7 @@ from app.bot.states import FilterPanel
 from app.core.config import get_settings
 from app.services.phones import whatsapp_url
 from app.services.blocklist import MAX_BLOCKS_PER_USER
+from app.services.filter_brands import MAX_FILTER_BRANDS
 from app.services.filter_presets import base_preset, find_preset
 from app.services.finik import init_payment
 from app.services.plans import find_plan
@@ -541,6 +542,7 @@ def _filter_summary(item: db.FilterDTO) -> str:
         brand_group=item.brand_group,
         max_age_years=item.max_age_years,
         fuel_groups=item.fuel_groups,
+        brand_names=item.brand_names,
     )
 
 
@@ -558,7 +560,7 @@ def _priority_level(item: db.FilterDTO) -> int:
     """Уровень фильтра — зеркало `matching.filter_priority`, но по DTO."""
     if item.below_market_only:
         return PRIORITY_BELOW_MARKET
-    if item.brand_name is not None or item.model_name is not None or item.brand_group:
+    if item.brand_name is not None or item.model_name is not None or item.brand_group or item.brand_ids:
         return PRIORITY_SPECIFIC
     return PRIORITY_ALL_CARS
 
@@ -1378,14 +1380,18 @@ async def cb_panel(query: CallbackQuery, callback_data: fp.PanelCB, state: FSMCo
     elif action == "mpage" and value.lstrip("-").isdigit():
         updates["model_page"] = int(value)
     else:
-        draft, advance = fp.apply_choice(data["draft"], action, value)
-        if action == "brand" and draft.get("brand_id"):
-            brands = await asyncio.to_thread(db.list_brands)
-            brand = next((b for b in brands if b.id == draft["brand_id"]), None)
-            if brand is None:
-                await query.answer("Такой марки больше нет", show_alert=True)
-                return
-            draft["brand_name"] = brand.name
+        brands = await asyncio.to_thread(db.list_brands) if action in ("brand", "group") else ()
+        if fp.brand_limit_reached(data["draft"], action, value, brands):
+            await query.answer(
+                f"В одном фильтре - до {MAX_FILTER_BRANDS} марок. Снимите лишнюю или выберите «Все марки».",
+                show_alert=True,
+            )
+            return
+        draft, advance = fp.apply_choice(data["draft"], action, value, brands)
+        if action == "brand" and value not in ("", "0") and draft is data["draft"]:
+            await query.answer("Такой марки больше нет", show_alert=True)
+            return
+        if action in ("brand", "group"):
             updates["model_page"] = 0
         if action == "model" and draft.get("car_model_id"):
             models = await asyncio.to_thread(db.list_models, draft.get("brand_id") or 0)
@@ -1398,7 +1404,7 @@ async def cb_panel(query: CallbackQuery, callback_data: fp.PanelCB, state: FSMCo
         if advance:
             step = data["step"]
             # «Все марки» и группа марок — модель выбирать не из чего, сразу к годам.
-            if action in ("brand", "group") and not draft.get("brand_id"):
+            if action in ("brand", "group", "bdone") and not draft.get("brand_id"):
                 step = fp.STEP_MODEL
             updates["step"] = fp.next_step(step)
     await state.update_data(**updates)
