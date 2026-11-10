@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     # пользователя. Админу сессия — `admin_session_ttl_hours` (короче).
     site_login_token_ttl_minutes: int = 10
     site_session_ttl_days: int = 30
+    # Устройств (сессий) на пользователя сайта: новый вход выбивает самое
+    # старое — подписку не раздать на всех (решение владельца 11.11.2026).
+    site_max_sessions: int = 2
 
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 

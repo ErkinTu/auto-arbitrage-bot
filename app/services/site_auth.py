@@ -143,6 +143,7 @@ class Viewer:
     role: Role
     user: BotUser | None
     session_expires_at: datetime | None = None
+    session_id: int | None = None
 
 
 GUEST = Viewer(role="guest", user=None)
@@ -156,7 +157,38 @@ def session_ttl(user: BotUser) -> timedelta:
     return timedelta(days=settings.site_session_ttl_days)
 
 
-def exchange_login_token(session: Session, token: str) -> tuple[str, Viewer]:
+_BROWSERS = (("Edg/", "Edge"), ("OPR/", "Opera"), ("YaBrowser", "Яндекс Браузер"), ("Firefox/", "Firefox"),
+             ("Chrome/", "Chrome"), ("Safari/", "Safari"))
+_SYSTEMS = (("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Windows", "Windows"),
+            ("Mac OS X", "Mac"), ("Linux", "Linux"))
+
+
+def device_label(user_agent: str | None) -> str | None:
+    """«Chrome · Android» из User-Agent — чтобы человек узнал своё устройство в списке."""
+    if not user_agent:
+        return None
+    ua = user_agent[:400]
+    if "Telegram" in ua:
+        browser = "Telegram"
+    else:
+        browser = next((name for key, name in _BROWSERS if key in ua), "Браузер")
+    system = next((name for key, name in _SYSTEMS if key in ua), None)
+    return f"{browser} · {system}" if system else browser
+
+
+def _trim_sessions(session: Session, user_id: int, keep_id: int) -> int:
+    """Оставить не больше `site_max_sessions` самых свежих входов; вернуть, сколько закрыто."""
+    limit = max(1, get_settings().site_max_sessions)
+    rows = session.scalars(
+        select(SiteSession).where(SiteSession.user_id == user_id).order_by(SiteSession.created_at.desc(), SiteSession.id.desc())
+    ).all()
+    extra = [row for row in rows if row.id != keep_id][limit - 1 :]
+    for row in extra:
+        session.delete(row)
+    return len(extra)
+
+
+def exchange_login_token(session: Session, token: str, *, user_agent: str | None = None) -> tuple[str, Viewer]:
     if not token:
         raise LoginError("empty token")
     row = session.scalar(select(SiteLoginToken).where(SiteLoginToken.token_hash == _hash(token)))
@@ -184,10 +216,15 @@ def exchange_login_token(session: Session, token: str) -> tuple[str, Viewer]:
     )
     raw = secrets.token_urlsafe(32)
     session_expires_at = now + session_ttl(user)
-    session.add(SiteSession(user_id=user.id, token_hash=_hash(raw), expires_at=session_expires_at))
+    new = SiteSession(user_id=user.id, token_hash=_hash(raw), expires_at=session_expires_at, device=device_label(user_agent))
+    session.add(new)
+    session.flush()
+    closed = _trim_sessions(session, user.id, new.id)
     session.commit()
+    if closed:
+        logger.info("Вход на сайт: лимит устройств — закрыто старых сессий: %s", closed)
     logger.info("Вход на сайт: сессия открыта, telegram_id=%s", user.telegram_id)
-    return raw, Viewer(role=role_of(user, now), user=user, session_expires_at=session_expires_at)
+    return raw, Viewer(role=role_of(user, now), user=user, session_expires_at=session_expires_at, session_id=new.id)
 
 
 def resolve_viewer(session: Session, raw: str | None) -> Viewer:
@@ -210,7 +247,48 @@ def resolve_viewer(session: Session, raw: str | None) -> Viewer:
     if last_seen is None or now - last_seen > LAST_SEEN_REFRESH:
         row.last_seen_at = now
         session.commit()
-    return Viewer(role=role_of(user, now), user=user, session_expires_at=expires_at)
+    return Viewer(role=role_of(user, now), user=user, session_expires_at=expires_at, session_id=row.id)
+
+
+def list_sessions(session: Session, viewer: Viewer) -> list[dict]:
+    """Устройства пользователя: новые сверху, текущее помечено."""
+    if viewer.user is None:
+        return []
+    rows = session.scalars(
+        select(SiteSession).where(SiteSession.user_id == viewer.user.id, SiteSession.expires_at > _now())
+        .order_by(SiteSession.created_at.desc(), SiteSession.id.desc())
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "device": row.device,
+            "created_at": row.created_at,
+            "last_seen_at": row.last_seen_at,
+            "current": row.id == viewer.session_id,
+        }
+        for row in rows
+    ]
+
+
+def revoke_user_session(session: Session, viewer: Viewer, session_id: int) -> bool:
+    """Закрыть своё устройство по id; чужое — False (как будто его нет)."""
+    if viewer.user is None:
+        return False
+    deleted = session.execute(
+        delete(SiteSession).where(SiteSession.id == session_id, SiteSession.user_id == viewer.user.id)
+    )
+    session.commit()
+    return bool(deleted.rowcount)
+
+
+def revoke_other_sessions(session: Session, viewer: Viewer) -> int:
+    if viewer.user is None:
+        return 0
+    deleted = session.execute(
+        delete(SiteSession).where(SiteSession.user_id == viewer.user.id, SiteSession.id != viewer.session_id)
+    )
+    session.commit()
+    return int(deleted.rowcount or 0)
 
 
 def revoke_session(session: Session, raw: str | None) -> None:

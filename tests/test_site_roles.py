@@ -267,3 +267,67 @@ def test_public_estimate_strips_market_analytics(env, monkeypatch) -> None:
     assert body["anomalies"]["items"] == [] and body["representative_listing"] is None
     # Общий объект кэша не испорчен.
     assert fake["anomalies"]["count"] == 1
+
+
+# --- устройства (11.11.2026) -----------------------------------------------------
+
+
+def _device(Factory, tg: int, ua: str) -> TestClient:
+    client = TestClient(app, base_url="https://site.test", headers={"User-Agent": ua})
+    with Factory() as s:
+        token = issue_login_token(s, tg)
+    assert client.post("/api/v1/auth/exchange", json={"token": token}).status_code == 200
+    return client
+
+
+def test_third_device_logs_out_the_oldest(env) -> None:
+    _, Factory = env
+    _user(Factory, 300)
+    phone = _device(Factory, 300, "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1")
+    laptop = _device(Factory, 300, "Mozilla/5.0 (Windows NT 10.0) Chrome/120.0 Safari/537.36")
+    assert phone.get("/api/v1/auth/me").json()["role"] == "user"
+    friend = _device(Factory, 300, "Mozilla/5.0 (Linux; Android 14) Chrome/120.0 Mobile Safari/537.36")
+    # Лимит 2: самый старый вход (телефон) закрыт, два последних живы.
+    assert phone.get("/api/v1/auth/me").json()["role"] == "guest"
+    assert laptop.get("/api/v1/auth/me").json()["role"] == "user"
+    devices = friend.get("/api/v1/auth/sessions").json()
+    assert [d["device"] for d in devices] == ["Chrome · Android", "Chrome · Windows"]
+    assert [d["current"] for d in devices] == [True, False]
+
+
+def test_logout_others_and_end_one(env) -> None:
+    _, Factory = env
+    _user(Factory, 301)
+    _user(Factory, 302)
+    a = _device(Factory, 301, "Firefox/120.0 (Windows)")
+    b = _device(Factory, 301, "Chrome/120 Android")
+    stranger = _device(Factory, 302, "Chrome/120 Android")
+    their_id = stranger.get("/api/v1/auth/sessions").json()[0]["id"]
+    # Чужое устройство не закрыть — для вас его «нет».
+    assert a.delete(f"/api/v1/auth/sessions/{their_id}").status_code == 404
+    assert b.post("/api/v1/auth/sessions/logout-others").json() == {"closed": 1}
+    assert a.get("/api/v1/auth/me").json()["role"] == "guest"
+    own = b.get("/api/v1/auth/sessions").json()
+    assert len(own) == 1 and own[0]["current"]
+    # Закрыть текущее — то же, что выйти.
+    assert b.delete(f"/api/v1/auth/sessions/{own[0]['id']}").status_code == 204
+    assert b.get("/api/v1/auth/me").json()["role"] == "guest"
+    assert stranger.get("/api/v1/auth/me").json()["role"] == "user"
+
+
+def test_account_changes_refused_from_foreign_origin(env) -> None:
+    _, Factory = env
+    _user(Factory, 303)
+    a = _device(Factory, 303, "Chrome/120 Android")
+    assert a.post("/api/v1/auth/sessions/logout-others", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert a.post("/api/v1/auth/sessions/logout-others", headers={"Origin": "https://site.test"}).status_code == 200
+    assert a.get("/api/v1/auth/sessions", headers={"Origin": "https://evil.example"}).status_code == 200  # чтение — как обычно
+
+
+def test_device_label() -> None:
+    from app.services.site_auth import device_label
+
+    assert device_label(None) is None
+    assert device_label("Mozilla/5.0 (iPhone) AppleWebKit Version/17 Mobile Safari/604.1") == "Safari · iPhone"
+    assert device_label("Mozilla/5.0 (Macintosh; Intel Mac OS X 14) Chrome/120 Safari/537.36") == "Chrome · Mac"
+    assert device_label("Mozilla/5.0 (Windows NT 10.0) Chrome/120 Safari/537.36 Edg/120") == "Edge · Windows"

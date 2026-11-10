@@ -607,6 +607,14 @@ class SiteAccess(BaseModel):
     expires_at: datetime | None
 
 
+class SiteDevice(BaseModel):
+    id: int
+    device: str | None
+    created_at: datetime | None
+    last_seen_at: datetime | None
+    current: bool
+
+
 class SiteMe(BaseModel):
     role: Literal["guest", "user", "subscriber", "admin"]
     user: SiteUser | None

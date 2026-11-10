@@ -497,6 +497,9 @@ class SiteSession(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # «Chrome · Android» — грубая метка из User-Agent для списка устройств в
+    # профиле (services/site_auth.py::device_label); IP не храним.
+    device: Mapped[str | None] = mapped_column(String(80))
 
 class UserEvent(Base):
     """Лог событий воронки: старт → триал → оплата.

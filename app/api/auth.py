@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.api.roles import current_viewer
 from app.db.session import get_session
-from app.schemas import AdminLoginRequest, SiteMe
+from app.schemas import AdminLoginRequest, SiteDevice, SiteMe
+from app.core.config import get_settings
 from app.services.admin_auth import too_many_attempts
 from app.services.site_auth import (
     SESSION_COOKIE,
@@ -18,7 +19,10 @@ from app.services.site_auth import (
     Viewer,
     access_of,
     exchange_login_token,
+    list_sessions,
+    revoke_other_sessions,
     revoke_session,
+    revoke_user_session,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,7 +53,7 @@ def exchange(
     if too_many_attempts(client):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Слишком много попыток входа")
     try:
-        raw, viewer = exchange_login_token(session, payload.token)
+        raw, viewer = exchange_login_token(session, payload.token, user_agent=request.headers.get("user-agent"))
     except LoginError as exc:
         logger.info("Вход на сайт отклонён (%s) с %s", exc, client)
         raise HTTPException(
@@ -77,7 +81,53 @@ def me(viewer: Viewer = Depends(current_viewer)) -> dict:
     return _me(viewer)
 
 
+def _same_origin(request: Request) -> None:
+    """Изменения аккаунта — только со своего сайта. SameSite=Lax уже не даёт
+    чужому сайту прислать куку в POST; Origin — второй замок (и на DELETE)."""
+    origin = request.headers.get("origin")
+    if origin is None:
+        return  # не браузер или тот же источник без заголовка
+    allowed = {o.rstrip("/") for o in [get_settings().site_url or "", *get_settings().cors_allow_origins] if o}
+    if origin.rstrip("/") not in allowed:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Запрос не с сайта")
+
+
+@router.get("/sessions", response_model=list[SiteDevice])
+def sessions(viewer: Viewer = Depends(current_viewer), session: Session = Depends(get_session)) -> list[dict]:
+    """Устройства, где выполнен вход (не больше `SITE_MAX_SESSIONS`)."""
+    if viewer.user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Нужен вход")
+    return list_sessions(session, viewer)
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def end_session(
+    session_id: int,
+    request: Request,
+    response: Response,
+    viewer: Viewer = Depends(current_viewer),
+    session: Session = Depends(get_session),
+) -> None:
+    _same_origin(request)
+    if viewer.user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Нужен вход")
+    if not revoke_user_session(session, viewer, session_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Устройство не найдено")
+    if session_id == viewer.session_id:
+        response.delete_cookie(SESSION_COOKIE, path="/")
+
+
+@router.post("/sessions/logout-others")
+def logout_others(request: Request, viewer: Viewer = Depends(current_viewer), session: Session = Depends(get_session)) -> dict:
+    """«Выйти на других устройствах»: остаётся только текущее."""
+    _same_origin(request)
+    if viewer.user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Нужен вход")
+    return {"closed": revoke_other_sessions(session, viewer)}
+
+
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(request: Request, response: Response, session: Session = Depends(get_session)) -> None:
+    _same_origin(request)
     revoke_session(session, request.cookies.get(SESSION_COOKIE))
     response.delete_cookie(SESSION_COOKIE, path="/")
