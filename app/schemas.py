@@ -402,6 +402,22 @@ class MileageInfo(BaseModel):
     adjustment_usd: float
 
 
+class PriceBin(BaseModel):
+    from_usd: float
+    to_usd: float
+    count: int
+
+
+class PriceDistribution(BaseModel):
+    """Гистограмма цен когорты: корзины в усах IQR + хвосты отдельно."""
+
+    step: float
+    bins: list[PriceBin]
+    below: int
+    above: int
+    total: int
+
+
 class VehicleSummary(BaseModel):
     vehicle: VehicleHeader
     currency: str
@@ -414,6 +430,7 @@ class VehicleSummary(BaseModel):
     mileage: MileageInfo
     representative_listing: RepresentativeListing | None
     anomalies: AnomalySummary
+    price_distribution: PriceDistribution
     granularity: str
     trend: list[VehicleSummaryTrendPoint]
     intake: list[VehicleIntakePoint]

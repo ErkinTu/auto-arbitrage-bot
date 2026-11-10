@@ -232,3 +232,24 @@ def test_anomalies_return_full_list_not_top_ten() -> None:
     assert summary["anomalies"]["low_count"] == 12
     assert len(summary["anomalies"]["items"]) == summary["anomalies"]["count"]
     assert len(summary["anomalies"]["items"]) > 10
+
+
+def test_price_distribution_keeps_outliers_out_of_bins() -> None:
+    """Гистограмма «где вы на рынке»: выброс не растягивает ось, но и не теряется."""
+    from app.services.vehicle_summary import _price_distribution
+
+    prices = [float(p) for p in range(20_000, 30_000, 250)] + [300_000.0]
+    dist = _price_distribution(prices)
+
+    assert dist["above"] == 1 and dist["below"] == 0
+    assert sum(b["count"] for b in dist["bins"]) + dist["below"] + dist["above"] == dist["total"]
+    assert dist["bins"][-1]["to_usd"] < 40_000
+    # Шаг «красивый» — подписи оси без копеек.
+    assert dist["step"] in {500, 1000, 2000, 2500}
+    assert 5 <= len(dist["bins"]) <= 15
+
+
+def test_price_distribution_small_cohort_is_empty() -> None:
+    from app.services.vehicle_summary import _price_distribution
+
+    assert _price_distribution([10_000.0, 12_000.0])["bins"] == []

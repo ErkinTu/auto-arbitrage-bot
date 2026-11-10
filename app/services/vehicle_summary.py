@@ -111,6 +111,56 @@ def _detect_anomalies(listings: list[Listing], market_average: float) -> dict:
     }
 
 
+def _nice_step(raw: float) -> float:
+    """Шаг корзины «по-человечески»: 1/2/2.5/5 × 10^k — подписи оси без копеек."""
+    if raw <= 0:
+        return 1.0
+    magnitude = 10 ** int(f"{raw:e}".split("e")[1])
+    for factor in (1, 2, 2.5, 5, 10):
+        if raw <= factor * magnitude:
+            return float(factor * magnitude)
+    return float(10 * magnitude)
+
+
+def _price_distribution(prices: list[float]) -> dict:
+    """Гистограмма цен когорты «модель+год» — «где ваша машина на рынке».
+
+    Границы — усы IQR (как у аномалий), а не min/max: одна машина за $300k
+    сжала бы всю когорту в один столбик. Вышедшие за усы не выбрасываем, а
+    считаем отдельно (`below`/`above`) — сумма столбиков + хвосты = `total`.
+    Корзин ~√n в пределах 5–14, шаг округлён до «красивого».
+    """
+    if len(prices) < 4:
+        return {"step": 0, "bins": [], "below": 0, "above": 0, "total": len(prices)}
+    q1 = _percentile(prices, 0.25)
+    q3 = _percentile(prices, 0.75)
+    iqr = q3 - q1
+    lo = max(min(prices), q1 - 1.5 * iqr)
+    hi = min(max(prices), q3 + 1.5 * iqr)
+    if hi <= lo:
+        hi = lo + 1
+    target = max(5, min(14, round(len(prices) ** 0.5)))
+    step = _nice_step((hi - lo) / target)
+    start = (lo // step) * step
+    count = max(1, int(-(-(hi - start) // step)))  # ceil
+    if start + count * step <= hi:
+        count += 1
+    bins = [
+        {"from_usd": round(start + i * step, 2), "to_usd": round(start + (i + 1) * step, 2), "count": 0}
+        for i in range(count)
+    ]
+    below = above = 0
+    for price in prices:
+        if price < lo:
+            below += 1
+        elif price > hi:
+            above += 1
+        else:
+            index = min(count - 1, int((price - start) // step))
+            bins[index]["count"] += 1
+    return {"step": step, "bins": bins, "below": below, "above": above, "total": len(prices)}
+
+
 Granularity = Literal["week", "month"]
 
 # Окна разной длины намеренно: недельная точка частая, за 3 года их было бы ~156
@@ -357,6 +407,7 @@ def get_vehicle_summary(
         },
         "representative_listing": representative,
         "anomalies": anomalies,
+        "price_distribution": _price_distribution(cohort_prices),
         "granularity": granularity,
         "trend": trend,
         "intake": intake,
