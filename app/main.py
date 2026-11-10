@@ -12,6 +12,7 @@ from app.api.catalog import router as catalog_router
 from app.api.dashboard import router as dashboard_router
 from app.api.market import router as market_router
 from app.api.payments import router as payments_router
+from app.api.public.estimate import router as public_estimate_router
 from app.api.public.feed import router as public_feed_router
 from app.api.routes import router as analytics_router
 from app.core.config import get_settings
@@ -80,6 +81,7 @@ app.include_router(market_router)
 app.include_router(payments_router)
 # Сайт: /api/v1/public/* — лента, карточка, избранное (только чтение, без ПДн).
 app.include_router(public_feed_router)
+app.include_router(public_estimate_router)
 # Вход на сайт через бота и роль посетителя (guest/user/subscriber/admin).
 app.include_router(auth_router)
 

@@ -164,6 +164,14 @@ def test_subscriber_gets_analytics(env) -> None:
     assert client.get("/api/v1/market/vehicle-summary?brand_id=1&model_id=1&year=2019").status_code == 404
 
 
+def test_estimate_open_to_guests_without_market_details(env) -> None:
+    """«Оценить авто» открыта гостям (10.11.2026); аналитика рынка — нет."""
+    client, _ = env
+    # Гейта нет: данных нет — 404, а не 401.
+    assert client.get("/api/v1/public/estimate?brand_id=1&model_id=1&year=2019").status_code == 404
+    assert client.get("/api/v1/market/vehicle-summary?brand_id=1&model_id=1&year=2019").status_code == 401
+
+
 def test_feed_stays_open_to_guests(env) -> None:
     client, _ = env
     assert client.get("/api/v1/public/feed").status_code == 200
@@ -228,3 +236,28 @@ def test_dev_login_refuses_non_local_site(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "site_url", "https://skupka.63-182-28-250.sslip.io")
     with pytest.raises(SystemExit, match="не localhost"):
         command_dev_login(argparse.Namespace(role=None, i_know_this_is_not_prod=False))
+
+
+def test_public_estimate_strips_market_analytics(env, monkeypatch) -> None:
+    """Гостю — оценка и графики, но не список аномалий со ссылками."""
+    import app.api.public.estimate as public_estimate
+
+    client, _ = env
+    fake = {
+        "vehicle": {"brand": "Toyota", "model": "Camry", "generation": None, "year": 2018},
+        "currency": "USD", "estimated_price": 18_000.0, "estimated_range": {"min": 17_000.0, "max": 19_000.0},
+        "market_average": 18_100.0, "market_median": 18_000.0, "samples": 30, "confidence": "high",
+        "mileage": {"requested_km": None, "window": "all", "samples_in_window": 30, "adjustment_usd": 0.0},
+        "representative_listing": {"id": 1, "title": "x", "image_url": None, "source_url": "https://x"},
+        "anomalies": {"count": 1, "low_count": 1, "high_count": 0, "items": [{
+            "id": 2, "title": "y", "year": 2018, "mileage_km": None, "city": None,
+            "price_usd": 5000.0, "deviation_percent": -70.0, "source_url": "https://y"}]},
+        "price_distribution": {"step": 1000.0, "bins": [], "below": 0, "above": 0, "total": 30},
+        "granularity": "week", "trend": [], "intake": [],
+    }
+    monkeypatch.setattr(public_estimate, "get_vehicle_summary", lambda *a, **k: fake)
+    body = client.get("/api/v1/public/estimate?brand_id=7&model_id=7&year=2018").json()
+    assert body["estimated_price"] == 18_000.0
+    assert body["anomalies"]["items"] == [] and body["representative_listing"] is None
+    # Общий объект кэша не испорчен.
+    assert fake["anomalies"]["count"] == 1
