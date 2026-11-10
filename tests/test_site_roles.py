@@ -175,6 +175,11 @@ def test_estimate_open_to_guests_without_market_details(env) -> None:
 def test_feed_stays_open_to_guests(env) -> None:
     client, _ = env
     assert client.get("/api/v1/public/feed").status_code == 200
+    # Счётчик «Показать N» панели фильтров: упал незаметно (вклеенные строки в
+    # вызове cached_call, ветка feed-regions) — держим ручки ленты под тестом.
+    for path in ("/api/v1/public/feed/count", "/api/v1/public/feed/count?brand_ids=1,2&price_from=1000&price_to=20000",
+                 "/api/v1/public/feed/facets"):
+        assert client.get(path).status_code == 200, path
     assert client.get("/api/v1/catalog/brands").status_code == 200
 
 

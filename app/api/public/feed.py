@@ -170,10 +170,6 @@ def get_feed_count(
     return cached_call(
         "public.feed_count",
         feed_count,
-    cities_for_regions,
-    feed_cities,
-    feed_facets,
-    feed_histograms,
         session,
         ttl=get_settings().public_feed_cache_seconds,
         flt=flt,
