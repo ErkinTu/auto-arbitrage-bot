@@ -63,7 +63,10 @@ def _set_current_fields(listing: Listing, item: NormalizedListing) -> None:
     listing.engine_volume = item.engine_volume
     listing.fuel_type = item.fuel_type
     listing.gearbox = item.gearbox
-    listing.drive_type = item.drive_type
+    # Привод у mashina ставит разметка по спискам API (services/drive_labeling.py):
+    # в ленте его нет, и пустое значение из ленты не должно стирать размеченное.
+    if item.drive_type is not None:
+        listing.drive_type = item.drive_type
     listing.steering_wheel = item.steering_wheel
     listing.city = item.city
     # Фото без него в ответе (лента lalafo, упавшая карточка) не затирает

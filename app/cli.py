@@ -410,6 +410,19 @@ def command_lalafo_maintenance(_: argparse.Namespace) -> None:
     run_lalafo_maintenance()
 
 
+def command_drive_backfill(args: argparse.Namespace) -> None:
+    """Привод старым объявлениям mashina (10.11.2026) — один раз после выката:
+    полная разметка через API (~550 запросов; то же делает worker еженощно).
+    Запускать синхронно с `</dev/null`, не фоном поверх ssh."""
+    from app.worker import run_mashina_drive_labeling
+
+    report = run_mashina_drive_labeling()
+    print(
+        f"mashina: запросов {report.requests}, увидено {report.seen}, "
+        f"размечено {report.updated}, сбои: {report.failed or 'нет'}"
+    )
+
+
 def command_fuel_backfill(args: argparse.Namespace) -> None:
     """Группа топлива для старых объявлений (план 01.11.2026, п. Е) — один раз
     после выката. lalafo — из `fuel_type` (секунды), mashina — полная разметка
@@ -650,6 +663,12 @@ def parser() -> argparse.ArgumentParser:
     )
     fuel.add_argument("--source", choices=list(SOURCE_NAMES), default=None)
     fuel.set_defaults(func=command_fuel_backfill)
+
+    drive = sub.add_parser(
+        "drive-backfill",
+        help="Fill listings.drive_type for mashina via API drive_type lists",
+    )
+    drive.set_defaults(func=command_drive_backfill)
 
     volume = sub.add_parser(
         "preset-volume",

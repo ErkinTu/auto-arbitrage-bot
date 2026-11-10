@@ -37,6 +37,7 @@ from app.bot.notifier import BotLike, send_notifications
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.services.lookup import ensure_brand_targets, get_or_create_source
+from app.services.drive_labeling import label_mashina_drive
 from app.services.fuel_labeling import label_mashina_fuel
 from app.services.schedule import local_now, seconds_until_window, window_end_utc
 from app.services.sources import LALAFO, MASHINA, SOURCE_NAMES, build_parser, source_base_url
@@ -103,8 +104,23 @@ def sync_source(source_name: str) -> None:
                     )
             if source_name == MASHINA and settings.mashina_fuel_fresh_pages > 0:
                 _label_fresh_mashina_fuel(session, parser, source.id, settings.mashina_fuel_fresh_pages)
+            if source_name == MASHINA and settings.mashina_drive_fresh_pages > 0:
+                _label_fresh_mashina_drive(session, parser, source.id, settings.mashina_drive_fresh_pages)
         finally:
             parser.close()
+
+
+def _label_fresh_mashina_drive(session, parser, source_id: int, pages: int) -> None:
+    """Привод новых объявлений mashina (3 запроса) — как топливо, до волны рассылки."""
+    try:
+        report = label_mashina_drive(session, parser, source_id, max_pages=pages)
+        logger.info(
+            "mashina drive labeling (fresh): requests=%s seen=%s updated=%s failed=%s",
+            report.requests, report.seen, report.updated, report.failed,
+        )
+    except Exception:
+        session.rollback()
+        logger.exception("mashina drive labeling (fresh) failed")
 
 
 def _label_fresh_mashina_fuel(session, parser, source_id: int, pages: int) -> None:

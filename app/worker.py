@@ -197,7 +197,30 @@ def mashina_fuel_labeling_if_due(last_run_date: date | None) -> date | None:
     if not settings.full_scan_hour <= now.hour < settings.bot_active_start_hour:
         return None
     run_mashina_fuel_labeling()
+    if settings.mashina_drive_full_enabled:
+        run_mashina_drive_labeling()
     return today
+
+
+def run_mashina_drive_labeling():
+    """Полная разметка привода mashina (worker ночью после топлива, `cli.py drive-backfill`)."""
+    from app.services.drive_labeling import label_mashina_drive
+
+    settings = get_settings()
+    with SessionLocal() as session:
+        source = get_or_create_source(session, "mashina.kg", settings.mashina_api_url)
+        session.commit()
+        parser = MashinaParser()
+        try:
+            report = label_mashina_drive(session, parser, source.id, max_pages=None)
+        finally:
+            parser.close()
+    logger.log(
+        logging.WARNING if report.failed else logging.INFO,
+        "mashina drive labeling (full): requests=%s seen=%s updated=%s failed=%s",
+        report.requests, report.seen, report.updated, report.failed,
+    )
+    return report
 
 
 def run_mashina_fuel_labeling():

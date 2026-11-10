@@ -302,6 +302,10 @@ class Settings(BaseSettings):
     # (~550 запросов, ~20 мин); выключатель — MASHINA_FUEL_FULL_ENABLED=false.
     mashina_fuel_fresh_pages: int = 1
     mashina_fuel_full_enabled: bool = True
+    # Привод mashina — разметка по спискам API, как топливо (services/drive_labeling.py).
+    # 0 страниц — свежая разметка в боте выключена; полная идёт ночью вместе с топливом.
+    mashina_drive_fresh_pages: int = 1
+    mashina_drive_full_enabled: bool = True
     full_scan_brand_pause_seconds: int = 60
     full_scan_page_size: int = 100
     full_scan_max_pages: int = 100

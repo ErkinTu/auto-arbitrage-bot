@@ -75,7 +75,22 @@ class MashinaParser(ParserAdapter):
         MASHINA_FUEL_VALUES`). Так размечаем `listings.fuel_group`
         (`services/fuel_labeling.py`). `size` у API — не больше 100 (200 → 422).
         """
-        attributes = {"fuel_type": {"in": fuel_value}}
+        return self.fetch_attribute_page("fuel_type", fuel_value, page=page, size=size, sort_by=sort_by, order=order)
+
+    def fetch_attribute_page(
+        self,
+        slug: str,
+        value: str,
+        *,
+        page: int,
+        size: int = 100,
+        sort_by: str = "created_at",
+        order: str = "desc",
+    ) -> FetchPage:
+        """Страница объявлений с ОДНИМ значением атрибута (`fuel_type`,
+        `drive_type`), без фильтра по марке — для разметки того, чего нет в
+        ленте (`services/fuel_labeling.py`, `services/drive_labeling.py`)."""
+        attributes = {slug: {"in": value}}
         params: dict[str, Any] = {
             "category_id": 1,
             "groups": json.dumps([{"attributes": attributes}], ensure_ascii=False, separators=(",", ":")),
