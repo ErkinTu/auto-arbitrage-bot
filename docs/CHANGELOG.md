@@ -7,6 +7,31 @@
 
 ---
 
+## 2026-11-09 — защита внешнего API: лимиты, кэш, таймауты (ветка `feature/public-api-hardening`)
+
+Подготовка к сайту по демо: API будет открыт наружу. Аудит и контракт —
+`docs/api/PUBLIC_API.md`, архитектура фронта — `docs/planning/PLATFORM_ADR.md`.
+**На проде с 09.11.2026** (10:16 UTC); публичные ручки наружу по-прежнему закрыты. В прод-`.env` добавлены `API_DOCS_ENABLED=false` и `CORS_ORIGINS=https://admin.63-182-28-250.sslip.io` (бэкап `.env.bak-2026-11-09`). Выкат перезапустил Postgres (правка `.env`) — один цикл бота упал, см. `DEPLOY.md`.
+
+- **Баг: лимит входа в админку был общим на весь интернет.** uvicorn шёл без
+  `--proxy-headers`, ключ лимита = IP контейнера Caddy: 10 мусорных запросов
+  запирали вход всем на 5 минут. Теперь `--proxy-headers`, ключ — реальный IP.
+- Лимит частоты на все ручки, кроме `/health` и `payments/*` (`core/ratelimit.py`):
+  токен-бакет на IP, политики public/heavy/admin + общий потолок тяжёлых.
+  429 с `Retry-After`, заголовки `RateLimit-*`.
+- Кэш ответов каталога/дашборда/оценки (`core/cache.py`, single-flight) — раньше
+  `API_CACHE_TTL_SECONDS` был объявлен, но не использовался.
+- `statement_timeout` 10 с на соединения процесса `api`; `/health/ready`.
+- Заголовки безопасности, `X-Request-ID`, `Server-Timing`, лог медленных
+  запросов, потолок тела 64 КБ, CORS сужен, `API_DOCS_ENABLED`, `max_length`
+  на строки `estimate`/`price-trend`, лог неверной подписи webhook обрезан.
+- **Выкат:** миграций нет. В прод-`.env`: `API_DOCS_ENABLED=false`, проверить
+  `CORS_ORIGINS`. `docker compose up -d --build api` (команда uvicorn в compose
+  изменилась). Проверка: вход в панель работает, `curl -I` на `/health` даёт
+  `x-request-id`.
+
+---
+
 ## 2026-11-02 — одиночные карточки всегда с фото; пуши по фото, а не по пробегу
 
 Решения владельца после пуша 02.11.2026 в 10:23 (5 объявлений: 3 с фото, 2

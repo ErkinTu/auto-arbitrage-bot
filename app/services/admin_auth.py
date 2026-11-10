@@ -15,7 +15,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -23,6 +22,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.ratelimit import Policy, limiter
 from app.models import AdminLoginToken, AdminSession, BotUser
 
 logger = logging.getLogger(__name__)
@@ -55,19 +55,20 @@ def _aware(value: datetime | None) -> datetime | None:
 # В процессе, а не в БД: контейнер `api` один, а писать в базу на каждую попытку
 # входа — значит дать простой способ раздуть её мусором. 32 байта энтропии
 # перебрать всё равно нельзя; лимит нужен, чтобы шум не забивал логи.
-_ATTEMPTS: dict[str, list[float]] = {}
+# Бакеты — общий `core/ratelimit.limiter` (число ключей ограничено). Ключ — IP
+# клиента: реальный только при `--proxy-headers` у uvicorn, иначе это адрес
+# Caddy, и десять чужих попыток запирали вход всем (до 11.2026 так и было).
 _ATTEMPT_WINDOW_SECONDS = 300
 _ATTEMPT_LIMIT = 10
+_LOGIN_POLICY = Policy(
+    "admin_login",
+    per_minute=max(1, round(_ATTEMPT_LIMIT * 60 / _ATTEMPT_WINDOW_SECONDS)),
+    burst=_ATTEMPT_LIMIT,
+)
 
 
 def too_many_attempts(client: str) -> bool:
-    now = time.monotonic()
-    recent = [item for item in _ATTEMPTS.get(client, []) if now - item < _ATTEMPT_WINDOW_SECONDS]
-    recent.append(now)
-    _ATTEMPTS[client] = recent
-    # Словарь не чистим по таймеру: ключей ровно столько, сколько адресов
-    # ломилось за пять минут, и каждый список обрезается при следующем заходе.
-    return len(recent) > _ATTEMPT_LIMIT
+    return not limiter.hit(_LOGIN_POLICY, client).allowed
 
 
 @dataclass(slots=True)

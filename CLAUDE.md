@@ -40,7 +40,13 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   гейта нет; он есть только у `admin/*`, см. ниже). Порты `api:8000` и
   `postgres:5432` публикуются только на `127.0.0.1` (через
   `API_HOST`/`POSTGRES_HOST`, дефолт localhost). Наружу открывать нельзя без
-  reverse-proxy+auth. См. `DEPLOY.md`.
+  reverse-proxy+auth. См. `DEPLOY.md`. **Защита API** (ветка
+  `feature/public-api-hardening`, на проде с 09.11.2026): лимит частоты по
+  IP (`core/ratelimit.py`), кэш ответов (`core/cache.py`), заголовки/потолок
+  тела/`X-Request-ID` (`core/http.py`), `statement_timeout` только процессу
+  `api`. Лимиты держатся на реальном IP — uvicorn обязан идти с
+  `--proxy-headers`. Лимитер и кэш — память процесса: при `--workers > 1` — Redis.
+  Аудит, контракт ленты для сайта, порядок открытия — `docs/api/PUBLIC_API.md`.
 - **Время.** Контейнеры в UTC; всё расписание код считает сам по
   `SCHEDULER_TIMEZONE` (`Asia/Bishkek`). Контейнерный TZ не трогать.
 - **Расписание встроено в сервисы**, cron не нужен (кроме бэкапов).
@@ -537,6 +543,8 @@ AWS Lightsail, проект в `/home/ubuntu/car-analytics`, docker без sudo.
 | `docs/data/DB_QUERIES.md` | Готовые SQL-запросы |
 | `docs/admin/FRONTEND_TZ.md` | Тех.задание фронта (`../analytics-front`) |
 | `docs/admin/ADMIN_PANEL_PLAN.md` | Админ-панель: что сделано и как работает (§0), аудит, решения, что осталось. **Итерация 1 готова, в проде её нет** |
+| `docs/api/PUBLIC_API.md` | **Внешний API**: аудит 09.11.2026, лимиты/кэш, контракт ленты для сайта, порядок открытия |
+| `docs/planning/PLATFORM_ADR.md` | ADR: админка + фронт + сайт (монорепо, этапы, ветки) |
 | `docs/sources/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/sources/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `docs/payments/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `docs/payments/web-sdk-flow.png`, что нужно завести |

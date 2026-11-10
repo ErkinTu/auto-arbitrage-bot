@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.admin.deps import current_admin
+from app.core.cache import cached_call
 from app.db.session import get_session
 from app.schemas import BrandItem, ModelItem, VehicleSummary, YearItem
 from app.services.catalog_browse import list_brands, list_models, list_years
@@ -31,7 +32,7 @@ router = APIRouter(
 
 @router.get("/catalog/brands", response_model=list[BrandItem])
 def catalog_brands(session: Session = Depends(get_session)) -> list[dict]:
-    return list_brands(session)
+    return cached_call("catalog.brands", list_brands, session)
 
 
 @router.get("/catalog/models", response_model=list[ModelItem])
@@ -39,7 +40,7 @@ def catalog_models(
     brand_id: int = Query(ge=1),
     session: Session = Depends(get_session),
 ) -> list[dict]:
-    return list_models(session, brand_id=brand_id)
+    return cached_call("catalog.models", list_models, session, brand_id=brand_id)
 
 
 @router.get("/catalog/years", response_model=list[YearItem])
@@ -48,7 +49,9 @@ def catalog_years(
     model_id: int = Query(ge=1),
     session: Session = Depends(get_session),
 ) -> list[dict]:
-    return list_years(session, brand_id=brand_id, model_id=model_id)
+    return cached_call(
+        "catalog.years", list_years, session, brand_id=brand_id, model_id=model_id
+    )
 
 
 @router.get("/market/vehicle-summary", response_model=VehicleSummary)
@@ -62,7 +65,9 @@ def vehicle_summary(
     session: Session = Depends(get_session),
 ) -> dict:
     try:
-        return get_vehicle_summary(
+        return cached_call(
+            "market.vehicle_summary",
+            get_vehicle_summary,
             session,
             brand_id=brand_id,
             model_id=model_id,

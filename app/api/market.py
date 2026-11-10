@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.cache import cached_call
 from app.db.session import get_session
 from app.schemas import VehicleSummary
 from app.services.vehicle_summary import Granularity, get_vehicle_summary
@@ -23,7 +24,9 @@ def vehicle_summary(
     session: Session = Depends(get_session),
 ) -> dict:
     try:
-        return get_vehicle_summary(
+        return cached_call(
+            "market.vehicle_summary",
+            get_vehicle_summary,
             session,
             brand_id=brand_id,
             model_id=model_id,

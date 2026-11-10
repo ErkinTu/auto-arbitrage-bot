@@ -53,7 +53,19 @@ services:
       # (localhost:8000, /docs, Vite-прокси), а на сервере наружу не публикуется.
       # Открыть наружу осознанно: API_HOST=0.0.0.0 в .env.
       - "${API_HOST:-127.0.0.1}:8000:8000"
-    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # --proxy-headers: реальный IP клиента из X-Forwarded-For от Caddy — на нём
+    # держатся лимиты запросов (core/ratelimit.py). Доверяем всем (`*`), потому
+    # что порт 8000 наружу не опубликован: достучаться до него могут только
+    # Caddy и соседние контейнеры, а Caddy (≥2.5) входящий X-Forwarded-For от
+    # клиента не пропускает — подделать адрес снаружи нельзя. Если API_HOST
+    # когда-нибудь станет 0.0.0.0 — сузить FORWARDED_ALLOW_IPS до адреса Caddy.
+    # --timeout-keep-alive и --limit-concurrency: медленные/висящие соединения
+    # не должны копиться без предела; сверх лимита uvicorn отвечает 503.
+    command: >
+      uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS:-*}
+      --timeout-keep-alive 5 --limit-concurrency ${API_LIMIT_CONCURRENCY:-200}
+      --no-server-header
 
   worker:
     build: .
