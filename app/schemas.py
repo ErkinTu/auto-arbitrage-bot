@@ -46,6 +46,37 @@ class BrandStat(BaseModel):
     median_price_usd: float
 
 
+class MarketIntakeDay(BaseModel):
+    day: date
+    mashina: int
+    lalafo: int
+    total: int
+
+
+class MarketPriceDistribution(BaseModel):
+    step: float
+    bins: list["PriceBin"]
+    below: int
+    above: int
+    total: int
+    median_usd: float | None
+
+
+class BrandLiquidity(BaseModel):
+    brand: str
+    removed: int
+    median_days: float
+
+
+class MarketOverview(BaseModel):
+    """Графики раздела «Аналитика» сайта (services/market_overview.py)."""
+
+    intake: list[MarketIntakeDay]
+    price_distribution: MarketPriceDistribution
+    liquidity: list[BrandLiquidity]
+    liquidity_days: int
+
+
 class BrandItem(BaseModel):
     id: int
     name: str

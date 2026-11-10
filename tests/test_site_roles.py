@@ -149,6 +149,7 @@ def test_analytics_gates(env) -> None:
     _user(Factory, 200)
     _login(client, Factory, 200)
     assert client.get(url).status_code == 403  # вошёл, подписки нет
+    assert client.get("/api/v1/dashboard/market").status_code == 403
     for path in ("/api/v1/market/vehicle-summary?brand_id=1&model_id=1&year=2019",
                  "/api/v1/estimate?brand=a&model=b&year=2019&mileage_km=1",
                  "/api/v1/price-trend?brand=a&model=b&year=2019&mileage_km=1"):
