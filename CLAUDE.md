@@ -551,7 +551,7 @@ AWS Lightsail, проект в `/home/ubuntu/car-analytics`, docker без sudo.
 | `docs/admin/ADMIN_PANEL_PLAN.md` | Админ-панель: что сделано и как работает (§0), аудит, решения, что осталось. **Итерация 1 готова, в проде её нет** |
 | `docs/api/PUBLIC_API.md` | **Внешний API**: аудит 09.11.2026, лимиты/кэш, контракт ленты для сайта, порядок открытия |
 | `docs/planning/PLATFORM_ADR.md` | ADR: админка + фронт + сайт (монорепо, этапы, ветки) |
-| `docs/planning/SITE_TODO.md` | **Сайт: заметки владельца и что осталось** (09.11.2026) |
+| `docs/planning/SITE_TODO.md` | **Сайт: бэкенд-часть — что осталось** (11.11.2026); бэклог сайта — `../analytics-front/docs/FRONT_TODO.md` |
 | `docs/sources/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/sources/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `docs/payments/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `docs/payments/web-sdk-flow.png`, что нужно завести |
