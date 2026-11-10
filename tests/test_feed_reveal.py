@@ -35,3 +35,18 @@ def test_sync_schedules_new_listings_for_gradual_feed() -> None:
     session.refresh(listing)
     again = listing.feed_at.replace(tzinfo=timezone.utc) if listing.feed_at.tzinfo is None else listing.feed_at
     assert again == planned
+
+
+def test_lalafo_sync_stores_description_from_card_it_already_fetches() -> None:
+    """Описание lalafo — из карточки обхода (тот же запрос), телефоны скрыты."""
+    from tests.test_rich_cards import _FeedParser, _lalafo_item
+
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    card = {**_lalafo_item(None), "description": "Без ДТП. Звоните 0555 12 34 56"}
+    parser = _FeedParser([_lalafo_item(None)], {101: card})
+    run_sync(session, parser, source, target, mode="fresh")
+    listing = session.scalar(select(Listing).where(Listing.external_id == "101"))
+    assert parser.detail_calls == [101]  # один запрос карточки — как и раньше
+    assert listing.description == "Без ДТП. Звоните [номер скрыт]"
+    assert listing.description_fetched_at is not None

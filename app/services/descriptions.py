@@ -8,7 +8,12 @@
 - **mashina** — у API нет карточки, берём страницу объявления (~450 КБ, тот
   же запрос, что «Все фото» в боте): поле `description` рядом с `title` в
   экранированных данных Next.js. Проверено 11.11.2026.
-- **lalafo** — карточка API (`fetch_details`, на проде через прокси).
+- **lalafo** — **без отдельных запросов**: описание приходит в карточке, которую
+  обход и так дотягивает для новых и подешевевших (`sync._enrich_or_skip`), и
+  пишется в базу там же (`sync._set_current_fields`). Запрос к lalafo идёт
+  через платный прокси, поэтому по открытию страницы его не делаем
+  (`SITE_DESCRIPTION_LALAFO_ON_DEMAND=false`): у объявлений, увиденных до
+  колонки, описания просто нет, пока lalafo не переподаст/не изменит цену.
 
 Текст — чужие данные: на сайте только как текст (никакого `v-html`),
 **телефоны маскируем** — номер продавца у нас персональные данные
@@ -25,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models import Listing, Source
 
 logger = logging.getLogger(__name__)
@@ -77,7 +83,7 @@ def _fetch(source_name: str, listing: Listing, url: str) -> str | None:
 
     if source_name == MASHINA:
         return mashina_description_from_page(_fetch_mashina_page(url, timeout=8))
-    if source_name == LALAFO and can_fetch(source_name):
+    if source_name == LALAFO and get_settings().site_description_lalafo_on_demand and can_fetch(source_name):
         from app.parsers.lalafo import LalafoParser
 
         parser = LalafoParser(timeout=8, retry_attempts=1)
@@ -102,6 +108,11 @@ def listing_description(session: Session, listing_id: int, *, now: datetime | No
     if fetched is not None and now - fetched < REFRESH_AFTER or not listing.is_active:
         return {"text": listing.description, "fetched_at": fetched}
     source = session.get(Source, listing.source_id)
+    from app.services.sources import LALAFO
+
+    if source is not None and source.name == LALAFO and not get_settings().site_description_lalafo_on_demand:
+        # Описание lalafo пишет обход; сами к lalafo не ходим (прокси — деньги).
+        return {"text": listing.description, "fetched_at": fetched}
     try:
         raw = _fetch(source.name if source else "", listing, listing_public_url(listing.source_slug, listing.external_id))
     except Exception:  # источник недоступен — отдаём, что было, повторим позже

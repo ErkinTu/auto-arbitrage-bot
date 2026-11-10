@@ -54,3 +54,30 @@ def test_source_error_keeps_old_text(db, monkeypatch) -> None:  # noqa: F811
     with Factory() as s:
         listing = _listing(s, ids, description="было", description_fetched_at=None)
         assert d.listing_description(s, listing.id)["text"] == "было"
+
+
+def test_lalafo_description_saved_by_sync_and_never_fetched_on_demand(db, monkeypatch) -> None:  # noqa: F811
+    """lalafo — только из карточки обхода: запрос через прокси по открытию страницы не делаем."""
+    from app.services.normalizer import normalize_lalafo_listing
+
+    Factory, ids = db
+    calls = []
+    monkeypatch.setattr(d, "_fetch", lambda *a: calls.append(a) or "x")
+    with Factory() as s:
+        listing = _listing(s, ids, source_id=ids["lalafo"])
+        assert d.listing_description(s, listing.id)["text"] is None
+        assert calls == []  # к lalafo не ходили
+    raw = {"id": 1, "title": "Toyota Camry", "price": 1, "currency": "USD", "description": "Тел 0555123456, торг"}
+    item = normalize_lalafo_listing(raw, fallback_make="Toyota")
+    assert item.description == "Тел 0555123456, торг"
+    assert "description" not in item.analytics_payload()  # вне payload_hash
+
+
+def test_session_ttl_week_and_admin_hour() -> None:
+    from datetime import timedelta as td
+
+    from app.models import BotUser
+    from app.services.site_auth import session_ttl
+
+    assert session_ttl(BotUser(is_superuser=False)) == td(days=7)
+    assert session_ttl(BotUser(is_superuser=True)) == td(hours=1)

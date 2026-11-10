@@ -82,6 +82,10 @@ class NormalizedListing:
     # синк стирает известный ранее.
     seller_phone: str | None = None
     seller_phone_hidden: bool = False
+    # Описание продавца для сайта (lalafo — из карточки, которую обход и так
+    # дотягивает; mashina — None, её описание берётся по запросу со страницы).
+    # Вне `payload_hash`: текст правят часто, «updated» из-за него не нужен.
+    description: str | None = None
 
     def analytics_payload(self) -> dict[str, Any]:
         data = asdict(self)
@@ -91,6 +95,7 @@ class NormalizedListing:
         data.pop("fuel_group", None)
         data.pop("seller_phone", None)
         data.pop("seller_phone_hidden", None)
+        data.pop("description", None)
         return data
 
     @property
@@ -424,6 +429,7 @@ def normalize_lalafo_listing(
         image_url=extract_image_url(raw),
         image_urls=extract_image_urls(raw) or None,
         seller_phone=None if raw.get("hide_phone") else normalize_phone(raw.get("mobile")),
+        description=raw.get("description") or None,
         seller_phone_hidden=bool(raw.get("hide_phone")),
     )
 

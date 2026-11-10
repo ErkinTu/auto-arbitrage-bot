@@ -90,12 +90,18 @@ class Settings(BaseSettings):
     site_feed_spread_seconds: int = 300
     public_feed_max_limit: int = 48
     # Вход на сайт через бота (`/login`): срок ссылки и сессии обычного
-    # пользователя. Админу сессия — `admin_session_ttl_hours` (короче).
+    # пользователя (7 дней). Админу — `site_admin_session_ttl_hours` (1 ч).
     site_login_token_ttl_minutes: int = 10
-    site_session_ttl_days: int = 30
+    site_session_ttl_days: int = 7
+    # Админ на сайте — короткая сессия (база пользователей с телефона); у старой
+    # панели своя `admin_session_ttl_hours`. Решение владельца 11.11.2026: 1 ч.
+    site_admin_session_ttl_hours: int = 1
     # Устройств (сессий) на пользователя сайта: новый вход выбивает самое
     # старое — подписку не раздать на всех (решение владельца 11.11.2026).
     site_max_sessions: int = 2
+    # Описание lalafo по открытию страницы авто — запрос через платный прокси.
+    # Выключено: описание пишет обход из карточки, которую он и так берёт.
+    site_description_lalafo_on_demand: bool = False
 
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 

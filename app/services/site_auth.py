@@ -150,10 +150,10 @@ GUEST = Viewer(role="guest", user=None)
 
 
 def session_ttl(user: BotUser) -> timedelta:
-    """Админу — короткая сессия (доступ к базе с телефона), остальным — месяц."""
+    """Админу — 1 ч (доступ к базе с телефона), остальным — 7 дней (решение владельца 11.11.2026)."""
     settings = get_settings()
     if user.is_superuser:
-        return timedelta(hours=settings.admin_session_ttl_hours)
+        return timedelta(hours=settings.site_admin_session_ttl_hours)
     return timedelta(days=settings.site_session_ttl_days)
 
 
