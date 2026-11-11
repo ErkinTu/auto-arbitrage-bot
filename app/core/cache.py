@@ -35,11 +35,19 @@ class TTLCache:
         self.misses = 0
 
     def get_or_compute(
-        self, key: tuple, compute: Callable[[], T], *, ttl: float, max_entries: int
+        self,
+        key: tuple,
+        compute: Callable[[], T],
+        *,
+        ttl: float,
+        max_entries: int,
+        force: bool = False,
     ) -> T:
+        """`force=True` — пересчитать и перезаписать, даже если запись жива (прогрев:
+        старое значение отдаётся посетителям, пока считается новое)."""
         if ttl <= 0:
             return compute()
-        cached = self._get(key)
+        cached = _MISS if force else self._get(key)
         if cached is not _MISS:
             return cached  # type: ignore[return-value]
 
@@ -47,7 +55,7 @@ class TTLCache:
             key_lock = self._key_locks.setdefault(key, threading.Lock())
         with key_lock:
             # Пока ждали лок, значение мог посчитать соседний поток.
-            cached = self._get(key)
+            cached = _MISS if force else self._get(key)
             if cached is not _MISS:
                 return cached  # type: ignore[return-value]
             value = compute()
@@ -103,6 +111,7 @@ def cached_call(
     session: Any,
     *,
     ttl: float | None = None,
+    force: bool = False,
     **params: Any,
 ) -> T:
     """`fn(session, **params)` через кэш. Ключ — namespace + отсортированные
@@ -114,4 +123,5 @@ def cached_call(
         lambda: fn(session, **params),
         ttl=settings.api_cache_ttl_seconds if ttl is None else ttl,
         max_entries=settings.api_cache_max_entries,
+        force=force,
     )

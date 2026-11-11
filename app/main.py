@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Response
 from sqlalchemy import event, text
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,7 +43,21 @@ if engine.dialect.name == "postgresql" and settings.api_statement_timeout_ms > 0
 # Токен бота уходит в URL запросов к Telegram (вебхук оплаты) — не в логи.
 install_token_filter()
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Прогрев кэша главной сайта (services/warmup.py); в тестах выключен conftest-ом.
+    from app.services.warmup import start_warmup
+
+    stop = start_warmup()
+    try:
+        yield
+    finally:
+        if stop is not None:
+            stop.set()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Car Analytics MVP",
     version="0.1.0",
     description="Price history and market estimates for selected car brands.",

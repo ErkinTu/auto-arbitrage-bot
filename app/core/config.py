@@ -84,7 +84,11 @@ class Settings(BaseSettings):
     public_deal_threshold_percent: float = 5.0
     # Кэш ленты короче общего: она пополняется каждые 10 минут, и «Новые» не
     # должны запаздывать на полный TTL справочников.
-    public_feed_cache_seconds: int = 30
+    public_feed_cache_seconds: int = 60
+    # Прогрев кэша главной сайта (services/warmup.py): раз в N секунд пересчитываем
+    # ленту/счётчик/«лучшее»/справочники ДО истечения TTL, чтобы посетитель не ждал
+    # холодного запроса. 0 — выключить.
+    public_warmup_interval_seconds: int = 45
     # Новые объявления появляются в ленте сайта по одному за это время после
     # обхода (sync._schedule_feed_reveal); 0 — сразу, как раньше.
     site_feed_spread_seconds: int = 300

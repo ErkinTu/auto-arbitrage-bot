@@ -585,3 +585,65 @@ def test_new_listings_appear_gradually_in_order(db, monkeypatch) -> None:
         more = [_listing(s, ids, first_seen_at=now)]
         sync._schedule_feed_reveal(s, more, now=now)
         assert more[0].feed_at > reveal[-1] - timedelta(seconds=1)
+
+
+def test_garbage_prices_are_hidden_everywhere(client) -> None:
+    """«$2» и «$206» — мусор ввода: ни в ленте, ни в счётчике, ни на странице авто,
+    ни в избранном. Порог — тот же, что у аналитики (MIN_PLAUSIBLE_PRICE_USD)."""
+    http, Factory, ids = client
+    with Factory() as s:
+        ok = _listing(s, ids, current_price_usd=Decimal("500"))
+        junk2 = _listing(s, ids, current_price_usd=Decimal("2"))
+        junk206 = _listing(s, ids, current_price_usd=Decimal("206"))
+        absurd = _listing(s, ids, current_price_usd=Decimal("999999999"))
+    feed = http.get("/api/v1/public/feed").json()["items"]
+    assert [i["id"] for i in feed] == [ok.id]
+    assert http.get("/api/v1/public/feed/count").json()["count"] == 1
+    for bad in (junk2, junk206, absurd):
+        assert http.get(f"/api/v1/public/listings/{bad.id}").status_code == 404
+    favs = http.get("/api/v1/public/listings", params={"ids": f"{junk2.id},{ok.id},{junk206.id}"}).json()
+    assert [i["id"] for i in favs] == [ok.id]
+
+
+def test_warmup_fills_exactly_the_keys_the_home_page_requests(client, monkeypatch) -> None:
+    """Прогрев (services/warmup.py) обязан класть в кэш те же ключи, что строят
+    ручки для главной: иначе он греет «не то», а посетитель всё равно ждёт."""
+    from app.core.cache import response_cache
+    from app.services import warmup
+
+    http, Factory, ids = client
+    with Factory() as s:
+        _listing(s, ids)
+    monkeypatch.setattr(warmup, "SessionLocal", Factory)
+    assert warmup.warm_once() == 6
+    misses = response_cache.misses
+    for url in (
+        "/api/v1/public/feed?with_photo=true&sort=fresh&limit=24",
+        "/api/v1/public/feed/count?with_photo=true",
+        "/api/v1/public/feed/histograms?with_photo=true",
+        "/api/v1/public/best?limit=12",
+        "/api/v1/public/feed/facets",
+        "/api/v1/catalog/brands",
+    ):
+        assert http.get(url).status_code == 200, url
+    assert response_cache.misses == misses, "главная пошла мимо прогретого кэша"
+
+
+def test_lalafo_cards_get_the_light_photo_but_gallery_keeps_original(client) -> None:
+    """Карточка — `posters/api` (370 px), галерея страницы авто — оригинал (1024 px)."""
+    from app.services.public_feed import card_image
+
+    original = "https://img5.lalafo.com/i/posters/original/e3/52/b2/abc.jpeg"
+    light = "https://img5.lalafo.com/i/posters/api/e3/52/b2/abc.jpeg"
+    assert card_image(original) == light
+    assert card_image(light) == light
+    assert card_image("https://s3.mashina.kg/images/x/abc_medium.webp") == "https://s3.mashina.kg/images/x/abc_medium.webp"
+    assert card_image(None) is None
+
+    http, Factory, ids = client
+    with Factory() as s:
+        lal = _listing(s, ids, source_id=ids["lalafo"], image_url=original, image_urls=None)
+    item = http.get("/api/v1/public/feed").json()["items"][0]
+    assert item["image_url"] == light and item["image_url_hd"] == light
+    detail = http.get(f"/api/v1/public/listings/{lal.id}").json()
+    assert detail["images"] == [original]

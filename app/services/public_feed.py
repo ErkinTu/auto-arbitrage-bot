@@ -32,6 +32,7 @@ from app.core.config import get_settings
 from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, Source
 from app.services.exchange import get_latest_usd_rate
 from app.services.images import real_photo
+from app.services.normalizer import MAX_PLAUSIBLE_PRICE_USD, MIN_PLAUSIBLE_PRICE_USD
 from app.services.regions import REGION_LABELS, is_foreign, region_matches, region_of
 from app.services.sources import listing_public_url
 from app.services.specs import group_labels, spec_group
@@ -150,7 +151,11 @@ def _feed_conditions() -> list:
         Listing.car_model_id.is_not(None),
         Listing.year.is_not(None),
         Listing.current_price_usd.is_not(None),
-        Listing.current_price_usd > 0,
+        # Мусор цены («2 $», «206 $» — взнос рассрочки, цена в сомах без пересчёта)
+        # на сайт не попадает: тот же порог, что у аналитики и бота
+        # (`price_implausibly_low/high` в нормализаторе).
+        Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
+        Listing.current_price_usd <= MAX_PLAUSIBLE_PRICE_USD,
     ]
 
 
@@ -419,6 +424,21 @@ def hd_image(url: str | None) -> str | None:
     return url
 
 
+def card_image(url: str | None) -> str | None:
+    """Лёгкий вариант фото для карточек ленты.
+
+    lalafo хранит у нас `…/posters/original/…` (1024 px, 160–320 КБ) — для
+    карточки 300–400 px это перебор: замер 11.11.2026 на 60 фото с 6 параллельными
+    соединениями — оригиналы p90 6,3 с, максимум 24 с (CDN «подвисает» на тяжёлых),
+    11,5 МБ; вариант `…/posters/api/…` (370 px, 25–60 КБ) — p90 0,28 с, максимум
+    0,6 с, 2,1 МБ (174 из 177 проверенных отвечают; остальные — таймаут замера).
+    Оригинал остаётся в галерее страницы авто (`images`). У mashina свой путь:
+    `_medium` в карточке, `_large` в srcset (`hd_image`)."""
+    if url and "lalafo.com/i/posters/original/" in url:
+        return url.replace("/i/posters/original/", "/i/posters/api/", 1)
+    return url
+
+
 def _source_key(source_name: str) -> str:
     return source_name.split(".")[0].lower()
 
@@ -459,9 +479,15 @@ def serialize(
         "seller_type": listing.seller_type,
         "source": _source_key(source_name),
         "source_url": listing_public_url(listing.source_slug, listing.external_id),
-        "image_url": real_photo(listing.image_url),
+        "image_url": card_image(real_photo(listing.image_url)),
         # Для srcset: браузер сам выберет 360 или 675 px под экран.
-        "image_url_hd": hd_image(real_photo(listing.image_url)),
+        # У lalafo крупнее карточного нет смысла: оригинал в srcset заставил бы
+        # ретина-экраны тянуть тяжёлый файл (см. card_image); галерея — `images`.
+        "image_url_hd": (
+            card_image(real_photo(listing.image_url))
+            if "lalafo.com/" in (listing.image_url or "")
+            else hd_image(real_photo(listing.image_url))
+        ),
         "photo_count": max(len(gallery), 1 if real_photo(listing.image_url) else 0),
         "price_usd": round(price_usd) if price_usd is not None else None,
         "price_kgs": price_kgs,
@@ -775,6 +801,11 @@ def listings_by_ids(session: Session, ids: list[int]) -> list[dict]:
                 Listing.id.in_(ids),
                 Listing.brand_id.is_not(None),
                 Listing.car_model_id.is_not(None),
+                # Мусорная цена — как «нет объявления» (и в избранном, и на странице авто).
+                or_(
+                    Listing.current_price_usd.is_(None),
+                    Listing.current_price_usd.between(MIN_PLAUSIBLE_PRICE_USD, MAX_PLAUSIBLE_PRICE_USD),
+                ),
             )
         ).all()
     )
@@ -789,8 +820,8 @@ def listing_detail(session: Session, listing_id: int) -> dict:
     item = items[0]
     listing = session.get(Listing, listing_id)
     gallery = [hd_image(url) for url in (listing.image_urls or []) if real_photo(url)]
-    if not gallery and item["image_url_hd"]:
-        gallery = [item["image_url_hd"]]
+    if not gallery and real_photo(listing.image_url):
+        gallery = [hd_image(real_photo(listing.image_url))]
     history = session.execute(
         select(ListingPriceHistory.observed_at, ListingPriceHistory.price_usd)
         .where(
