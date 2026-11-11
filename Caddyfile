@@ -60,35 +60,71 @@
 	}
 }
 
-# --- Внешний API для сайта (ВЫКЛЮЧЕН, ждёт решения владельца) ---------------
-# Раскомментировать вместе с запуском сайта; порядок — docs/api/PUBLIC_API.md §6.
-# Наружу — только белый список read-only ручек. admin/* и payments/* остаются
-# на своих доменах, /docs и /openapi.json сюда не попадают (API_DOCS_ENABLED=false).
-# Лимиты частоты держит само приложение (core/ratelimit.py) по реальному IP —
-# Caddy подставляет его в X-Forwarded-For, входящий от клиента отбрасывает.
-#
-# {$SITE_DOMAIN} {   # пока skupka.63-182-28-250.sslip.io, потом свой домен
-# 	@public_api {
-# 		method GET HEAD OPTIONS
-# 		path /api/v1/public/* /api/v1/catalog/* /api/v1/dashboard/* /api/v1/market/* /api/v1/estimate /api/v1/price-trend /health
-# 	}
-# 	handle @public_api {
-# 		request_body {
-# 			max_size 64KB
-# 		}
-# 		reverse_proxy api:8000 {
-# 			# Висящий бэкенд не должен держать соединения клиента бесконечно.
-# 			transport http {
-# 				response_header_timeout 15s
-# 			}
-# 		}
-# 	}
-# 	handle {
-# 		respond "Not found" 404
-# 	}
-# 	encode zstd gzip
-# 	header {
-# 		Strict-Transport-Security "max-age=31536000"
-# 		-Server
-# 	}
-# }
+# --- Сайт (Nuxt) + внешний API для него -------------------------------------
+# Один домен: страницы отдаёт Nuxt (web:3000), а браузер ходит в API по тому же
+# origin (`/api/v1/*`) — поэтому CORS сайту не нужен. Наружу — только белый
+# список: read-only ручки (GET/HEAD/OPTIONS) и `auth/*` (вход/выход, POST/DELETE
+# с проверкой Origin на стороне api: нужен SITE_URL в .env). `admin/*` и
+# `payments/*` остаются на своих доменах, /docs и /openapi.json сюда не попадают
+# (API_DOCS_ENABLED=false). Лимиты частоты держит само приложение
+# (core/ratelimit.py) по реальному IP — Caddy подставляет его в X-Forwarded-For.
+# Пока сайт «тихий» (не анонсирован): noindex в заголовке и robots.txt с запретом.
+# При открытии — убрать оба (см. docs/planning/SITE_TODO.md).
+{$SITE_DOMAIN} {
+	@public_api {
+		method GET HEAD OPTIONS
+		path /api/v1/public/* /api/v1/catalog/* /api/v1/dashboard/* /api/v1/market/* /api/v1/estimate /api/v1/price-trend
+	}
+	@auth_api path /api/v1/auth/*
+	@health path /health
+	@api_rest path /api/*
+
+	handle /robots.txt {
+		respond "User-agent: *
+Disallow: /
+" 200
+	}
+	handle @health {
+		reverse_proxy api:8000
+	}
+	handle @public_api {
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy api:8000 {
+			# Висящий бэкенд не должен держать соединения клиента бесконечно.
+			transport http {
+				response_header_timeout 15s
+			}
+		}
+	}
+	handle @auth_api {
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy api:8000 {
+			transport http {
+				response_header_timeout 15s
+			}
+		}
+	}
+	# Остальной /api/* наружу закрыт: честный 404, а не страница сайта.
+	handle @api_rest {
+		respond "Not found" 404
+	}
+	handle {
+		reverse_proxy web:3000 {
+			transport http {
+				response_header_timeout 30s
+			}
+		}
+	}
+	encode zstd gzip
+	header {
+		X-Robots-Tag "noindex, nofollow"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

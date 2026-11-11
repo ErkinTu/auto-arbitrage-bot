@@ -102,6 +102,26 @@ services:
       - ./secrets:/run/secrets:ro
     command: uv run python -m app.bot
 
+  # Сайт SKUPKA.KG (Nuxt 4, SSR). Исходники фронта кладутся в ./site (rsync из
+  # analytics-front, без node_modules), образ собирается на месте. Наружу порт
+  # не публикуется — только Caddy ({$SITE_DOMAIN} → web:3000). SSR ходит в api
+  # по внутренней сети, браузер — на тот же origin через Caddy (CORS не нужен).
+  # Профиль site: локально `docker compose up` его не поднимает (нет ./site).
+  web:
+    build:
+      context: ./site
+      dockerfile: apps/web/Dockerfile
+    container_name: car_analytics_web
+    restart: ${RESTART_POLICY:-unless-stopped}
+    profiles: ["site"]
+    depends_on:
+      - api
+    environment:
+      NUXT_API_BASE_SERVER: http://api:8000/api/v1
+      NUXT_PUBLIC_SITE_URL: https://${SITE_DOMAIN:-localhost}
+      NUXT_PUBLIC_BOT_URL: ${SITE_BOT_URL:-}
+    mem_limit: 512m
+
   # Публичный HTTPS-вход для webhook/redirect Finik. Пробрасывает наружу
   # ТОЛЬКО /api/v1/payments/* (см. Caddyfile); api остаётся на 127.0.0.1.
   # Профиль payments: локально НЕ стартует (docker compose up), на проде —
@@ -120,6 +140,8 @@ services:
       PAYMENTS_DOMAIN: ${PAYMENTS_DOMAIN}
       # Домен админ-панели. Пусто — блок в Caddyfile просто не поднимется.
       ADMIN_DOMAIN: ${ADMIN_DOMAIN:-}
+      # Домен сайта (профиль site). Пусто — блок сайта в Caddyfile не поднимется.
+      SITE_DOMAIN: ${SITE_DOMAIN:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Собранный фронт (pnpm build → dist/), залитый в admin-dist/. Каталога
