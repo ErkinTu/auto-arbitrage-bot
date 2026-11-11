@@ -140,8 +140,8 @@ services:
       PAYMENTS_DOMAIN: ${PAYMENTS_DOMAIN}
       # Домен админ-панели. Пусто — блок в Caddyfile просто не поднимется.
       ADMIN_DOMAIN: ${ADMIN_DOMAIN:-}
-      # Домен сайта (профиль site). Пусто — блок сайта в Caddyfile не поднимется.
-      SITE_DOMAIN: ${SITE_DOMAIN:-}
+      # Домен сайта (профиль site). Не задан — блок слушает только внутренний localhost:8081 (наружу не публикуется), на платежи не влияет.
+      SITE_DOMAIN: ${SITE_DOMAIN:-http://localhost:8081}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Собранный фронт (pnpm build → dist/), залитый в admin-dist/. Каталога
