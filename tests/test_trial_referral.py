@@ -562,7 +562,7 @@ def demo_db(sessions, monkeypatch):
     return sessions
 
 
-def test_demo_listing_is_a_real_below_market_car(demo_db) -> None:
+def test_demo_listing_is_a_real_below_market_car(demo_db, lenient_best) -> None:
     from datetime import date
     from decimal import Decimal
 

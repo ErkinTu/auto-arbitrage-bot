@@ -615,6 +615,7 @@ def test_warmup_fills_exactly_the_keys_the_home_page_requests(client, monkeypatc
     with Factory() as s:
         _listing(s, ids)
     monkeypatch.setattr(warmup, "SessionLocal", Factory)
+    monkeypatch.setattr(warmup, "_pass", 0)  # первый проход — полный
     assert warmup.warm_once() == 6
     misses = response_cache.misses
     for url in (
@@ -647,3 +648,18 @@ def test_lalafo_cards_get_the_light_photo_but_gallery_keeps_original(client) -> 
     assert item["image_url"] == light and item["image_url_hd"] == light
     detail = http.get(f"/api/v1/public/listings/{lal.id}").json()
     assert detail["images"] == [original]
+
+
+def test_site_best_filters_orders_and_does_not_pad(client) -> None:
+    """«Лучшее сейчас» — не самое дешёвое: коридор скидки, ≥ 3 фото; мало кандидатов —
+    отдаём сколько есть (без добивки мусором). Правила — services/best_picks.py."""
+    http, Factory, ids = client
+    photos = [f"https://cdn.example/{i}.jpg" for i in range(5)]
+    with Factory() as s:
+        _stat(s, ids, avg="25000", samples=60)
+        good = _listing(s, ids, current_price_usd=Decimal("18250"), image_urls=photos)  # −27 %
+        _listing(s, ids, current_price_usd=Decimal("10500"), image_urls=photos)  # −58 % — подозрительно
+        _listing(s, ids, current_price_usd=Decimal("18500"), image_urls=photos[:2])  # 2 фото
+        _listing(s, ids, current_price_usd=Decimal("24500"), image_urls=photos)  # скидка 2 % — не «лучшее»
+    body = http.get("/api/v1/public/best").json()
+    assert [i["id"] for i in body] == [good.id]

@@ -27,8 +27,15 @@ HOME_LIMIT = 24  # PAGE у сайта (useFeed.ts)
 BEST_LIMIT = 12
 
 
+SLOW_EVERY = 4  # «тяжёлые» ключи с TTL 300 с (best, фасеты, марки) — раз в 4 прохода (~3 мин)
+_pass = 0
+
+
 def warm_once() -> int:
     """Один проход: пересчитывает ключи главной. Возвращает число обновлённых."""
+    global _pass
+    slow_due = _pass % SLOW_EVERY == 0
+    _pass += 1
     from app.api.public.feed import feed_filter
     from app.services.catalog_browse import list_brands
     from app.services.public_feed import (
@@ -54,6 +61,8 @@ def warm_once() -> int:
             ("catalog.brands", list_brands, None, {}),
         )
         for namespace, fn, job_ttl, params in jobs:
+            if job_ttl is None and not slow_due:
+                continue  # TTL 300 с: до следующего «тяжёлого» прохода ещё свежо
             try:
                 cached_call(namespace, fn, session, ttl=job_ttl, force=True, **params)
                 done += 1

@@ -43,6 +43,7 @@ from app.bot.matching import (
     market_estimate,
 )
 from app.models import Brand, Listing, Source
+from app.services import best_picks
 from app.services.images import real_photo
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.regions import is_foreign
@@ -190,24 +191,22 @@ def _duplicate_key(listing: Listing) -> tuple:
     )
 
 
-def compute_showcase(
+def _photo_count(listing: Listing) -> int:
+    gallery = [url for url in (listing.image_urls or []) if real_photo(url)]
+    return max(len(gallery), 1 if real_photo(listing.image_url) else 0)
+
+
+def _showcase_scored(
     session: Session,
     *,
+    now: datetime,
+    hours: int,
     min_samples: int,
-    max_below_percent: float = 60.0,
-    window_hours: int = SHOWCASE_WINDOW_HOURS,
-    size: int = SHOWCASE_SIZE,
-    max_age_years: int = 20,
-) -> list[PendingNotification]:
-    """Лучшие по % ниже рынка среди созданных за `window_hours` (chat_id=0).
-
-    `market_average` — та же, что у рассылки: витрина показывает ровно то, что
-    человек получал бы по фильтру «ниже рынка». Только полные данные
-    (`is_complete_listing`), правдоподобная скидка, настоящее фото, свежий
-    номер и не слишком старая машина: витрина — лицо бота.
-    """
-    now = utcnow()
-    published_after = now - timedelta(hours=window_hours)
+    max_below_percent: float,
+    max_age_years: int,
+) -> list[tuple[float, Listing, MarketEstimate]]:
+    """Кандидаты витрины за `hours` часов: (скидка %, объявление, оценка рынка)."""
+    published_after = now - timedelta(hours=hours)
     query = select(Listing).where(
         Listing.is_active.is_(True),
         Listing.analytics_eligible.is_(True),
@@ -230,39 +229,84 @@ def compute_showcase(
         and real_photo(listing.image_url)
         and is_fresh_id(listing, floors)
     ]
-    source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
-    brand_names = {row.id: row.name for row in session.execute(select(Brand.id, Brand.name))}
-    model_names = load_model_names(session)
-
     scored: list[tuple[float, Listing, MarketEstimate]] = []
-    estimates = market_estimates(session, candidates, min_samples=min_samples)
-    for listing, estimate in estimates.items():
+    for listing, estimate in market_estimates(session, candidates, min_samples=min_samples).items():
         if estimate is None or estimate.avg_usd <= 0:
             continue
         percent = round((1 - float(listing.current_price_usd) / estimate.avg_usd) * 100, 1)
         if percent > 0 and is_plausible_discount(percent, max_below_percent):
             scored.append((percent, listing, estimate))
+    return scored
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    unique: list[tuple[float, Listing, MarketEstimate]] = []
-    keys: set[tuple] = set()
-    for item in scored:
-        key = _duplicate_key(item[1])
-        if key not in keys:
-            keys.add(key)
-            unique.append(item)
+
+def compute_showcase(
+    session: Session,
+    *,
+    min_samples: int,
+    max_below_percent: float = 60.0,
+    window_hours: int = SHOWCASE_WINDOW_HOURS,
+    size: int = SHOWCASE_SIZE,
+    max_age_years: int = 21,
+    max_window_hours: int = 72,
+) -> list[PendingNotification]:
+    """Лучшие сейчас (chat_id=0): общий отбор с сайтом — `services/best_picks.py`.
+
+    Не «самые дешёвые», а выгодные по-настоящему: скидка в коридоре, ≥ 3 фото,
+    база рынка ≥ 20, первые 5 мест — новые (2018+), дальше старые (с 2005 г., при
+    хорошем скоре), не больше 2 одной модели. Не набралось `size` — ярусы шире,
+    пул расширяется с `window_hours` до `max_window_hours` (72 ч); всё равно мало — вернём сколько есть.
+
+    `market_average` — та же, что у рассылки. Только полные данные
+    (`is_complete_listing`), правдоподобная скидка, настоящее фото, свежий номер.
+    """
+    now = utcnow()
+    cfg = best_picks.current_config()
+    picks: list[best_picks.Pick] = []
+    for hours in dict.fromkeys((window_hours, max(window_hours, max_window_hours))):
+        scored = _showcase_scored(
+            session,
+            now=now,
+            hours=hours,
+            min_samples=min_samples,
+            max_below_percent=max_below_percent,
+            max_age_years=max_age_years,
+        )
+        cands = []
+        for percent, listing, estimate in scored:
+            created = listing.source_created_at
+            if created is not None and created.tzinfo is None:
+                created = created.replace(tzinfo=now.tzinfo)
+            cands.append(
+                best_picks.Candidate(
+                    ref=(percent, listing, estimate),
+                    year=listing.year,
+                    photos=_photo_count(listing),
+                    discount=percent,
+                    samples=estimate.samples,
+                    has_mileage=listing.mileage_km is not None,
+                    age_hours=max((now - created).total_seconds() / 3600, 0.0) if created else float(hours),
+                    model_key=(listing.brand_id, listing.car_model_id),
+                    dup_key=_duplicate_key(listing),
+                )
+            )
+        picks = best_picks.select(cands, size=size, now_year=now.year, cfg=cfg)
+        if len(picks) >= size:
+            break
+    source_names = {row.id: row.name for row in session.execute(select(Source.id, Source.name))}
+    brand_names = {row.id: row.name for row in session.execute(select(Brand.id, Brand.name))}
+    model_names = load_model_names(session)
     return [
         build_pending(
-            listing,
+            pick.cand.ref[1],
             chat_id=0,
             filter_id=0,  # витрина не привязана к фильтру
-            below_percent=percent,
-            estimate=estimate,
+            below_percent=pick.cand.ref[0],
+            estimate=pick.cand.ref[2],
             source_names=source_names,
             brand_names=brand_names,
             model_names=model_names,
         )
-        for percent, listing, estimate in unique[:size]
+        for pick in picks
     ]
 
 

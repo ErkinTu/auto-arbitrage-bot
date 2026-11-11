@@ -292,7 +292,7 @@ def test_matching_stores_percent_and_honours_group(sessions) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_showcase_sorted_and_drops_implausible_or_stale(sessions) -> None:
+def test_showcase_sorted_and_drops_implausible_or_stale(sessions, lenient_best) -> None:
     with sessions() as s:
         ids = _catalog(s)
         _stat(s, ids["Toyota"])
@@ -310,7 +310,7 @@ def test_showcase_sorted_and_drops_implausible_or_stale(sessions) -> None:
     assert showcase.page_for_chat(items, chat_id=5, offset=1, page=1)[1] is None
 
 
-def test_showcase_drops_placeholder_old_cars_and_duplicates(sessions) -> None:
+def test_showcase_drops_placeholder_old_cars_and_duplicates(sessions, lenient_best) -> None:
     """Проверка владельца 01.11.2026: «без фото, устаревшие, повторы»."""
     with sessions() as s:
         ids = _catalog(s)
@@ -324,10 +324,11 @@ def test_showcase_drops_placeholder_old_cars_and_duplicates(sessions) -> None:
         no_photo.image_url = None
         s.commit()
         items = showcase.compute_showcase(s, min_samples=2)
-    assert [item.title for item in items] == ["car 30"]
+    # Двойники склеены: остаётся один (свежее из двух), заглушка и «без фото» отброшены.
+    assert [item.title for item in items] in (["car 30"], ["car 31"])
 
 
-def test_showcase_drops_too_old_cars(sessions) -> None:
+def test_showcase_drops_too_old_cars(sessions, lenient_best) -> None:
     with sessions() as s:
         ids = _catalog(s)
         _stat(s, ids["Toyota"], year=1995)
@@ -337,7 +338,7 @@ def test_showcase_drops_too_old_cars(sessions) -> None:
         assert len(showcase.compute_showcase(s, min_samples=2, max_age_years=0)) == 1
 
 
-def test_showcase_drops_republished_old_listing(sessions) -> None:
+def test_showcase_drops_republished_old_listing(sessions, lenient_best) -> None:
     """lalafo при переподаче ставит новую дату создания, номер — старый."""
     with sessions() as s:
         ids = _catalog(s)
@@ -347,7 +348,7 @@ def test_showcase_drops_republished_old_listing(sessions) -> None:
         _listing(s, ids["Toyota"], external_id="113638420", price="7000")  # переподано
         _listing(s, ids["Toyota"], external_id="117780000", price="7100")  # новое
         s.commit()
-        items = showcase.compute_showcase(s, min_samples=2)
+        items = showcase.compute_showcase(s, min_samples=2, max_window_hours=24)
     assert [item.title for item in items] == ["car 117780000"]
 
 

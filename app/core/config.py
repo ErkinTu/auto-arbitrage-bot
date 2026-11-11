@@ -160,7 +160,15 @@ class Settings(BaseSettings):
     # Витрина «Лучшее сейчас» (01.11.2026): машины не старше стольких лет —
     # у старых (1993 г., 450 тыс. км) средняя по рынку шумная, и они забивали
     # топ «скидками» 50–59%. 0 = без ограничения.
-    bot_showcase_max_age_years: int = 20
+    bot_showcase_max_age_years: int = 21  # 2005+ допускаются при хорошем скоре (best_picks)
+    # «Лучшее сейчас» (сайт `/public/best` и бот `/best`) — общий скоринг
+    # `services/best_picks.py`, описание — `docs/planning/BEST_PICKS.md`.
+    best_min_photos: int = 3
+    best_new_age_years: int = 8  # «новая» = не старше 8 лет (2018+ в 2026)
+    best_new_slots: int = 5  # первые N мест — новые машины
+    best_min_year: int = 2005  # старше — не берём вообще
+    best_old_min_score: float = 0.55  # не новые — только с хорошим скором
+    best_max_per_model: int = 2
     # Потолок пушей одному чату за цикл — ПО ТАРИФУ (`plans.effective_tier`):
     # full = группа/триал/платный полный, delayed = платный медленный (и фолбэк).
     # Сверх лимита объявление пропускаем без записи в sent_notifications — придёт

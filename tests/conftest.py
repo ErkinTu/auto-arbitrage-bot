@@ -26,3 +26,18 @@ def _reset_api_limits():
     yield
     limiter.reset()
     response_cache.clear()
+
+
+@pytest.fixture()
+def lenient_best(monkeypatch):
+    """Мягкий отбор «лучших» для тестов, которые проверяют не скоринг, а фильтры
+    витрины (повторы, заглушки, свежесть номера, возраст): без минимума фото и базы,
+    любой год, один широкий ярус. Сам скоринг — tests/test_best_picks.py."""
+    from app.services import best_picks
+
+    monkeypatch.setattr(
+        best_picks,
+        "current_config",
+        lambda: best_picks.BestConfig(min_photos=1, min_year=1950, old_min_score=0.0, new_slots=5, max_per_model=99),
+    )
+    monkeypatch.setattr(best_picks, "TIERS", (best_picks.Tier(24, 0.0, 100.0, 1),))
