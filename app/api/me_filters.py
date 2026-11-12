@@ -286,15 +286,37 @@ def preview_filter(
     POST, потому что это черновик формы, а не ресурс; ничего не пишет. Лимит —
     heavy (`core/ratelimit.py`), кэш 5 мин на человека и фильтр: ползунок
     редактора шлёт черновик с задержкой, а одинаковые черновики не пересчитываем.
-    Вошедшему без подписки тоже открыт — это и есть аргумент её оформить.
+    Вошедшему без подписки — тоже, но с ограничением (решение владельца
+    12.11.2026: «желание на подписку», но без лишней нагрузки): не больше
+    `SITE_FILTER_PREVIEW_FREE_PER_DAY` расчётов в сутки, и только цифры и
+    столбики — сами машины (`samples`) видны с подпиской.
     """
     spec = _spec(session, payload)
-    return cached_call(
+    user = _user(viewer)
+    free = not role_at_least(viewer.role, "subscriber")
+    left: int | None = None
+    if free:
+        per_day = get_settings().site_filter_preview_free_per_day
+        decision = limiter.hit(Policy("me.filters.preview_free", per_day / 1440, per_day), str(user.id))
+        if not decision.allowed:
+            exc = _problem(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "preview_limit",
+                "Бесплатные проверки на сегодня закончились — с подпиской без ограничений",
+                retry_after=decision.retry_after,
+            )
+            exc.headers = {"Retry-After": str(decision.retry_after)}
+            raise exc
+        left = decision.remaining
+    result = cached_call(
         "me.filters.preview",
         _preview,
         session,
         ttl=PREVIEW_CACHE_SECONDS,
         spec=spec,
-        user_id=_user(viewer).id,
+        user_id=user.id,
     )
+    if free:
+        return {**result, "samples": [], "limited": True, "free_left": left}
+    return {**result, "limited": False, "free_left": None}
 

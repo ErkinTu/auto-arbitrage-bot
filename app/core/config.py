@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     site_filter_write_pause_seconds: int = 5
     site_filter_writes_per_hour: int = 30
     site_filter_bot_notify_minutes: int = 10
+    # Предпросмотр фильтра уведомлений без подписки: расчётов в сутки на
+    # человека (тяжёлый запрос) — и без самих машин, только цифры.
+    site_filter_preview_free_per_day: int = 30
     # Описание lalafo по открытию страницы авто — запрос через платный прокси.
     # Выключено: описание пишет обход из карточки, которую он и так берёт.
     site_description_lalafo_on_demand: bool = False

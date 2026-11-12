@@ -308,6 +308,28 @@ def test_user_without_access_cannot_change_filters_like_in_bot(env) -> None:
     assert client.post("/api/v1/me/filters", json={}).status_code == 403
 
 
+def test_free_preview_hides_cars_and_is_limited(env, monkeypatch) -> None:
+    client = _login(env, 45, subscriber=False)
+    _, Factory, _ = env
+    monkeypatch.setattr(get_settings(), "site_filter_preview_free_per_day", 2)
+    _listing(Factory, "f1", price=9_900, observed=_now() - timedelta(hours=1))
+    first = client.post("/api/v1/me/filters/preview", json={}).json()
+    assert first["total"] == 1 and first["samples"] == [] and first["limited"] is True and first["free_left"] == 1
+    assert client.post("/api/v1/me/filters/preview", json={"price_max_usd": 50000}).status_code == 200
+    over = client.post("/api/v1/me/filters/preview", json={"price_max_usd": 40000})
+    assert over.status_code == 429 and over.json()["detail"]["code"] == "preview_limit"
+
+
+def test_subscriber_preview_has_cars_and_no_daily_limit(env, monkeypatch) -> None:
+    client = _login(env, 46)
+    _, Factory, _ = env
+    monkeypatch.setattr(get_settings(), "site_filter_preview_free_per_day", 1)
+    _listing(Factory, "s1", price=9_900, observed=_now() - timedelta(hours=1))
+    for price in (50000, 40000, 30000):
+        body = client.post("/api/v1/me/filters/preview", json={"price_max_usd": price}).json()
+        assert body["limited"] is False and len(body["samples"]) == 1
+
+
 # --- предпросмотр -------------------------------------------------------------------------
 
 

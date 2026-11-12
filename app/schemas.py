@@ -725,3 +725,6 @@ class PushFilterPreview(BaseModel):
     by_day: list[PushPreviewDay]
     without_market: int  # из total — без оценки рынка (фильтр без «ниже рынка»)
     samples: list[PublicListing]
+    # Без подписки: машин не показываем (только цифры), проверок в сутки — лимит.
+    limited: bool = False
+    free_left: int | None = None

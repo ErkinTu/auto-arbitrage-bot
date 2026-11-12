@@ -139,7 +139,7 @@
 | `POST /me/filters` | subscriber | создать; 409 `limit` / `duplicate`, 422 `invalid` + `field` |
 | `PUT /me/filters/{id}` | subscriber | правка той же строки; тело + `updated_at` виденной версии → 409 `stale`, если правили в боте |
 | `DELETE /me/filters/{id}` | вошедший | удалить (и без подписки — освободить слот) |
-| `POST /me/filters/preview` | вошедший | «за 7 дней прислал бы N»: `total`, `per_day_avg`, `by_day[7]`, `without_market`, `samples` (≤ 6 `PublicListing`); лимит heavy, кэш 5 мин |
+| `POST /me/filters/preview` | вошедший | «за 7 дней прислал бы N»: `total`, `per_day_avg`, `by_day[7]`, `without_market`, `samples` (≤ 6 `PublicListing`); лимит heavy, кэш 5 мин. Без подписки — `samples: []`, `limited: true`, `free_left`, не больше 30 в сутки (429 `preview_limit`) |
 
 Тело: `brand_ids` (≤ 10; при 2+ — без модели), `model_id` (только при одной марке),
 `year_from`/`year_to` или `max_age_years`, `mileage_max_km`, `price_max_usd`,
