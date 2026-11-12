@@ -856,6 +856,7 @@ def listing_detail(session: Session, listing_id: int) -> dict:
         .limit(200)
     ).all()
     item["images"] = gallery
+    item["video_id"] = listing.video_id
     item["price_history"] = [
         {"at": at, "price_usd": round(float(price))} for at, price in history
     ]

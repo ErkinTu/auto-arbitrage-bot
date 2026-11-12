@@ -681,3 +681,100 @@ def test_feed_thumbs_cover_first_light_and_capped(client) -> None:
         _listing(s, ids, image_url=photos[0], image_urls=photos)
     item = http.get("/api/v1/public/feed").json()["items"][0]
     assert item["thumbs"] == photos[:3] and item["photo_count"] == 5
+
+
+# --- Фото и видео со страницы источника (services/listing_media.py, 12.11.2026) ---
+
+_PAGE = (
+    '<html>\\"video_url\\":\\"Вставьте ссылку на ваш ролик на YouTube\\",'
+    '\\"images\\":[{\\"id\\":1,\\"medium\\":\\"https://s3.mashina.kg/images/2026-11-12/7/aaa_medium.webp\\"},'
+    '{\\"id\\":2,\\"medium\\":\\"https://s3.mashina.kg/images/2026-11-12/7/bbb_medium.webp\\"}],'
+    '\\"video_url\\":\\"https://youtu.be/HdYFcHOd6jo?si=pujTx88iUB5HL4dg\\"</html>'
+)
+
+
+def test_youtube_id_from_any_link() -> None:
+    from app.services.listing_media import mashina_video_from_page, youtube_id
+
+    for url in (
+        "https://youtu.be/HdYFcHOd6jo?si=x",
+        "https://www.youtube.com/watch?v=HdYFcHOd6jo&t=3",
+        "https://m.youtube.com/watch?feature=share&v=HdYFcHOd6jo",
+        "https://youtube.com/shorts/HdYFcHOd6jo",
+        "https://www.youtube.com/embed/HdYFcHOd6jo",
+    ):
+        assert youtube_id(url) == "HdYFcHOd6jo", url
+    assert youtube_id("Ссылка на видео") is None
+    assert youtube_id("https://vimeo.com/123456789") is None
+    assert youtube_id(None) is None
+    # Подсказка формы раньше настоящей ссылки — берём ссылку.
+    assert mashina_video_from_page(_PAGE) == "HdYFcHOd6jo"
+    assert mashina_video_from_page("<html></html>") is None
+
+
+def test_media_refresh_takes_new_gallery_and_video_once_per_window(client, monkeypatch) -> None:
+    import app.bot.photos as photos
+
+    calls: list[str] = []
+    monkeypatch.setattr(photos, "_fetch_mashina_page", lambda url, timeout=None: calls.append(url) or _PAGE)
+    http, Factory, ids = client
+    with Factory() as s:
+        car = _listing(s, ids, image_urls=["https://s3.mashina.kg/images/2026-11-09/7/old_medium.webp"])
+    body = http.get(f"/api/v1/public/listings/{car.id}/media").json()
+    assert body["video_id"] == "HdYFcHOd6jo" and body["photo_count"] == 2
+    assert body["images"][0].endswith("aaa_large.webp")  # галерее — крупный вариант
+    # Карточка из кэша тоже свежая: сверка сбросила её.
+    detail = http.get(f"/api/v1/public/listings/{car.id}").json()
+    assert detail["video_id"] == "HdYFcHOd6jo" and len(detail["images"]) == 2
+    # Повторное открытие в окне — без запроса к источнику (кэш ручки сброшен).
+    from app.core.cache import response_cache
+
+    response_cache.clear()
+    http.get(f"/api/v1/public/listings/{car.id}/media")
+    assert len(calls) == 1
+    # «Фото не грузятся» — тоже не раньше чем через 30 мин после сверки.
+    response_cache.clear()
+    http.get(f"/api/v1/public/listings/{car.id}/media", params={"broken": 1})
+    assert len(calls) == 1
+
+
+def test_media_refresh_broken_photos_rechecks_and_gone_deactivates(client, monkeypatch) -> None:
+    import app.bot.photos as photos
+    from app.services.listing_media import refresh_media
+
+    http, Factory, ids = client
+    long_ago = _now() - timedelta(hours=2)
+    with Factory() as s:
+        car = _listing(s, ids, media_checked_at=long_ago)
+        lal = _listing(s, ids, source_id=ids["lalafo"])
+    monkeypatch.setattr(photos, "_fetch_mashina_page", lambda url, timeout=None: _PAGE)
+    with Factory() as s:
+        assert refresh_media(s, car.id) is False  # обычное открытие — неделя не прошла
+        assert refresh_media(s, car.id, broken=True) is True  # кадры битые — сверяем
+        assert refresh_media(s, lal.id, broken=True) is False  # lalafo — не ходим (прокси)
+
+    def gone(url, timeout=None):
+        raise photos.ListingGone
+
+    monkeypatch.setattr(photos, "_fetch_mashina_page", gone)
+    with Factory() as s:
+        other = _listing(s, ids)
+        assert refresh_media(s, other.id) is True
+        assert s.get(Listing, other.id).is_active is False
+
+
+def test_media_refresh_source_down_keeps_photos(client, monkeypatch) -> None:
+    import app.bot.photos as photos
+    from app.services.listing_media import refresh_media
+
+    def down(url, timeout=None):
+        raise TimeoutError
+
+    monkeypatch.setattr(photos, "_fetch_mashina_page", down)
+    http, Factory, ids = client
+    with Factory() as s:
+        car = _listing(s, ids, image_urls=["https://cdn.example/1.jpg"], video_id="HdYFcHOd6jo")
+        assert refresh_media(s, car.id) is True
+        fresh = s.get(Listing, car.id)
+        assert fresh.image_urls == ["https://cdn.example/1.jpg"] and fresh.video_id == "HdYFcHOd6jo"
+        assert refresh_media(s, car.id) is False  # повтор — не раньше окна

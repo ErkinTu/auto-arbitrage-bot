@@ -543,9 +543,20 @@ class PublicPricePoint(BaseModel):
 
 class PublicListingDetail(PublicListing):
     images: list[str]
+    # Видео продавца (id YouTube) — со страницы источника (services/listing_media.py).
+    video_id: str | None = None
     price_history: list[PublicPricePoint]
     # Гостю и пользователю без подписки история (график) не отдаётся.
     price_history_locked: bool = False
+
+
+class PublicMedia(BaseModel):
+    """Фото и видео после сверки со страницей источника (`/listings/{id}/media`)."""
+
+    images: list[str]
+    video_id: str | None
+    photo_count: int
+    is_active: bool
 
 
 class PublicFeedPage(BaseModel):

@@ -17,7 +17,7 @@ from app.api.roles import current_viewer
 from app.core.cache import cached_call
 from app.core.config import get_settings
 from app.db.session import get_session
-from app.schemas import PublicDescription, PublicFeedCount, PublicFeedFacets, PublicFeedHistograms, PublicFeedPage, PublicListing, PublicListingDetail
+from app.schemas import PublicDescription, PublicFeedCount, PublicFeedFacets, PublicFeedHistograms, PublicFeedPage, PublicListing, PublicListingDetail, PublicMedia
 from app.services.regions import REGION_LABELS
 from app.services.specs import SPEC_GROUPS, raw_values_for
 from app.services.site_auth import Viewer, role_at_least
@@ -256,6 +256,31 @@ def get_description(listing_id: int, session: Session = Depends(get_session)) ->
 
     try:
         return cached_call("public.description", listing_description, session, listing_id=listing_id)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+
+@router.get("/listings/{listing_id}/media", response_model=PublicMedia)
+def get_media(
+    listing_id: int,
+    broken: Annotated[bool, Query(description="кадры галереи не грузятся — сверить раньше")] = False,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Фото и видео — сверка со страницей источника по открытию страницы авто
+    (services/listing_media.py). Кэш 5 мин: одновременные открытия одной машины —
+    один запрос к источнику. После сверки — свежая карточка в кэш."""
+    from app.services.listing_media import refresh_media
+
+    def compute(session: Session, listing_id: int, broken: bool) -> dict:
+        refreshed = refresh_media(session, listing_id, broken=broken)
+        item = cached_call(
+            "public.listing", listing_detail, session,
+            ttl=get_settings().public_feed_cache_seconds, force=refreshed, listing_id=listing_id,
+        )
+        return {key: item[key] for key in ("images", "video_id", "photo_count", "is_active")}
+
+    try:
+        return cached_call("public.media", compute, session, listing_id=listing_id, broken=broken)
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
 

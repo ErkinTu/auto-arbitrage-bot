@@ -177,6 +177,10 @@ class Listing(Base, TimestampMixin):
     # страницы авто, телефоны замаскированы; вне payload_hash.
     description: Mapped[str | None] = mapped_column(Text)
     description_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Видео продавца (YouTube id) и когда сайт последний раз сверял фото/видео со
+    # страницей источника (services/listing_media.py). Вне payload_hash, как фото.
+    video_id: Mapped[str | None] = mapped_column(String(16))
+    media_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # С какого момента новое объявление видно в ленте сайта (плавное появление,
     # sync._schedule_feed_reveal); NULL — сразу. Бот этим полем не пользуется.
     feed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
