@@ -524,6 +524,8 @@ class PublicListing(BaseModel):
     image_url: str | None
     image_url_hd: str | None
     photo_count: int
+    # До 3 лёгких фото (обложка первой) — веер миниатюр в карточке-строке.
+    thumbs: list[str] = []
     price_usd: int | None
     price_kgs: int | None
     price_drop_usd: int | None

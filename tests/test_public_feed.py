@@ -663,3 +663,21 @@ def test_site_best_filters_orders_and_does_not_pad(client) -> None:
         _listing(s, ids, current_price_usd=Decimal("24500"), image_urls=photos)  # скидка 2 % — не «лучшее»
     body = http.get("/api/v1/public/best").json()
     assert [i["id"] for i in body] == [good.id]
+
+
+def test_feed_thumbs_cover_first_light_and_capped(client) -> None:
+    """Карточка-строка: до 3 лёгких фото, обложка первой, без дублей."""
+    from app.services.public_feed import card_thumbs
+
+    orig = "https://img5.lalafo.com/i/posters/original/a/{}.jpeg"
+    api = "https://img5.lalafo.com/i/posters/api/a/{}.jpeg"
+    gallery = [orig.format(i) for i in range(5)]
+    assert card_thumbs(orig.format(2), gallery) == [api.format(2), api.format(0), api.format(1)]
+    assert card_thumbs(None, []) == []
+
+    http, Factory, ids = client
+    photos = [f"https://cdn.example/{i}.jpg" for i in range(5)]
+    with Factory() as s:
+        _listing(s, ids, image_url=photos[0], image_urls=photos)
+    item = http.get("/api/v1/public/feed").json()["items"][0]
+    assert item["thumbs"] == photos[:3] and item["photo_count"] == 5

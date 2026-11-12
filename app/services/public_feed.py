@@ -440,6 +440,28 @@ def card_image(url: str | None) -> str | None:
     return url
 
 
+FEED_THUMBS = 3
+
+
+def card_thumbs(cover: str | None, gallery: list[str]) -> list[str]:
+    """До трёх лёгких фото для карточки-строки ленты: обложка + следующие кадры.
+
+    Карточка-строка показывает веер миниатюр (обложка по центру, соседние за
+    ней); крупнее карточного варианта не нужно — миниатюра меньше 400 px.
+    Галерея уже загружена вместе с объявлением — лишних запросов нет."""
+    first = real_photo(cover)
+    seen: set[str] = set()
+    out: list[str] = []
+    for url in ([first] if first else []) + gallery:
+        small = card_image(url)
+        if small and small not in seen:
+            seen.add(small)
+            out.append(small)
+        if len(out) == FEED_THUMBS:
+            break
+    return out
+
+
 def _source_key(source_name: str) -> str:
     return source_name.split(".")[0].lower()
 
@@ -490,6 +512,7 @@ def serialize(
             else hd_image(real_photo(listing.image_url))
         ),
         "photo_count": max(len(gallery), 1 if real_photo(listing.image_url) else 0),
+        "thumbs": card_thumbs(listing.image_url, gallery),
         "price_usd": round(price_usd) if price_usd is not None else None,
         "price_kgs": price_kgs,
         "price_drop_usd": price_drop,
