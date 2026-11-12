@@ -133,10 +133,14 @@ def _append_status_history(
     old_status: str | None,
     new_status: str | None,
     details: dict | None = None,
+    *,
+    keep_phone: bool = False,
 ) -> None:
-    if event_type == "deactivated":
+    if event_type == "deactivated" and not keep_phone:
         # Единая точка всех деактиваций (full-scan, валидатор, «зависшие»,
         # «Все фото»): номер снятого объявления не храним (services/phones.py).
+        # Исключение — живая проверка сайта (`keep_phone`, решение владельца
+        # 12.11.2026): снятое скрываем от пользователей, данные остаются у нас.
         listing.seller_phone = None
     session.add(
         ListingStatusHistory(
@@ -483,7 +487,12 @@ def validate_stale_lalafo_listings(
 
 
 def deactivate_by_card(
-    session: Session, listing: Listing, *, reason: str, status_id: int | None = None
+    session: Session,
+    listing: Listing,
+    *,
+    reason: str,
+    status_id: int | None = None,
+    keep_phone: bool = False,
 ) -> None:
     old_status = listing.status
     listing.is_active = False
@@ -492,7 +501,9 @@ def deactivate_by_card(
     details: dict = {"reason": reason}
     if status_id is not None:
         details["status_id"] = status_id
-    _append_status_history(session, listing, "deactivated", old_status, "inactive", details=details)
+    _append_status_history(
+        session, listing, "deactivated", old_status, "inactive", details=details, keep_phone=keep_phone
+    )
 
 
 def _enrich_or_skip(

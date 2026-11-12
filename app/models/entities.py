@@ -177,10 +177,10 @@ class Listing(Base, TimestampMixin):
     # страницы авто, телефоны замаскированы; вне payload_hash.
     description: Mapped[str | None] = mapped_column(Text)
     description_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Видео продавца (YouTube id) и когда сайт последний раз сверял фото/видео со
-    # страницей источника (services/listing_media.py). Вне payload_hash, как фото.
+    # Видео продавца (YouTube id) — с живой проверки (services/liveness.py). Вне payload_hash, как фото.
     video_id: Mapped[str | None] = mapped_column(String(16))
-    media_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Последняя живая проверка «не снято ли» у источника (services/liveness.py).
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # С какого момента новое объявление видно в ленте сайта (плавное появление,
     # sync._schedule_feed_reveal); NULL — сразу. Бот этим полем не пользуется.
     feed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -702,3 +702,18 @@ class AccessBlock(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class WatchedListing(Base):
+    """Объявления, которые сайт недавно запрашивал по id (избранное в браузере).
+
+    Избранное живёт в localStorage — сервер не знает, у кого что лежит. Ручка
+    `/public/listings?ids=` отмечает здесь запрошенные id, а проверка «не снято
+    ли» (services/liveness.py) раз в полчаса сверяет их с источником. Без
+    пользователей и устройств — только id объявления и время запроса.
+    """
+
+    __tablename__ = "watched_listings"
+
+    listing_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

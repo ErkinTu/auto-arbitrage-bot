@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 
@@ -600,6 +601,10 @@ def main() -> None:
         settings.bot_active_end_hour,
         settings.scheduler_timezone,
     )
+    # Проверка «не снято ли» — своим потоком: основной цикл часами занят обходами.
+    from app.services.liveness import liveness_loop
+
+    threading.Thread(target=liveness_loop, name="liveness", daemon=True).start()
     last_rebuild_at: datetime | None = None
     last_maintenance_date: date | None = None
     last_fuel_label_date: date | None = None

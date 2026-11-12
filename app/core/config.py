@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     # Описание lalafo по открытию страницы авто — запрос через платный прокси.
     # Выключено: описание пишет обход из карточки, которую он и так берёт.
     site_description_lalafo_on_demand: bool = False
+    # Живая проверка «не снято ли» (services/liveness.py, 12.11.2026): снятое —
+    # из «Лучшего», избранного и со страницы авто раньше, чем дойдёт обход.
+    liveness_enabled: bool = True
+    liveness_lalafo: bool = True  # lalafo — через прокси (~4–9 КБ на карточку)
+    liveness_best_minutes: int = 5  # «Лучшее сейчас» на сайте
+    liveness_watched_minutes: int = 30  # избранное (id из /public/listings?ids=)
+    liveness_watched_hours: int = 24  # сколько помним запрошенные id
+    liveness_open_minutes: int = 60  # страница авто по открытию
+    liveness_max_per_pass: int = 200
 
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 

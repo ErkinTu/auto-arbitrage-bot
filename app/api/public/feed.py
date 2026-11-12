@@ -214,8 +214,12 @@ def get_listings(
     ids: Annotated[str, Query(max_length=600, description="id через запятую, до 50")],
     session: Session = Depends(get_session),
 ) -> list[dict]:
-    """Избранное: и активные, и снятые — снятые фронт показывает тусклыми."""
+    """Избранное: и активные, и снятые — снятые фронт показывает тусклыми.
+    Запрошенные id отмечаем для проверки «не снято ли» (services/liveness.py)."""
+    from app.services.liveness import watch
+
     id_list = _int_list(ids, name="ids", max_items=50)
+    watch(session, id_list)
     return cached_call(
         "public.listings",
         listings_by_ids,

@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -683,18 +683,17 @@ def test_feed_thumbs_cover_first_light_and_capped(client) -> None:
     assert item["thumbs"] == photos[:3] and item["photo_count"] == 5
 
 
-# --- Фото и видео со страницы источника (services/listing_media.py, 12.11.2026) ---
+# --- Живая проверка «не снято ли», фото и видео (services/liveness.py, 12.11.2026) ---
 
-_PAGE = (
-    '<html>\\"video_url\\":\\"Вставьте ссылку на ваш ролик на YouTube\\",'
-    '\\"images\\":[{\\"id\\":1,\\"medium\\":\\"https://s3.mashina.kg/images/2026-11-12/7/aaa_medium.webp\\"},'
-    '{\\"id\\":2,\\"medium\\":\\"https://s3.mashina.kg/images/2026-11-12/7/bbb_medium.webp\\"}],'
-    '\\"video_url\\":\\"https://youtu.be/HdYFcHOd6jo?si=pujTx88iUB5HL4dg\\"</html>'
-)
+
+def _alive(images=None, video="HdYFcHOd6jo"):
+    from app.services.liveness import Check, Verdict
+
+    return Check(Verdict.ALIVE, images=images, video_id=video, has_video=True)
 
 
 def test_youtube_id_from_any_link() -> None:
-    from app.services.listing_media import mashina_video_from_page, youtube_id
+    from app.services.listing_media import youtube_id
 
     for url in (
         "https://youtu.be/HdYFcHOd6jo?si=x",
@@ -704,77 +703,152 @@ def test_youtube_id_from_any_link() -> None:
         "https://www.youtube.com/embed/HdYFcHOd6jo",
     ):
         assert youtube_id(url) == "HdYFcHOd6jo", url
-    assert youtube_id("Ссылка на видео") is None
+    assert youtube_id("Вставьте ссылку на ваш ролик на YouTube") is None
     assert youtube_id("https://vimeo.com/123456789") is None
     assert youtube_id(None) is None
-    # Подсказка формы раньше настоящей ссылки — берём ссылку.
-    assert mashina_video_from_page(_PAGE) == "HdYFcHOd6jo"
-    assert mashina_video_from_page("<html></html>") is None
 
 
-def test_media_refresh_takes_new_gallery_and_video_once_per_window(client, monkeypatch) -> None:
-    import app.bot.photos as photos
+def test_mashina_detail_api_verdicts(monkeypatch) -> None:
+    """API карточки mashina: 200+active — живо (с фото и видео), 404 — снято,
+    другой статус — снято, 5xx/сеть — «не знаю»."""
+    import httpx
 
-    calls: list[str] = []
-    monkeypatch.setattr(photos, "_fetch_mashina_page", lambda url, timeout=None: calls.append(url) or _PAGE)
+    from app.services import liveness as lv
+
+    detail = {
+        "status": "active",
+        "video_url": "https://youtu.be/HdYFcHOd6jo?si=1",
+        "images": [{"id": 1, "medium": "https://s3.mashina.kg/images/2026-11-12/7/aaa_medium.webp"}],
+    }
+    answers = {
+        "alive": httpx.Response(200, json=detail),
+        "gone": httpx.Response(404, json={"error_code": "NOT_FOUND"}),
+        "sold": httpx.Response(200, json={**detail, "status": "inactive"}),
+        "down": httpx.Response(502),
+    }
+    client = httpx.Client(transport=httpx.MockTransport(lambda req: answers[req.url.path.split("/")[-2]]))
+    assert lv.mashina_detail_url("x").endswith("/v1/ads/x/detail")
+    alive = lv.check_mashina("alive", client)
+    assert alive.verdict is lv.Verdict.ALIVE and alive.video_id == "HdYFcHOd6jo"
+    assert alive.images == ["https://s3.mashina.kg/images/2026-11-12/7/aaa_medium.webp"]
+    assert lv.check_mashina("gone", client).verdict is lv.Verdict.GONE
+    assert lv.check_mashina("sold", client).verdict is lv.Verdict.GONE
+    assert lv.check_mashina("down", client).verdict is lv.Verdict.UNKNOWN
+    assert lv.check_mashina(None).verdict is lv.Verdict.UNKNOWN
+
+
+def test_media_on_open_takes_fresh_photos_and_video_once_per_window(client, monkeypatch) -> None:
+    from app.services import liveness as lv
+
+    calls: list[int] = []
+    fresh = ["https://s3.mashina.kg/images/2026-11-12/7/aaa_medium.webp", "https://s3.mashina.kg/images/2026-11-12/7/bbb_medium.webp"]
+    monkeypatch.setattr(lv, "check_listing", lambda source, listing: calls.append(listing.id) or _alive(fresh))
     http, Factory, ids = client
     with Factory() as s:
-        car = _listing(s, ids, image_urls=["https://s3.mashina.kg/images/2026-11-09/7/old_medium.webp"])
+        car = _listing(s, ids, image_urls=["https://s3.mashina.kg/images/2026-11-09/7/old_medium.webp"],
+                       last_seen_at=_now() - timedelta(hours=3))
     body = http.get(f"/api/v1/public/listings/{car.id}/media").json()
     assert body["video_id"] == "HdYFcHOd6jo" and body["photo_count"] == 2
     assert body["images"][0].endswith("aaa_large.webp")  # галерее — крупный вариант
-    # Карточка из кэша тоже свежая: сверка сбросила её.
-    detail = http.get(f"/api/v1/public/listings/{car.id}").json()
+    detail = http.get(f"/api/v1/public/listings/{car.id}").json()  # кэш карточки обновлён
     assert detail["video_id"] == "HdYFcHOd6jo" and len(detail["images"]) == 2
-    # Повторное открытие в окне — без запроса к источнику (кэш ручки сброшен).
     from app.core.cache import response_cache
 
     response_cache.clear()
     http.get(f"/api/v1/public/listings/{car.id}/media")
-    assert len(calls) == 1
-    # «Фото не грузятся» — тоже не раньше чем через 30 мин после сверки.
-    response_cache.clear()
-    http.get(f"/api/v1/public/listings/{car.id}/media", params={"broken": 1})
-    assert len(calls) == 1
+    assert calls == [car.id]  # в окне — без запроса к источнику
 
 
-def test_media_refresh_broken_photos_rechecks_and_gone_deactivates(client, monkeypatch) -> None:
-    import app.bot.photos as photos
-    from app.services.listing_media import refresh_media
+def test_gone_listing_hidden_but_data_and_phone_kept(client, monkeypatch) -> None:
+    """Снятое — неактивно для пользователей, но строка и номер продавца у нас остаются."""
+    from app.services import liveness as lv
 
-    http, Factory, ids = client
-    long_ago = _now() - timedelta(hours=2)
-    with Factory() as s:
-        car = _listing(s, ids, media_checked_at=long_ago)
-        lal = _listing(s, ids, source_id=ids["lalafo"])
-    monkeypatch.setattr(photos, "_fetch_mashina_page", lambda url, timeout=None: _PAGE)
-    with Factory() as s:
-        assert refresh_media(s, car.id) is False  # обычное открытие — неделя не прошла
-        assert refresh_media(s, car.id, broken=True) is True  # кадры битые — сверяем
-        assert refresh_media(s, lal.id, broken=True) is False  # lalafo — не ходим (прокси)
-
-    def gone(url, timeout=None):
-        raise photos.ListingGone
-
-    monkeypatch.setattr(photos, "_fetch_mashina_page", gone)
-    with Factory() as s:
-        other = _listing(s, ids)
-        assert refresh_media(s, other.id) is True
-        assert s.get(Listing, other.id).is_active is False
-
-
-def test_media_refresh_source_down_keeps_photos(client, monkeypatch) -> None:
-    import app.bot.photos as photos
-    from app.services.listing_media import refresh_media
-
-    def down(url, timeout=None):
-        raise TimeoutError
-
-    monkeypatch.setattr(photos, "_fetch_mashina_page", down)
+    monkeypatch.setattr(lv, "check_listing", lambda source, listing: lv.Check(lv.Verdict.GONE, "card_gone"))
     http, Factory, ids = client
     with Factory() as s:
-        car = _listing(s, ids, image_urls=["https://cdn.example/1.jpg"], video_id="HdYFcHOd6jo")
-        assert refresh_media(s, car.id) is True
-        fresh = s.get(Listing, car.id)
-        assert fresh.image_urls == ["https://cdn.example/1.jpg"] and fresh.video_id == "HdYFcHOd6jo"
-        assert refresh_media(s, car.id) is False  # повтор — не раньше окна
+        car = _listing(s, ids, last_seen_at=_now() - timedelta(hours=3))
+    body = http.get(f"/api/v1/public/listings/{car.id}/media").json()
+    assert body["is_active"] is False
+    with Factory() as s:
+        row = s.get(Listing, car.id)
+        assert row.is_active is False and row.seller_phone == "996555123456" and row.verified_at is not None
+
+
+def test_unknown_changes_nothing_and_recently_seen_is_not_checked(client, monkeypatch) -> None:
+    from app.services import liveness as lv
+
+    calls: list[int] = []
+
+    def down(source, listing):
+        calls.append(listing.id)
+        return lv.Check(lv.Verdict.UNKNOWN, "network")
+
+    monkeypatch.setattr(lv, "check_listing", down)
+    http, Factory, ids = client
+    with Factory() as s:
+        old = _listing(s, ids, last_seen_at=_now() - timedelta(hours=3), image_urls=["https://cdn.example/1.jpg"])
+        seen = _listing(s, ids, last_seen_at=_now() - timedelta(minutes=10))
+        assert lv.verify_one(s, old.id, window=timedelta(hours=1)) is False
+        row = s.get(Listing, old.id)
+        assert row.is_active and row.image_urls == ["https://cdn.example/1.jpg"] and row.verified_at is None
+        assert lv.verify_one(s, seen.id, window=timedelta(hours=1)) is False
+    assert calls == [old.id]  # виденное обходом 10 мин назад — не спрашиваем
+
+
+def test_breaker_stops_pass_after_three_unknowns(client, monkeypatch) -> None:
+    from app.services import liveness as lv
+
+    calls: list[int] = []
+
+    def down(source, listing):
+        calls.append(listing.id)
+        return lv.Check(lv.Verdict.UNKNOWN, "network")
+
+    monkeypatch.setattr(lv, "check_listing", down)
+    http, Factory, ids = client
+    with Factory() as s:
+        cars = [_listing(s, ids, last_seen_at=_now() - timedelta(days=2)) for _ in range(6)]
+        counts = lv.verify_many(s, [c.id for c in cars], window=timedelta(minutes=5))
+    assert len(calls) == 3 and counts["unknown"] == 3 and counts["skipped"] == 3
+    with Factory() as s:
+        assert all(s.get(Listing, c.id).is_active for c in cars)
+
+
+def test_open_checks_have_a_global_budget(client, monkeypatch) -> None:
+    """Посетитель не может заставить сервер ходить к источнику без меры: не больше
+    OPEN_PER_MINUTE проверок по открытию в минуту на процесс."""
+    from app.services import liveness as lv
+
+    monkeypatch.setattr(lv, "OPEN_PER_MINUTE", 2)
+    calls: list[int] = []
+    monkeypatch.setattr(lv, "check_listing", lambda source, listing: calls.append(listing.id) or _alive())
+    http, Factory, ids = client
+    with Factory() as s:
+        cars = [_listing(s, ids, last_seen_at=_now() - timedelta(days=2)) for _ in range(4)]
+        for c in cars:
+            lv.verify_one(s, c.id, window=timedelta(hours=1))
+    assert len(calls) == 2
+
+
+def test_favorites_are_watched_and_checked_by_background_pass(client, monkeypatch) -> None:
+    from app.models import WatchedListing
+    from app.services import liveness as lv
+
+    gone_ids: set[int] = set()
+    monkeypatch.setattr(
+        lv, "check_listing",
+        lambda source, listing: lv.Check(lv.Verdict.GONE, "card_gone") if listing.id in gone_ids else _alive(),
+    )
+    http, Factory, ids = client
+    with Factory() as s:
+        fav = _listing(s, ids, last_seen_at=_now() - timedelta(days=2))
+        other = _listing(s, ids, last_seen_at=_now() - timedelta(days=2))
+    gone_ids.add(fav.id)
+    http.get("/api/v1/public/listings", params={"ids": str(fav.id)})
+    with Factory() as s:
+        assert [w.listing_id for w in s.scalars(select(WatchedListing))] == [fav.id]
+        out = lv.run_due(s, {}, clock=lambda: 1e6)
+        assert out["watched"]["gone"] == 1
+        assert s.get(Listing, fav.id).is_active is False and s.get(Listing, other.id).is_active is True
+        # Следующий тик раньше срока — проходов нет.
+        assert lv.run_due(s, {"best": 1e6, "watched": 1e6}, clock=lambda: 1e6 + 60) == {}

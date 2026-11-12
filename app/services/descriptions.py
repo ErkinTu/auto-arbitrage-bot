@@ -6,8 +6,8 @@
 - **mashina** — поле `description` есть в ленте API (замер 11.11.2026: 31 из
   31). Новые получают его в цикле бота, старые — при полном обходе worker-а.
   Запасной путь, если в базе пусто (объявление ещё не попало в полный обход):
-  страница объявления по открытию (~450 КБ; 11.11.2026 mashina.kg отвечала
-  ~40 с) — с таймаутом `MASHINA_PAGE_TIMEOUT`, не ждём дольше. Пробуем один
+  API карточки по открытию (`…/ads/{slug}/detail`, ~5 КБ; с 12.11.2026 — вместо
+  страницы ~450 КБ) — с таймаутом `MASHINA_PAGE_TIMEOUT`, не ждём дольше. Пробуем один
   раз на объявление: «описания нет» тоже запоминаем (`description_fetched_at`),
   дальше его допишет обход. Сбой источника — повтор не раньше чем через 5 мин
   (кэш ручки). **Хранится бессрочно** — срока нет, обновляет только обход.
@@ -81,11 +81,24 @@ def clean_description(text: str | None) -> str | None:
 
 def _fetch(source_name: str, listing: Listing, url: str) -> str | None:
     # Импорт здесь: модуль бота тянет httpx-клиенты и настройки прокси.
-    from app.bot.photos import _fetch_mashina_page, can_fetch
+    from app.bot.photos import can_fetch
     from app.services.sources import LALAFO, MASHINA
 
     if source_name == MASHINA:
-        return mashina_description_from_page(_fetch_mashina_page(url, timeout=MASHINA_PAGE_TIMEOUT))
+        # API карточки (~5 КБ, 12.11.2026) вместо страницы (~450 КБ): то же поле `description`.
+        import httpx
+
+        from app.services.liveness import mashina_detail_url
+
+        response = httpx.get(
+            mashina_detail_url(listing.source_slug or ""),
+            timeout=MASHINA_PAGE_TIMEOUT,
+            headers={"User-Agent": get_settings().user_agent, "Accept": "application/json"},
+        )
+        if response.status_code in (404, 410):
+            return None
+        response.raise_for_status()
+        return (response.json() or {}).get("description")
     if source_name == LALAFO and get_settings().site_description_lalafo_on_demand and can_fetch(source_name):
         from app.parsers.lalafo import LalafoParser
 

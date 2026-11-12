@@ -25,9 +25,11 @@ from app.models.entities import (
     UserBlock,
     UserEvent,
     UserFilter,
+    WatchedListing,
 )
 
 __all__ = [
+    "WatchedListing",
     "AccessBlock",
     "AdminLoginToken",
     "AdminSession",
