@@ -131,6 +131,7 @@ _HEAVY_PREFIXES = (
     "/api/v1/public/feed/count",
     "/api/v1/public/feed/histograms",
     "/api/v1/public/estimate",
+    "/api/v1/me/filters/preview",
     "/api/v1/dashboard/market",
     "/api/v1/dashboard/top-models",
 )

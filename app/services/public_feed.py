@@ -20,14 +20,14 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 
-from sqlalchemy import Integer, Select, and_, cast, exists, func, or_, select, true
+from sqlalchemy import Integer, Select, and_, cast, exists, func, or_, select, true, tuple_
 from sqlalchemy.orm import Session, aliased
 
-from app.bot.matching import MarketEstimate, market_estimate
+from app.bot.matching import MarketEstimate
 from app.core.config import get_settings
 from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, Source
 from app.services.exchange import get_latest_usd_rate
@@ -249,6 +249,57 @@ def _order(query: Select, sort: Sort, cursor: str | None) -> Select:
 # --- оценка рынка пачкой -----------------------------------------------------
 
 
+
+def _latest_stat_rows(
+    session: Session, triples: set[tuple], *, since: date | None
+) -> tuple[dict[tuple, list], dict[tuple, list]]:
+    """Строки статистики на последнюю дату: бакета и всей когорты модель+год.
+
+    `since` — нижняя граница дат (окно); None — вся история (для когорт, у
+    которых в окне ничего нет). Когорты — одним `(brand, model, year) IN`.
+    """
+    S = DailyMarketStat
+    conditions = [tuple_(S.brand_id, S.car_model_id, S.year).in_(sorted(triples))]
+    if since is not None:
+        conditions.append(S.stat_date >= since)
+    windowed = (
+        select(
+            S.brand_id,
+            S.car_model_id,
+            S.year,
+            S.mileage_bucket,
+            S.stat_date,
+            S.avg_price_usd,
+            S.sample_count,
+            func.max(S.stat_date)
+            .over(partition_by=(S.brand_id, S.car_model_id, S.year, S.mileage_bucket))
+            .label("max_bucket"),
+            func.max(S.stat_date)
+            .over(partition_by=(S.brand_id, S.car_model_id, S.year))
+            .label("max_all"),
+        )
+        .where(*conditions)
+        .subquery()
+    )
+    rows = session.execute(
+        select(windowed).where(
+            or_(
+                windowed.c.stat_date == windowed.c.max_bucket,
+                windowed.c.stat_date == windowed.c.max_all,
+            )
+        )
+    ).all()
+    by_bucket: dict[tuple, list] = {}
+    by_triple: dict[tuple, list] = {}
+    for row in rows:
+        triple = (row.brand_id, row.car_model_id, row.year)
+        if row.stat_date == row.max_bucket:
+            by_bucket.setdefault((*triple, row.mileage_bucket), []).append(row)
+        if row.stat_date == row.max_all:
+            by_triple.setdefault(triple, []).append(row)
+    return by_bucket, by_triple
+
+
 def batch_market_estimates(
     session: Session, listings: list[Listing], *, min_samples: int
 ) -> dict[int, MarketEstimate | None]:
@@ -282,76 +333,40 @@ def batch_market_estimates(
     S = DailyMarketStat
     # Окно: статистика пересчитывается ежедневно для всех когорт, поэтому
     # последняя дата когорты почти всегда = глобальная последняя. Берём 7 дней
-    # до неё — оконный max() не сканирует всю историю (230 → единицы мс). Если у
-    # когорты в окне строк нет, её настоящая последняя дата старше — для таких
-    # (редких) зовём сам market_estimate ниже: семантика остаётся точной.
+    # до неё — оконный max() не сканирует всю историю (230 → единицы мс).
     latest = session.scalar(select(func.max(S.stat_date)))
     if latest is None:
         return result
-    window_start = latest - timedelta(days=7)
-    windowed = (
-        select(
-            S.brand_id,
-            S.car_model_id,
-            S.year,
-            S.mileage_bucket,
-            S.stat_date,
-            S.avg_price_usd,
-            S.sample_count,
-            func.max(S.stat_date)
-            .over(partition_by=(S.brand_id, S.car_model_id, S.year, S.mileage_bucket))
-            .label("max_bucket"),
-            func.max(S.stat_date)
-            .over(partition_by=(S.brand_id, S.car_model_id, S.year))
-            .label("max_all"),
-        )
-        .where(
-            S.stat_date >= window_start,
-            or_(
-                *(
-                    and_(S.brand_id == b, S.car_model_id == m, S.year == y)
-                    for b, m, y in triples
-                )
-            ),
-        )
-        .subquery()
-    )
-    rows = session.execute(
-        select(windowed).where(
-            or_(
-                windowed.c.stat_date == windowed.c.max_bucket,
-                windowed.c.stat_date == windowed.c.max_all,
-            )
-        )
-    ).all()
+    by_bucket, by_triple = _latest_stat_rows(session, triples, since=latest - timedelta(days=7))
 
-    by_bucket: dict[tuple, list] = {}
-    by_triple: dict[tuple, list] = {}
-    for row in rows:
-        triple = (row.brand_id, row.car_model_id, row.year)
-        if row.stat_date == row.max_bucket:
-            by_bucket.setdefault((*triple, row.mileage_bucket), []).append(row)
-        if row.stat_date == row.max_all:
-            by_triple.setdefault(triple, []).append(row)
+    def group_of(item: Listing) -> list:
+        triple = (item.brand_id, item.car_model_id, item.year)
+        if item.mileage_km is not None:
+            return by_bucket.get((*triple, mileage_bucket(item.mileage_km)), [])
+        return by_triple.get(triple, [])
+
+    # У когорты нет строк в окне — её последняя дата старше. Второй проход по
+    # ВСЕЙ истории только этих когорт (раньше — market_estimate на каждую, по 2
+    # запроса: предпросмотр фильтра уведомлений за неделю делал их ~90).
+    stale = {(item.brand_id, item.car_model_id, item.year) for item in eligible if not group_of(item)}
+    if stale:
+        old_bucket, old_triple = _latest_stat_rows(session, stale, since=None)
+        by_bucket = {**old_bucket, **by_bucket}
+        by_triple = {**old_triple, **by_triple}
 
     cache: dict[tuple, MarketEstimate | None] = {}
     for item in eligible:
         triple = (item.brand_id, item.car_model_id, item.year)
         key = (*triple, mileage_bucket(item.mileage_km)) if item.mileage_km is not None else triple
         if key not in cache:
-            group = by_bucket.get(key, []) if item.mileage_km is not None else by_triple.get(key, [])
-            if not group:
-                # Последняя дата когорты старше окна — точный ответ даёт бот.
-                cache[key] = market_estimate(session, item, min_samples=min_samples)
-                result[item.id] = cache[key]
-                continue
+            group = group_of(item)
             total = sum(row.sample_count for row in group)
             cache[key] = (
                 MarketEstimate(
                     avg_usd=sum(float(row.avg_price_usd) * row.sample_count for row in group) / total,
                     samples=total,
                 )
-                if total >= min_samples
+                if group and total >= min_samples
                 else None
             )
         result[item.id] = cache[key]

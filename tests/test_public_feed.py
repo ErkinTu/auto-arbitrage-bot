@@ -362,6 +362,8 @@ def test_batch_estimates_match_bot(db) -> None:
         stat("0-50k", "26000", 9, days_ago=1)
         stat("50-100k", "30000", 2, year=2020)  # мало образцов
         stat("50-100k", "15000", 8, days_ago=40, year=2015)  # только старше окна в 7 дней
+        stat("100-150k", "14000", 7, days_ago=45, year=2015)
+        stat("150-200k", "12000", 9, days_ago=30)  # когорта в окне есть, этот бакет — только старый
         s.commit()
         listings = [
             _listing(s, ids, mileage_km=90_000),
@@ -372,6 +374,8 @@ def test_batch_estimates_match_bot(db) -> None:
             _listing(s, ids, mileage_km=90_000, city="Китай"),  # зарубежное
             _listing(s, ids, mileage_km=90_000, year=2005),  # нет статистики
             _listing(s, ids, mileage_km=90_000, year=2015),  # статистика 40 дней назад
+            _listing(s, ids, mileage_km=None, year=2015),  # без пробега, всё старше окна
+            _listing(s, ids, mileage_km=170_000),  # старый бакет у свежей когорты
         ]
         batch = batch_market_estimates(s, listings, min_samples=5)
         for listing in listings:

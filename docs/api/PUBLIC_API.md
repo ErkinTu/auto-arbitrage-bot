@@ -127,6 +127,26 @@
 Вход на сайт — через Telegram-бота (`PLATFORM_ADR.md`), API-ключи для B2B —
 когда появится первый клиент.
 
+### 5.1. Фильтры уведомлений в профиле — `/api/v1/me/filters` (ветка `feature/push-filters`, 12.11.2026)
+
+Не публичное: нужна сессия сайта (кука `sk_session`), Caddy пропускает `/api/v1/me/*`
+вместе с `/api/v1/auth/*`. Фильтр уведомлений — это фильтр бота (`user_filters`): сайт
+и бот правят одни строки, правила — общие (`bot/db.py`).
+
+| Ручка | Кто | Назначение |
+|---|---|---|
+| `GET /me/filters` | вошедший | `items`, `used`/`limit` (общий с ботом), `can_edit`, `max_brands`, `market_percents`, `regions` |
+| `POST /me/filters` | subscriber | создать; 409 `limit` / `duplicate`, 422 `invalid` + `field` |
+| `PUT /me/filters/{id}` | subscriber | правка той же строки; тело + `updated_at` виденной версии → 409 `stale`, если правили в боте |
+| `DELETE /me/filters/{id}` | вошедший | удалить (и без подписки — освободить слот) |
+| `POST /me/filters/preview` | вошедший | «за 7 дней прислал бы N»: `total`, `per_day_avg`, `by_day[7]`, `without_market`, `samples` (≤ 6 `PublicListing`); лимит heavy, кэш 5 мин |
+
+Тело: `brand_ids` (≤ 10; при 2+ — без модели), `model_id` (только при одной марке),
+`year_from`/`year_to` или `max_age_years`, `mileage_max_km`, `price_max_usd`,
+`below_market_percent` (5/10/15/20, null — без «ниже рынка»), `region` (коды бота,
+null — «Все авто»), `fuel_groups`. Ошибки — `detail: {code, message, …}`, `message`
+показывать человеку как есть. Изменения — только со своего `Origin`.
+
 ## 6. Порядок открытия наружу (когда будет сайт)
 
 1. Выкатить эту ветку: публичное поведение не меняется, закрываются находки 1,

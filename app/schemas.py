@@ -2,7 +2,7 @@ from typing import Literal
 
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class EstimateResponse(BaseModel):
@@ -633,3 +633,94 @@ class SiteMe(BaseModel):
     user: SiteUser | None
     access: SiteAccess | None
     session_expires_at: datetime | None = None
+
+
+# --- Фильтры уведомлений (профиль сайта = фильтры бота) ------------------------
+
+
+FuelGroupCode = Literal["petrol", "petrol_gas", "hybrid", "electric", "diesel"]
+
+
+class PushFilterIn(BaseModel):
+    """Фильтр уведомлений с сайта — те же 8 критериев, что в панели бота.
+
+    Несколько марок — без модели; модель — только при одной марке. Годы —
+    либо диапазон, либо «не старше N лет». `below_market_percent` = null —
+    без «ниже рынка»; `region` = null — «Все авто» (вся КР и зарубеж).
+    """
+
+    brand_ids: list[int] = Field(default_factory=list, max_length=10)
+    model_id: int | None = Field(default=None, ge=1)
+    year_from: int | None = None
+    year_to: int | None = None
+    max_age_years: int | None = None
+    mileage_max_km: int | None = None
+    price_max_usd: int | None = None
+    below_market_percent: int | None = None
+    region: str | None = Field(default=None, max_length=16)
+    fuel_groups: list[FuelGroupCode] = Field(default_factory=list, max_length=5)
+
+
+class PushFilterUpdate(PushFilterIn):
+    """Правка: `updated_at` — версия, которую человек видел (иначе 409)."""
+
+    updated_at: datetime | None = None
+
+
+class PushFilterBrand(BaseModel):
+    id: int
+    name: str
+
+
+class PushFilter(BaseModel):
+    id: int
+    summary: str  # та же строка, что в боте («Toyota, Lexus · до $15 000 · ниже рынка на 10%+»)
+    brands: list[PushFilterBrand]
+    model_id: int | None
+    model_name: str | None
+    year_from: int | None
+    year_to: int | None
+    max_age_years: int | None
+    mileage_max_km: int | None
+    price_max_usd: int | None
+    below_market_percent: int | None
+    region: str | None
+    fuel_groups: list[str]
+    # «Ниже рынка» без порога и «без зарубежных» — старые фильтры бота; сайт их
+    # показывает, а при сохранении записывает уже в новом виде.
+    legacy: bool
+    sent_7d: int
+    best_percent_7d: float | None
+    updated_at: datetime | None
+
+
+class PushFilterOptionsRegion(BaseModel):
+    value: str
+    label: str
+
+
+class PushFilters(BaseModel):
+    items: list[PushFilter]
+    used: int
+    limit: int
+    can_edit: bool  # доступ к пушам есть (подписка, триал, группа)
+    max_brands: int
+    market_percents: list[int]
+    regions: list[PushFilterOptionsRegion]
+
+
+class PushPreviewDay(BaseModel):
+    date: date
+    count: int
+
+
+class PushFilterPreview(BaseModel):
+    """«За 7 дней прислал бы N авто»: по дням (местное время) и до 6 примеров
+    (самые выгодные из ещё продающихся)."""
+
+    days: int
+    total: int
+    per_day_avg: float
+    by_day: list[PushPreviewDay]
+    without_market: int  # из total — без оценки рынка (фильтр без «ниже рынка»)
+    samples: list[PublicListing]

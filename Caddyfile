@@ -75,7 +75,8 @@
 		method GET HEAD OPTIONS
 		path /api/v1/public/* /api/v1/catalog/* /api/v1/dashboard/* /api/v1/market/* /api/v1/estimate /api/v1/price-trend
 	}
-	@auth_api path /api/v1/auth/*
+	# Вход и личное (фильтры уведомлений в профиле): кука сессии, любые методы.
+	@auth_api path /api/v1/auth/* /api/v1/me/*
 	@health path /health
 	@api_rest path /api/*
 

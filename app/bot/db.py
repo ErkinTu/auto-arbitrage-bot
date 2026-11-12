@@ -119,6 +119,18 @@ class FilterLimitError(Exception):
         super().__init__(f"filter limit reached: {used}/{limit}")
 
 
+class StaleFilterError(Exception):
+    """Фильтр изменили в другом месте (бот ↔ сайт) после того, как его открыли.
+
+    Сайт присылает `updated_at` того фильтра, что показывал человеку: молча
+    затереть правку из бота хуже, чем попросить обновить страницу.
+    """
+
+    def __init__(self, filter_id: int) -> None:
+        self.filter_id = filter_id
+        super().__init__(f"filter {filter_id} changed elsewhere")
+
+
 class DuplicateFilterError(Exception):
     """Такой же фильтр у пользователя уже есть.
 
@@ -168,6 +180,8 @@ class FilterDTO:
     # сохраняется уже как набор марок.
     brand_ids: tuple[int, ...] = ()
     brand_names: tuple[str, ...] = ()
+    # Версия строки для сайта (защита от одновременной правки в боте и на сайте).
+    updated_at: datetime | None = None
 
 
 def _utcnow() -> datetime:
@@ -715,6 +729,7 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
         car_model_id=user_filter.car_model_id,
         brand_ids=tuple(row.id for row in brand_rows),
         brand_names=tuple(row.name for row in brand_rows),
+        updated_at=user_filter.updated_at,
     )
 
 
@@ -878,6 +893,7 @@ def update_filter(
     max_age_years: int | None = None,
     fuel_groups: str | None = None,
     brand_ids: str | None = None,
+    expected_updated_at: datetime | None = None,
 ) -> FilterDTO:
     """Правка готового фильтра (панель, /edit_filter) — UPDATE той же строки.
 
@@ -899,6 +915,11 @@ def update_filter(
         )
         if user_filter is None:
             raise LookupError(f"filter {filter_id} of {telegram_id} not found")
+        # Сайт: правку из бота после открытия формы не затираем (бот не передаёт).
+        if expected_updated_at is not None and user_filter.updated_at is not None and (
+            _as_aware(user_filter.updated_at) != _as_aware(expected_updated_at)
+        ):
+            raise StaleFilterError(user_filter.id)
         price = float(price_max_usd) if price_max_usd is not None else None
         _check_duplicate(
             session,
