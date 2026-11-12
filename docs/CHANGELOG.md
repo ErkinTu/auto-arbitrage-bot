@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-11-12 (23:19 Бишкек) — выкат сайта на прод без бота, тихий режим
+
+Прод был на `4cb98be` (`site-junk-prices`, вместе с ботом). Выкачены `api`, `worker`, `web`, `migrate` из
+`feature/push-filters` (сайт — `analytics-front` `feature/push-filters`); бот не пересобирался. Миграция: `listings.
+video_id`, `listings.verified_at`, `user_filters.brand_ids`, таблица `watched_listings` (exit 0). Проверено: сайт 200,
+`robots.txt` Disallow, `/public/best`, `/public/feed` (с `thumbs`), `/public/listings/{id}/media` 200 за 0,3 с, в
+worker стартовал `liveness loop`. `.env` не менялся (`SITE_URL` пуст — входа нет, «Мои уведомления» не видны).
+Caddyfile в контейнере старый (`/api/v1/me/*` не пропускается) — см. `DEPLOY.md § Сайт без бота`.
+
 ## 2026-11-12 — фильтры уведомлений с сайта: `/api/v1/me/filters` + предпросмотр «за 7 дней»
 
 Ветка `feature/push-filters` (от `feature/liveness`, в неё влита `feature/bot-multi-brand`). Не запушено, не на проде.

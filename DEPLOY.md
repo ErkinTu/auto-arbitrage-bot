@@ -352,6 +352,34 @@ docker compose logs --tail 50 bot                  # поллер жив, Telegr
 
 ---
 
+## Сайт без бота (выкат 12.11.2026)
+
+Сайт (`web`, профиль `site`) и его API можно обновлять, не трогая бота:
+
+```bash
+# локально: код бэкенда (как выше) + исходники сайта в ./site
+rsync -rc -R -e "ssh -i $KEY" --exclude node_modules --exclude .nuxt --exclude .output \
+  ./package.json ./pnpm-lock.yaml ./pnpm-workspace.yaml ./apps/web ./packages/ui \
+  "$SRV:/home/ubuntu/car-analytics/site/"          # из ../analytics-front
+# на сервере
+docker compose --profile site --profile payments build migrate api worker web
+docker compose --profile site --profile payments up -d --no-deps migrate && docker wait car_analytics_migrate
+docker compose --profile site --profile payments up -d --no-deps api worker web
+```
+
+Грабли:
+
+- **Caddyfile смонтирован файлом** — rsync кладёт новый файл (новый inode), а контейнер
+  видит старый; `caddy reload` перечитывает старый. Новый Caddyfile подхватывает только
+  перезапуск: `docker compose --profile payments restart caddy` (секунды простоя платежей
+  и панели; Finik повторит webhook). На 12.11.2026 на сервере новый Caddyfile (`/api/v1/me/*`),
+  в контейнере — старый: до включения входа на сайт это ни на что не влияет.
+- **Код бота на диске новее работающего бота**: после такого выката любой `docker compose
+  up -d --build` без списка сервисов пересоберёт и бота. Бот выкатывать — осознанно.
+- **Вход на сайт (`SITE_URL`) включать только после выката бота** из той же ветки: прод-бот
+  12.11.2026 не знает `user_filters.brand_ids` и фильтр из нескольких марок, созданный на
+  сайте, понял бы как «все марки».
+
 ## Бэкапы и cron на сервере
 
 `scripts/backup.sh` делает дамп из контейнера postgres в `backups/*.sql.gz`
