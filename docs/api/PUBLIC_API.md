@@ -145,7 +145,8 @@
 `year_from`/`year_to` или `max_age_years`, `mileage_max_km`, `price_max_usd`,
 `below_market_percent` (5/10/15/20, null — без «ниже рынка»), `region` (коды бота,
 null — «Все авто»), `fuel_groups`. Ошибки — `detail: {code, message, …}`, `message`
-показывать человеку как есть. Изменения — только со своего `Origin`.
+показывать человеку как есть. Изменения — только со своего `Origin` и не чаще
+паузы 5 с / 30 в час на человека (429 `too_often`, `retry_after`, заголовок `Retry-After`).
 
 ## 6. Порядок открытия наружу (когда будет сайт)
 

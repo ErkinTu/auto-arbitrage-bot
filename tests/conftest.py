@@ -21,15 +21,18 @@ def _reset_click_limits():
 def _reset_api_limits():
     """Лимитер запросов и кэш ответов API — тоже память процесса: без сброса
     кэш отдал бы ответ по базе из прошлого теста, а лимитер копил бы попытки."""
+    from app.api import me_filters
     from app.services import liveness
 
     limiter.reset()
     response_cache.clear()
     liveness.reset_limits()
+    me_filters.reset_limits()
     yield
     limiter.reset()
     response_cache.clear()
     liveness.reset_limits()
+    me_filters.reset_limits()
 
 
 @pytest.fixture()

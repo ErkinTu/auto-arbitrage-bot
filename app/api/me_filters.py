@@ -5,14 +5,18 @@
 строки» (история отправок и точка отсчёта сохраняются) — общие с ботом. Бот
 читает базу на каждое нажатие, так что правка с сайта видна в нём сразу.
 
-Доступ: смотреть и удалять — вошедшему; создавать, править и предпросмотр —
-с доступом к пушам (роль subscriber, как в боте: группа / оплата / триал).
-Изменения — только со своего сайта (`_same_origin`, как у устройств).
+Доступ: смотреть, удалять и предпросмотр — вошедшему; создавать и править —
+с доступом к пушам (роль subscriber, как в боте: группа / оплата / триал; без
+доступа бот тоже не даёт трогать фильтры). Изменения — только со своего сайта
+(`_same_origin`, как у устройств) и не чаще паузы/часового потолка на человека
+(`_throttle`); сообщение в бота о правке — не чаще раза в N минут.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
@@ -23,6 +27,8 @@ from app.api.roles import require_subscriber, require_user
 from app.bot import db as bot_db
 from app.bot.messages import format_filter_line
 from app.core.cache import cached_call
+from app.core.config import get_settings
+from app.core.ratelimit import Policy, limiter
 from app.db.session import get_session
 from app.models import BotUser
 from app.schemas import PushFilter, PushFilterIn, PushFilterPreview, PushFilters, PushFilterUpdate
@@ -41,6 +47,59 @@ PREVIEW_CACHE_SECONDS = 300
 def _problem(code: int, kind: str, message: str, **extra) -> HTTPException:
     """Ошибка, которую сайт показывает как есть: `detail.message` — для человека."""
     return HTTPException(code, {"code": kind, "message": message, **extra})
+
+
+def _throttle(user_id: int) -> None:
+    """Короткая пауза между изменениями и потолок в час — на человека, а не на IP.
+
+    Бакеты общего лимитера (память процесса, как у лимита API; при нескольких
+    воркерах — Redis). 429 с `retry_after`: сайт показывает «подождите N с».
+    """
+    settings = get_settings()
+    key = str(user_id)
+    pause = settings.site_filter_write_pause_seconds
+    if pause > 0:
+        decision = limiter.hit(Policy("me.filters.pause", 60 / pause, 1), key)
+        if not decision.allowed:
+            raise _too_often(decision.retry_after, "Слишком часто — подождите {} с")
+    per_hour = settings.site_filter_writes_per_hour
+    if per_hour > 0:
+        decision = limiter.hit(Policy("me.filters.hour", per_hour / 60, per_hour), key)
+        if not decision.allowed:
+            minutes = max(1, -(-decision.retry_after // 60))
+            raise _too_often(decision.retry_after, "Много изменений подряд — попробуйте через {} мин", minutes)
+
+
+def _too_often(retry_after: int, template: str, value: int | None = None) -> HTTPException:
+    exc = _problem(
+        status.HTTP_429_TOO_MANY_REQUESTS, "too_often", template.format(value or retry_after), retry_after=retry_after
+    )
+    exc.headers = {"Retry-After": str(retry_after)}
+    return exc
+
+
+_notified_at: dict[int, float] = {}
+_notified_lock = threading.Lock()
+
+
+def _may_notify(telegram_id: int) -> bool:
+    """Сообщение в бота о правке с сайта — не чаще раза в N минут на человека."""
+    interval = get_settings().site_filter_bot_notify_minutes * 60
+    now = time.monotonic()
+    with _notified_lock:
+        last = _notified_at.get(telegram_id)
+        if last is not None and now - last < interval:
+            return False
+        _notified_at[telegram_id] = now
+        if len(_notified_at) > 50_000:  # не копить память бесконечно
+            _notified_at.clear()
+        return True
+
+
+def reset_limits() -> None:
+    """Для тестов."""
+    with _notified_lock:
+        _notified_at.clear()
 
 
 def _summary(item: bot_db.FilterDTO) -> str:
@@ -114,6 +173,8 @@ def _spec(session: Session, payload: PushFilterIn) -> pf.PushFilterSpec:
 
 def _notify_bot(telegram_id: int, summary: str, *, edited: bool) -> None:
     """Подтверждение в боте. Ошибка доставки — не ошибка сохранения."""
+    if not _may_notify(telegram_id):
+        return
     try:
         send_message(telegram_id, pf.site_created_text(summary, edited=edited))
     except Exception:  # noqa: BLE001 — фоновая задача, фильтр уже сохранён
@@ -151,6 +212,7 @@ def create_filter(
     session: Session = Depends(get_session),
 ) -> dict:
     _same_origin(request)
+    _throttle(_user(viewer).id)
     spec = _spec(session, payload)
     telegram_id = _user(viewer).telegram_id
     try:
@@ -175,6 +237,7 @@ def update_filter(
     session: Session = Depends(get_session),
 ) -> dict:
     _same_origin(request)
+    _throttle(_user(viewer).id)
     spec = _spec(session, payload)
     telegram_id = _user(viewer).telegram_id
     try:
@@ -201,6 +264,7 @@ def delete_filter(
 ) -> None:
     """Удалить можно и без доступа: это своя настройка (освободить слот)."""
     _same_origin(request)
+    _throttle(_user(viewer).id)
     if not bot_db.delete_filter(_user(viewer).telegram_id, filter_id):
         raise _problem(status.HTTP_404_NOT_FOUND, "not_found", "Фильтр уже удалён")
 

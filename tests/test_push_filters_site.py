@@ -62,6 +62,10 @@ def env(monkeypatch):
     monkeypatch.setattr(botdb, "SessionLocal", Factory)
     monkeypatch.setattr(get_settings(), "site_url", "https://site.test")
     monkeypatch.setattr(get_settings(), "allowed_brands", "Toyota,Lexus,Kia")
+    # Паузы — в своих тестах ниже; здесь проверяем правила фильтров, а не частоту.
+    monkeypatch.setattr(get_settings(), "site_filter_write_pause_seconds", 0)
+    monkeypatch.setattr(get_settings(), "site_filter_writes_per_hour", 0)
+    monkeypatch.setattr(get_settings(), "site_filter_bot_notify_minutes", 0)
     sent: list[tuple[int, str]] = []
     monkeypatch.setattr(me_filters, "send_message", lambda chat_id, text, **kw: sent.append((chat_id, text)))
     response_cache.clear()
@@ -248,6 +252,59 @@ def test_legacy_filter_is_flagged(env) -> None:
     )
     (item,) = client.get("/api/v1/me/filters").json()["items"]
     assert item["legacy"] is True and item["below_market_percent"] is None
+
+
+# --- частота изменений ---------------------------------------------------------------------
+
+
+def test_short_pause_between_changes(env, monkeypatch) -> None:
+    client = _login(env, 40)
+    monkeypatch.setattr(get_settings(), "site_filter_write_pause_seconds", 5)
+    assert client.post("/api/v1/me/filters", json={"price_max_usd": 5000}).status_code == 201
+    second = client.post("/api/v1/me/filters", json={"price_max_usd": 6000})
+    assert second.status_code == 429
+    assert second.json()["detail"]["code"] == "too_often"
+    assert "подождите" in second.json()["detail"]["message"]
+    assert int(second.headers["Retry-After"]) >= 1
+    # Удаление — тоже изменение.
+    (item,) = client.get("/api/v1/me/filters").json()["items"]
+    assert client.delete(f"/api/v1/me/filters/{item['id']}").status_code == 429
+    # Пауза — на человека: другой вошедший не ждёт.
+    other = TestClient(app, base_url="https://site.test")
+    with env[1]() as s:
+        s.add(BotUser(telegram_id=41, access_status="subscriber", subscription_expires_at=_now() + timedelta(days=1)))
+        s.commit()
+        token = issue_login_token(s, 41)
+    other.post("/api/v1/auth/exchange", json={"token": token})
+    assert other.post("/api/v1/me/filters", json={"price_max_usd": 5000}).status_code == 201
+
+
+def test_hourly_cap(env, monkeypatch) -> None:
+    client = _login(env, 42)
+    monkeypatch.setattr(get_settings(), "site_filter_writes_per_hour", 3)
+    created = client.post("/api/v1/me/filters", json={"price_max_usd": 5000}).json()
+    for price in (6000, 7000):
+        body = {"price_max_usd": price}
+        assert client.put(f"/api/v1/me/filters/{created['id']}", json=body).status_code == 200
+    capped = client.put(f"/api/v1/me/filters/{created['id']}", json={"price_max_usd": 8000})
+    assert capped.status_code == 429 and "мин" in capped.json()["detail"]["message"]
+
+
+def test_bot_message_not_more_often_than_interval(env, monkeypatch) -> None:
+    client = _login(env, 43)
+    _, _, sent = env
+    monkeypatch.setattr(get_settings(), "site_filter_bot_notify_minutes", 10)
+    created = client.post("/api/v1/me/filters", json={"price_max_usd": 5000}).json()
+    client.put(f"/api/v1/me/filters/{created['id']}", json={"price_max_usd": 6000})
+    client.post("/api/v1/me/filters", json={"price_max_usd": 7000})
+    assert [chat for chat, _ in sent] == [43]  # три изменения — одно сообщение
+
+
+def test_user_without_access_cannot_change_filters_like_in_bot(env) -> None:
+    client = _login(env, 44, subscriber=False)
+    created = botdb.create_filter(44, **pf.PushFilterSpec(price_max_usd=5000).db_fields())
+    assert client.put(f"/api/v1/me/filters/{created.id}", json={"price_max_usd": 1}).status_code == 403
+    assert client.post("/api/v1/me/filters", json={}).status_code == 403
 
 
 # --- предпросмотр -------------------------------------------------------------------------

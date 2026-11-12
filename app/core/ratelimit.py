@@ -30,7 +30,7 @@ class Policy:
     """Средняя скорость (запросов в минуту) и допустимый всплеск."""
 
     name: str
-    per_minute: int
+    per_minute: float  # дробное — для редких событий («30 в час» = 0,5 в минуту)
     burst: int
 
     @property
