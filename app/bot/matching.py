@@ -29,6 +29,7 @@ from app.services.images import real_photo
 from app.services.fuel import fuel_display, unpack_fuel_groups
 from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
+from app.services.filter_brands import filter_brand_set, unpack_brand_ids
 from app.services.filter_presets import load_brand_groups, min_year_for_age
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.plans import TIER_DELAYED, effective_tier
@@ -305,12 +306,10 @@ def filter_matches(
     Фильтр с группой без переданной карты не матчит ничего: та же логика
     «не доказано — не шлём».
     """
-    if user_filter.brand_id is not None and listing.brand_id != user_filter.brand_id:
+    # Марки: несколько (`brand_ids`) / одна / legacy-группа — `filter_brand_set`.
+    allowed_brands = filter_brand_set(user_filter, brand_groups)
+    if allowed_brands is not None and listing.brand_id not in allowed_brands:
         return False
-    if user_filter.brand_group is not None:
-        group = (brand_groups or {}).get(user_filter.brand_group)
-        if not group or listing.brand_id not in group:
-            return False
     if user_filter.car_model_id is not None and listing.car_model_id != user_filter.car_model_id:
         return False
     if user_filter.year_from is not None and (
@@ -371,6 +370,7 @@ def _match_signature(user_filter: UserFilter) -> tuple:
         user_filter.brand_group,
         user_filter.max_age_years,
         user_filter.fuel_groups,
+        user_filter.brand_ids,
     )
 
 
@@ -500,6 +500,7 @@ def filter_priority(user_filter: UserFilter) -> int:
         user_filter.brand_id is not None
         or user_filter.car_model_id is not None
         or user_filter.brand_group is not None
+        or user_filter.brand_ids is not None
     ):
         return PRIORITY_SPECIFIC
     return PRIORITY_ALL_CARS
@@ -678,9 +679,11 @@ def match_new_listings(
     # нему фильтры чужих марок незачем. Ключ None — фильтры «все марки», их
     # проверяем всегда. Порядок внутри группы — `_filter_order`: сильный
     # приоритет раньше слабого, при равном — по id фильтра.
+    # Фильтр на несколько марок кладём под каждую свою марку.
     filters_by_brand: dict[int | None, list[tuple[UserFilter, BotUser]]] = {}
     for pair in filter_user_pairs:
-        filters_by_brand.setdefault(pair[0].brand_id, []).append(pair)
+        for key in unpack_brand_ids(pair[0].brand_ids) or (pair[0].brand_id,):
+            filters_by_brand.setdefault(key, []).append(pair)
     for group in filters_by_brand.values():
         group.sort(key=_filter_order)
     any_brand_pairs = filters_by_brand.get(None, [])
@@ -874,12 +877,9 @@ def preview_for_filter(
             Listing.source_created_at <= now - timedelta(minutes=delayed_lag_minutes)
         )
     brand_groups = load_brand_groups(session)
-    if user_filter.brand_id is not None:
-        query = query.where(Listing.brand_id == user_filter.brand_id)
-    elif user_filter.brand_group is not None:
-        query = query.where(
-            Listing.brand_id.in_(brand_groups.get(user_filter.brand_group) or ())
-        )
+    allowed_brands = filter_brand_set(user_filter, brand_groups)
+    if allowed_brands is not None:
+        query = query.where(Listing.brand_id.in_(allowed_brands or ()))
     candidates = list(session.scalars(query).all())
     if not candidates:
         return []

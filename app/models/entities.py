@@ -553,6 +553,9 @@ class UserFilter(Base, TimestampMixin):
     # Группа марок (services/filter_presets.py::BRAND_GROUPS), напр. 'japan'.
     # Одно поле, а не N фильтров по марке: иначе пресет «Японцы» съел бы 4 слота.
     brand_group: Mapped[str | None] = mapped_column(String(16))
+    # Несколько марок (10.11.2026): id через запятую по возрастанию, только при
+    # двух и более — одна марка живёт в brand_id (services/filter_brands.py).
+    brand_ids: Mapped[str | None] = mapped_column(String(255))
     # «Не старше N лет» — год считается при матчинге, поэтому не устаревает,
     # в отличие от year_from. NULL = без ограничения.
     max_age_years: Mapped[int | None] = mapped_column(Integer)

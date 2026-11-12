@@ -134,6 +134,8 @@ def _upgrade_postgres_schema() -> None:
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS feed_at TIMESTAMPTZ",
         # Список устройств в профиле сайта (11.11.2026).
         "ALTER TABLE site_sessions ADD COLUMN IF NOT EXISTS device VARCHAR(80)",
+        # Несколько марок в фильтре бота (10.11.2026, services/filter_brands.py).
+        "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS brand_ids VARCHAR(255)",
         # Телефон продавца для «WhatsApp» под альбомом (01.11.2026); nullable,
         # без бэкфилла — lalafo заполнит лента, mashina — нажатия.
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_phone VARCHAR(20)",
