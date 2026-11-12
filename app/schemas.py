@@ -705,6 +705,7 @@ class PushFilters(BaseModel):
     limit: int
     can_edit: bool  # доступ к пушам есть (подписка, триал, группа)
     max_brands: int
+    brands: list[PushFilterBrand]  # марки, которые есть у бота (выбирать можно только их)
     market_percents: list[int]
     regions: list[PushFilterOptionsRegion]
 

@@ -198,6 +198,7 @@ def list_filters(viewer: Annotated[Viewer, Depends(require_user)]) -> dict:
         "limit": quota.limit,
         "can_edit": role_at_least(viewer.role, "subscriber"),
         "max_brands": MAX_FILTER_BRANDS,
+        "brands": [{"id": b.id, "name": b.name} for b in bot_db.list_brands()],
         "market_percents": list(pf.MARKET_PERCENTS),
         "regions": [{"value": value, "label": label} for value, label in REGION_CHOICES],
     }

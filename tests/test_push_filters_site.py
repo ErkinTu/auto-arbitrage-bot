@@ -114,6 +114,7 @@ def test_guest_gets_401_and_user_without_access_reads_only(env) -> None:
     _login(env, 10, subscriber=False)
     listing = client.get("/api/v1/me/filters").json()
     assert listing["can_edit"] is False and listing["items"] == [] and listing["limit"] == 5
+    assert [b["name"] for b in listing["brands"]] == ["Kia", "Lexus", "Toyota"]  # список бота, без BMW
     assert client.post("/api/v1/me/filters", json={}).status_code == 403
     # Предпросмотр открыт вошедшему без подписки — повод её оформить.
     assert client.post("/api/v1/me/filters/preview", json={}).status_code == 200
