@@ -14,6 +14,7 @@ from app.api.catalog import router as catalog_router
 from app.api.dashboard import router as dashboard_router
 from app.api.market import router as market_router
 from app.api.me_filters import router as me_filters_router
+from app.api.partner_docs import router as partner_docs_router
 from app.api.payments import router as payments_router
 from app.api.public.estimate import router as public_estimate_router
 from app.api.public.feed import router as public_feed_router
@@ -102,6 +103,8 @@ app.include_router(public_estimate_router)
 # Вход на сайт через бота и роль посетителя (guest/user/subscriber/admin).
 app.include_router(auth_router)
 app.include_router(me_filters_router)
+# Swagger для внешнего разработчика: только открытые ручки, под логином.
+app.include_router(partner_docs_router)
 
 # Админ-панель подключается, только когда задан её публичный адрес. Выключатель
 # по умолчанию: на стенде без ADMIN_PANEL_URL ручек admin/* просто не существует

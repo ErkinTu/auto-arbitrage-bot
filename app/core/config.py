@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # --- Внешний API: лимиты и защита (`core/ratelimit.py`, `core/http.py`) ----
     # Swagger/OpenAPI. На проде выключать: схема — карта всех ручек для чужих.
     api_docs_enabled: bool = True
+    # Swagger для внешнего разработчика на домене сайта (`api/partner_docs.py`):
+    # `/api/v1/docs`, только открытые наружу ручки, HTTP Basic. Формат —
+    # `логин:пароль,логин2:пароль2`. Пусто — ручки нет (404). Убрать человека —
+    # удалить его пару и перезапустить api.
+    partner_docs_users: str = ""
     # Потолок тела запроса. Самый большой легитимный — webhook Finik (~1-2 КБ).
     api_max_body_bytes: int = 65_536
     # Выключатель лимитов целиком (аварийный, не для прода).

@@ -68,12 +68,14 @@
 # `payments/*` остаются на своих доменах, /docs и /openapi.json сюда не попадают
 # (API_DOCS_ENABLED=false). Лимиты частоты держит само приложение
 # (core/ratelimit.py) по реальному IP — Caddy подставляет его в X-Forwarded-For.
+# `/api/v1/docs` — Swagger для внешнего разработчика (логин в PARTNER_DOCS_USERS,
+# пусто = 404); схема в нём — ровно этот белый список, без admin/payments.
 # Пока сайт «тихий» (не анонсирован): noindex в заголовке и robots.txt с запретом.
 # При открытии — убрать оба (см. docs/planning/SITE_TODO.md).
 {$SITE_DOMAIN} {
 	@public_api {
 		method GET HEAD OPTIONS
-		path /api/v1/public/* /api/v1/catalog/* /api/v1/dashboard/* /api/v1/market/* /api/v1/estimate /api/v1/price-trend
+		path /api/v1/public/* /api/v1/catalog/* /api/v1/dashboard/* /api/v1/market/* /api/v1/estimate /api/v1/price-trend /api/v1/docs /api/v1/docs/*
 	}
 	# Вход и личное (фильтры уведомлений в профиле): кука сессии, любые методы.
 	@auth_api path /api/v1/auth/* /api/v1/me/*
