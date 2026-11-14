@@ -27,7 +27,7 @@ from typing import Literal
 from sqlalchemy import Integer, Select, and_, cast, exists, func, or_, select, true, tuple_
 from sqlalchemy.orm import Session, aliased
 
-from app.bot.matching import MarketEstimate
+from app.bot.matching import MarketEstimate, is_complete_listing
 from app.core.config import get_settings
 from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, Source
 from app.services.exchange import get_latest_usd_rate
@@ -911,7 +911,7 @@ def similar_listings(session: Session, listing_id: int, *, limit: int = 8) -> li
     return _enrich(session, rows, now)
 
 
-def _best_candidate(item: dict, now: datetime) -> best_picks.Candidate | None:
+def _best_candidate(item: dict, listing: Listing, now: datetime) -> best_picks.Candidate | None:
     market = item.get("market")
     if not market or item["is_foreign"] or market["diff_percent"] >= 0:
         return None
@@ -924,10 +924,12 @@ def _best_candidate(item: dict, now: datetime) -> best_picks.Candidate | None:
         photos=item["photo_count"],
         discount=-float(market["diff_percent"]),
         samples=int(market["samples"]),
-        has_mileage=item["mileage_km"] is not None,
+        # Пробег — правдоподобный, как у витрины бота (одно правило на оба экрана).
+        has_mileage=is_complete_listing(listing, now),
         age_hours=max((now - first_seen).total_seconds() / 3600, 0.0),
         model_key=(item["brand"], item["model"]),
         dup_key=(item["brand"], item["model"], item["year"], item["mileage_km"], item["price_usd"]),
+        has_date=listing.source_created_at is not None,
     )
 
 
@@ -947,7 +949,8 @@ def best_now(session: Session, *, limit: int = 12) -> list[dict]:
             Listing.first_seen_at >= now - timedelta(hours=hours)
         )
         rows = list(session.scalars(_order(base, "fresh", None).limit(_DEAL_SCAN_MAX)).all())
-        cands = [c for c in (_best_candidate(i, now) for i in _enrich(session, rows, now)) if c]
+        by_id = {row.id: row for row in rows}
+        cands = [c for c in (_best_candidate(i, by_id[i["id"]], now) for i in _enrich(session, rows, now)) if c]
         result = best_picks.select(cands, size=limit, now_year=now.year, cfg=cfg)
         if len(result) >= limit:
             break

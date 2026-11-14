@@ -659,12 +659,16 @@ def test_site_best_filters_orders_and_does_not_pad(client) -> None:
     отдаём сколько есть (без добивки мусором). Правила — services/best_picks.py."""
     http, Factory, ids = client
     photos = [f"https://cdn.example/{i}.jpg" for i in range(5)]
+    dated = dict(image_urls=photos, source_created_at=_now() - timedelta(hours=1))
     with Factory() as s:
         _stat(s, ids, avg="25000", samples=60)
-        good = _listing(s, ids, current_price_usd=Decimal("18250"), image_urls=photos)  # −27 %
-        _listing(s, ids, current_price_usd=Decimal("10500"), image_urls=photos)  # −58 % — подозрительно
-        _listing(s, ids, current_price_usd=Decimal("18500"), image_urls=photos[:2])  # 2 фото
-        _listing(s, ids, current_price_usd=Decimal("24500"), image_urls=photos)  # скидка 2 % — не «лучшее»
+        good = _listing(s, ids, current_price_usd=Decimal("18250"), **dated)  # −27 %
+        _listing(s, ids, current_price_usd=Decimal("10500"), **dated)  # −58 % — подозрительно
+        _listing(s, ids, current_price_usd=Decimal("18500"), **{**dated, "image_urls": photos[:2]})  # 2 фото
+        _listing(s, ids, current_price_usd=Decimal("24500"), **dated)  # скидка 2 % — не «лучшее»
+        # Неполные данные (решение владельца 14.11.2026): без пробега, без даты публикации.
+        _listing(s, ids, current_price_usd=Decimal("18300"), mileage_km=None, **dated)
+        _listing(s, ids, current_price_usd=Decimal("18350"), image_urls=photos)
     body = http.get("/api/v1/public/best").json()
     assert [i["id"] for i in body] == [good.id]
 

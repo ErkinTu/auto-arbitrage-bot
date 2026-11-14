@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 
 from app.services import best_picks as bp
 from app.services.best_picks import BestConfig, Candidate
@@ -50,6 +48,18 @@ def test_min_photos_and_market_base() -> None:
     thin = _c(samples=17, age=60, discount=27)
     assert [p.tier for p in bp.rank([thin], now_year=NOW_YEAR, cfg=CFG)] == [3]
     assert bp.rank([_c(samples=12, age=60)], now_year=NOW_YEAR, cfg=CFG) == []
+
+
+def test_incomplete_data_is_never_best() -> None:
+    """Решение владельца 14.11.2026: без пробега или даты публикации — не «находка»,
+    как бы ни была хороша скидка и сколько бы ни было фото."""
+    perfect = dict(year=2023, photos=12, samples=300, discount=27)
+    assert bp.rank([_c(**perfect, mileage=False)], now_year=NOW_YEAR, cfg=CFG) == []
+    no_date = _c(**perfect)
+    no_date = Candidate(**{**{f: getattr(no_date, f) for f in no_date.__slots__}, "has_date": False})
+    assert bp.rank([no_date], now_year=NOW_YEAR, cfg=CFG) == []
+    ok = _c(**perfect)
+    assert _ids(bp.rank([ok], now_year=NOW_YEAR, cfg=CFG)) == [ok.ref]
 
 
 def test_old_cars_need_a_good_score_and_pre_2005_never() -> None:

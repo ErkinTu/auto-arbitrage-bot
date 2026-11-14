@@ -287,6 +287,7 @@ def compute_showcase(
                     age_hours=max((now - created).total_seconds() / 3600, 0.0) if created else float(hours),
                     model_key=(listing.brand_id, listing.car_model_id),
                     dup_key=_duplicate_key(listing),
+                    has_date=created is not None,
                 )
             )
         picks = best_picks.select(cands, size=size, now_year=now.year, cfg=cfg)
