@@ -48,3 +48,16 @@ def lenient_best(monkeypatch):
         lambda: best_picks.BestConfig(min_photos=1, min_year=1950, old_min_score=0.0, new_slots=5, max_per_model=99),
     )
     monkeypatch.setattr(best_picks, "TIERS", (best_picks.Tier(24, 0.0, 100.0, 1),))
+
+
+@pytest.fixture(autouse=True)
+def _no_photo_download(monkeypatch):
+    """Тесты не ходят в сеть за фото: «скачать самим» по умолчанию не удаётся
+    (ступень пропускается), отдельные тесты подменяют `fetch_photo`."""
+    from app.bot import photo_upload
+
+    async def _none(url):
+        return None
+
+    monkeypatch.setattr(photo_upload, "fetch_photo", _none)
+    yield

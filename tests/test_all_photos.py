@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
@@ -831,3 +832,70 @@ def test_card_buttons_two_floors() -> None:
     assert layout(hidden) == [["↩️ Вернуть Toyota Camry", "Открыть ↗"], ["📷 Все фото"]]
     assert has_photos_button(hidden) and not has_photos_button(card_kb(42, URL))
     assert layout(hidden_kb("BMW", 7, 42, None)) == [["↩️ Вернуть BMW"]]
+
+
+# --- лесенка отправки альбома (18.11.2026) -------------------------------------
+
+
+class _LadderMessage(_AlbumMessage):
+    """Альбом, которому Telegram отказывает первые `fail` отправок."""
+
+    def __init__(self, fail: int = 0, error: str = "Bad Request: failed to get HTTP URL content") -> None:
+        super().__init__()
+        self.fail = fail
+        self.error = error
+        self.attempts: list[list] = []
+
+    async def answer_media_group(self, media, reply_to_message_id=None, **kwargs):
+        self.attempts.append([item.media for item in media])
+        if self.fail:
+            self.fail -= 1
+            raise TelegramBadRequest(method=None, message=self.error)
+        return await super().answer_media_group(media, reply_to_message_id=reply_to_message_id, **kwargs)
+
+
+ALBUM = ["https://img5.lalafo.com/i/a.jpeg", "https://img5.lalafo.com/i/b.jpeg"]
+
+
+def _stub_fetch_many(monkeypatch, files: dict) -> None:
+    from app.bot import photo_upload
+
+    async def fake(urls):
+        return {url: files[url] for url in urls if url in files}
+
+    monkeypatch.setattr(photo_upload, "fetch_many", fake)
+
+
+def test_album_sends_downloaded_files_first(monkeypatch) -> None:
+    from aiogram.types import BufferedInputFile
+
+    files = {url: BufferedInputFile(b"x", filename="p.jpg") for url in ALBUM}
+    _stub_fetch_many(monkeypatch, files)
+    message = _LadderMessage()
+    asyncio.run(handlers._send_album(message, ALBUM, reply_to=1))
+    assert message.attempts == [[files[ALBUM[0]], files[ALBUM[1]]]]
+
+
+def test_album_falls_back_to_cache_busted_urls() -> None:
+    """Скачать не вышло, ссылки Telegram запомнил как битые: третья ступень с ?cb=."""
+    message = _LadderMessage(fail=1)
+    asyncio.run(handlers._send_album(message, ALBUM, reply_to=1))
+    assert message.attempts[0] == ALBUM
+    assert all(
+        sent.startswith(url + "?cb=") for sent, url in zip(message.attempts[1], ALBUM)
+    )
+
+
+def test_album_gives_up_with_error_after_all_steps() -> None:
+    """Все ступени отвергнуты — ошибка уходит наверх («не удалось загрузить»)."""
+    message = _LadderMessage(fail=9)
+    with pytest.raises(TelegramBadRequest):
+        asyncio.run(handlers._send_album(message, ALBUM, reply_to=1))
+    assert len(message.attempts) == 2  # ссылки, ссылки с ?cb=
+
+
+def test_album_does_not_retry_foreign_errors() -> None:
+    message = _LadderMessage(fail=9, error="Bad Request: message is too long")
+    with pytest.raises(TelegramBadRequest):
+        asyncio.run(handlers._send_album(message, ALBUM, reply_to=1))
+    assert len(message.attempts) == 1
