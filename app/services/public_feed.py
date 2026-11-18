@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app.bot.matching import MarketEstimate, is_complete_listing
 from app.core.config import get_settings
-from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, Source
+from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, ParserRun, Source
 from app.services.exchange import get_latest_usd_rate
 from app.services import best_picks
 from app.services.images import real_photo
@@ -37,7 +37,7 @@ from app.services.normalizer import MAX_PLAUSIBLE_PRICE_USD, MIN_PLAUSIBLE_PRICE
 from app.services.regions import REGION_LABELS, is_foreign, region_matches, region_of
 from app.services.sources import listing_public_url
 from app.services.specs import group_labels, spec_group
-from app.services.stats import mileage_bucket
+from app.services.stats import mileage_bucket, plausible_mileage
 
 Sort = Literal["fresh", "price_asc", "price_desc", "similar"]
 
@@ -157,6 +157,9 @@ def _feed_conditions() -> list:
         # (`price_implausibly_low/high` в нормализаторе).
         Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
         Listing.current_price_usd <= MAX_PLAUSIBLE_PRICE_USD,
+        # Цена — выброс своей когорты (> 3× / < ⅓ медианы «модель+год»; ставит
+        # пересчёт статистики): Spark за $72 тыс. — опечатка, а не машина.
+        Listing.price_suspect.is_not(True),
     ]
 
 
@@ -339,10 +342,13 @@ def batch_market_estimates(
         return result
     by_bucket, by_triple = _latest_stat_rows(session, triples, since=latest - timedelta(days=7))
 
+    # Неправдоподобный пробег — как неизвестный (то же правило, что у бота).
+    mileage = {item.id: plausible_mileage(item.mileage_km, item.year) for item in eligible}
+
     def group_of(item: Listing) -> list:
         triple = (item.brand_id, item.car_model_id, item.year)
-        if item.mileage_km is not None:
-            return by_bucket.get((*triple, mileage_bucket(item.mileage_km)), [])
+        if mileage[item.id] is not None:
+            return by_bucket.get((*triple, mileage_bucket(mileage[item.id])), [])
         return by_triple.get(triple, [])
 
     # У когорты нет строк в окне — её последняя дата старше. Второй проход по
@@ -357,7 +363,7 @@ def batch_market_estimates(
     cache: dict[tuple, MarketEstimate | None] = {}
     for item in eligible:
         triple = (item.brand_id, item.car_model_id, item.year)
-        key = (*triple, mileage_bucket(item.mileage_km)) if item.mileage_km is not None else triple
+        key = (*triple, mileage_bucket(mileage[item.id])) if mileage[item.id] is not None else triple
         if key not in cache:
             group = group_of(item)
             total = sum(row.sample_count for row in group)
@@ -387,6 +393,34 @@ def _verdict(diff_percent: float) -> str:
     return "market"
 
 
+# Корзины пробега статистики (`stats.mileage_bucket`) → подпись «сравнили с
+# пробегом …». Верхняя корзина открыта: машину с 493 тыс. км она сравнивает с
+# «200 тыс. и больше», где основная масса — 200–300 тыс. Выше этой границы
+# честно говорим «пробег не учтён» и красим бейдж серым (решение 18.11.2026).
+_BUCKET_LABELS = {
+    "0-50k": "до 50 тыс. км",
+    "50-100k": "50–100 тыс. км",
+    "100-150k": "100–150 тыс. км",
+    "150-200k": "150–200 тыс. км",
+    "200k+": "от 200 тыс. км",
+}
+OPEN_BUCKET_MAX_KM = 300_000
+
+
+def mileage_basis(mileage_km: int | None, year: int | None = None) -> tuple[bool, str | None]:
+    """(учтён ли пробег в оценке, с каким пробегом сравнили).
+
+    Пробег не указан или неправдоподобен («270 км» у машины 2004 г.) — оценка
+    по всем корзинам модели+года: не учтён, подписи нет. Пробег выше
+    `OPEN_BUCKET_MAX_KM` — сравнили «от 200 тыс.», это не поправка на пробег,
+    а её видимость: тоже не учтён."""
+    mileage_km = plausible_mileage(mileage_km, year)
+    if mileage_km is None:
+        return False, None
+    bucket = mileage_bucket(mileage_km)
+    return (bucket != "200k+" or mileage_km <= OPEN_BUCKET_MAX_KM), _BUCKET_LABELS[bucket]
+
+
 def _market(listing: Listing, estimate) -> dict | None:
     if estimate is None or not estimate.avg_usd:
         return None
@@ -403,6 +437,8 @@ def _market(listing: Listing, estimate) -> dict | None:
         "diff_usd": round(diff),
         "diff_percent": round(percent, 1),
         "verdict": _verdict(percent),
+        "mileage_accounted": mileage_basis(listing.mileage_km, listing.year)[0],
+        "mileage_range": mileage_basis(listing.mileage_km, listing.year)[1],
     }
 
 
@@ -695,21 +731,31 @@ def feed_page(
     return {"items": items, "next_cursor": next_cursor}
 
 
+def data_updated_at(session: Session) -> datetime | None:
+    """Когда последний раз успешно закончился обход любого источника.
+
+    Сайт пишет «обновлено N мин назад» вместо обещания «каждые 10 минут»
+    (решение 18.11.2026: не обещать того, чего нет). Ночью бот спит — честно
+    растёт и это число."""
+    return session.scalar(select(func.max(ParserRun.finished_at)).where(ParserRun.status == "completed"))
+
+
 def feed_count(session: Session, flt: FeedFilter) -> dict:
-    """«Показать N авто». С фильтром по оценке — оценка по просмотренной выборке."""
+    """«Показать N объявлений». С фильтром по оценке — оценка по просмотренной выборке."""
     now = _now()
+    updated_at = data_updated_at(session)
     base = _base_query(flt, now=now)
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
     if flt.deal == "any" or total == 0:
-        return {"count": total, "approximate": False}
+        return {"count": total, "approximate": False, "updated_at": updated_at}
     rows = list(
         session.scalars(_order(base, "fresh", None).limit(min(total, _DEAL_COUNT_SAMPLE))).all()
     )
     matched = sum(1 for item in _enrich(session, rows, now) if _deal_ok(item, flt.deal))
     if total <= _DEAL_COUNT_SAMPLE:
-        return {"count": matched, "approximate": False}
+        return {"count": matched, "approximate": False, "updated_at": updated_at}
     # Экстраполяция по свежей выборке: честно помечаем как приблизительное.
-    return {"count": round(matched / len(rows) * total), "approximate": True}
+    return {"count": round(matched / len(rows) * total), "approximate": True, "updated_at": updated_at}
 
 
 # --- значения для чипов фильтра ---------------------------------------------

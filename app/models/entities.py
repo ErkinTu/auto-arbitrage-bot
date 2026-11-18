@@ -173,6 +173,10 @@ class Listing(Base, TimestampMixin):
     # API, стирается при деактивации (services/phones.py). lalafo — из ленты
     # (`mobile`, если не `hide_phone`), mashina — со страницы по нажатию.
     seller_phone: Mapped[str | None] = mapped_column(String(20))
+    # Цена — выброс своей когорты (> K× или < 1/K медианы «модель+год», K =
+    # OUTLIER_PRICE_MEDIAN_MULTIPLE). Ставит/снимает пересчёт статистики; NULL —
+    # не проверялось (мелкая когорта, зарубежное, давно не видели). Лента прячет True.
+    price_suspect: Mapped[bool | None] = mapped_column(Boolean)
     # Описание продавца для сайта (services/descriptions.py): по запросу со
     # страницы авто, телефоны замаскированы; вне payload_hash.
     description: Mapped[str | None] = mapped_column(Text)

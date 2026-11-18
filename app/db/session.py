@@ -130,6 +130,9 @@ def _upgrade_postgres_schema() -> None:
         # Видео продавца и живая проверка «не снято ли» (12.11.2026, services/liveness.py).
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS video_id VARCHAR(16)",
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ",
+        # Цена вне [медиана/K, медиана×K] своей когорты «модель+год» — ставит
+        # пересчёт статистики (stats.py, 18.11.2026); лента сайта такие прячет.
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS price_suspect BOOLEAN",
         # Плавное появление новых в ленте сайта (11.11.2026, sync._schedule_feed_reveal).
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS feed_at TIMESTAMPTZ",
         # Список устройств в профиле сайта (11.11.2026).
