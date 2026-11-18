@@ -205,14 +205,8 @@ def _apply_listing(
         _save_raw_payload(session, source.id, listing, run.id, item)
         return "new", listing
 
-    # У конвертированного по курсу USD (usd_converted) колебание — это смена
-    # курса НБКР, а не цены продавцом: сравниваем только оригинальную цену.
-    usd_is_derived = "usd_converted" in item.quality_flags
-    price_changed = (
-        listing.current_price_amount != item.price_amount
-        or listing.current_price_currency != item.price_currency
-        or (not usd_is_derived and listing.current_price_usd != item.price_usd)
-    )
+    price_changed = is_real_price_change(listing, item)
+    old_price_usd = listing.current_price_usd
     was_active = listing.is_active
     changed = listing.payload_hash != item.payload_hash
 
@@ -226,7 +220,15 @@ def _apply_listing(
 
     if price_changed:
         _append_price_history(session, listing, item, "price_changed")
-        _append_status_history(session, listing, "price_changed", old_status, item.status)
+        _append_status_history(
+            session,
+            listing,
+            "price_changed",
+            old_status,
+            item.status,
+            # Направление нужно боту и предпросмотру фильтра: пуш — только о снижении.
+            details=price_change_details(old_price_usd, item.price_usd),
+        )
         _save_raw_payload(session, source.id, listing, run.id, item)
         return "price_changed", listing
 
@@ -241,6 +243,46 @@ def _apply_listing(
         return "updated", listing
 
     return "unchanged", listing
+
+
+def is_real_price_change(listing: Listing, item: NormalizedListing) -> bool:
+    """Поменял ли цену продавец, а не курс (разбор 16.11.2026, TODO § «Ложная смена цены»).
+
+    У объявления две цены — в долларах и в сомах; одна из них задана продавцом,
+    другую источник пересчитывает по своему курсу. mashina при этом помечает
+    «исходной» сомовую сумму и у долларовых объявлений, а полный обход отдаёт её
+    пересчитанной заново: $33 800 неизменны, а сомы гуляют 2 955 810 ↔ 2 955 769
+    — и раньше это давало «смену цены» почти всем объявлениям каждую субботу.
+    lalafo пересчитывает сомы в доллары сами мы (`usd_converted`) — то же самое.
+
+    Правило: курс двигает только пересчитанную цену, продавец — обе. Поэтому
+    смена — когда изменились И доллары, И сомы. С обеих сторон известна одна из
+    двух — по ней. Цены не было вовсе и она появилась (или пропала) — смена.
+    """
+    old_usd, new_usd = listing.current_price_usd, item.price_usd
+    old_kgs, new_kgs = listing.current_price_kgs, item.price_kgs
+    if old_kgs is None and new_kgs is None:  # сомов нет — сумма в валюте продавца
+        old_kgs, new_kgs = listing.current_price_amount, item.price_amount
+    usd_known = old_usd is not None and new_usd is not None
+    kgs_known = old_kgs is not None and new_kgs is not None
+    if usd_known and kgs_known:
+        return old_usd != new_usd and old_kgs != new_kgs
+    if usd_known:
+        return old_usd != new_usd
+    if kgs_known:
+        return old_kgs != new_kgs
+    return (old_usd, old_kgs) != (new_usd, new_kgs)  # цены не было — появилась (или пропала)
+
+
+def price_change_details(old_usd, new_usd) -> dict | None:
+    """`{"direction": "down"|"up", "old_usd": …, "new_usd": …}` для истории статусов."""
+    if old_usd is None or new_usd is None or old_usd == new_usd:
+        return None
+    return {
+        "direction": "down" if new_usd < old_usd else "up",
+        "old_usd": float(old_usd),
+        "new_usd": float(new_usd),
+    }
 
 
 def _deactivate_missing(

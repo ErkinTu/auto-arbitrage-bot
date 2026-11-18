@@ -348,7 +348,8 @@ def _listing(Factory, ext: str, *, price: int, observed: datetime, event: str = 
         s.add(listing)
         s.flush()
         s.add(ListingStatusHistory(listing_id=listing.id, event_type=event, old_status=None,
-                                   new_status="active", observed_at=observed))
+                                   new_status="active", observed_at=observed,
+                                   details={"direction": "down"} if event == "price_changed" else None))
         s.commit()
         return listing.id
 

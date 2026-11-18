@@ -620,6 +620,7 @@ def test_new_filter_skips_backlog_published_before_it(sessions) -> None:
                 old_status="active",
                 new_status="active",
                 observed_at=_now(),
+                details={"direction": "down"},
             )
         )
         s.commit()

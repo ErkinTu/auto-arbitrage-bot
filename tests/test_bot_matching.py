@@ -100,6 +100,7 @@ def _add_listing(
             old_status=None,
             new_status="active",
             observed_at=observed_at or _now(),
+            details={"direction": "down", "old_usd": 21000.0, "new_usd": 20000.0} if event_type == "price_changed" else None,
         )
     )
     session.commit()
@@ -1032,3 +1033,18 @@ def test_preview_for_full_tier_shows_everything() -> None:
         session, user_filter.id, limit=10, min_samples=5, delayed_lag_minutes=60
     )
     assert len(preview) == 2
+
+
+def test_price_rise_is_not_a_candidate() -> None:
+    """Кандидат — «подешевевшее»: рост цены пуша не даёт (разбор 16.11.2026)."""
+    from app.models import ListingStatusHistory as H
+
+    session = _session()
+    since = _now() - timedelta(hours=1)
+    dropped = _add_listing(session, external_id="drop", event_type="price_changed")
+    risen = _add_listing(session, external_id="rise", event_type="new", source_created_at=_now() - timedelta(days=5))
+    session.add(H(listing_id=risen.id, event_type="price_changed", old_status=None, new_status="active",
+                  observed_at=_now(), details={"direction": "up", "old_usd": 20000.0, "new_usd": 21000.0}))
+    session.commit()
+    ids = {item.id for item in find_new_listings(session, since)}
+    assert dropped.id in ids and risen.id not in ids

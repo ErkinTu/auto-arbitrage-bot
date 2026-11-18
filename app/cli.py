@@ -496,6 +496,23 @@ def command_phone_hash_backfill(args: argparse.Namespace) -> None:
     print(f"признак номера проставлен: {done}")
 
 
+def command_price_history_cleanup(args: argparse.Namespace) -> None:
+    """Ложные «смены цены» (курс, а не продавец) из истории цен — разбор 16.11.2026.
+    Без `--apply` — только счёт. Запускать синхронно с `</dev/null`."""
+    from app.services.price_history_cleanup import delete_rows, find_false_changes
+
+    with SessionLocal() as session:
+        ids, report = find_false_changes(session)
+        print(
+            f"объявлений {report.listings}, строк истории {report.rows}, "
+            f"ложных «смен цены» {report.false_changes}"
+        )
+        if args.apply and ids:
+            print(f"удалено {delete_rows(session, ids)}")
+        elif ids:
+            print("сухой прогон: ничего не удалено (добавьте --apply)")
+
+
 def command_fuel_backfill(args: argparse.Namespace) -> None:
     """Группа топлива для старых объявлений (план 01.11.2026, п. Е) — один раз
     после выката. lalafo — из `fuel_type` (секунды), mashina — полная разметка
@@ -736,6 +753,13 @@ def parser() -> argparse.ArgumentParser:
     )
     phone_hash.add_argument("--batch", type=int, default=2000)
     phone_hash.set_defaults(func=command_phone_hash_backfill)
+
+    cleanup = sub.add_parser(
+        "price-history-cleanup",
+        help="Delete false price_changed rows (exchange-rate noise) from listing_price_history; dry run without --apply",
+    )
+    cleanup.add_argument("--apply", action="store_true")
+    cleanup.set_defaults(func=command_price_history_cleanup)
 
     fuel = sub.add_parser(
         "fuel-backfill",
