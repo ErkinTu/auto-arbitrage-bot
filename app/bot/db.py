@@ -66,6 +66,7 @@ from app.services.events import (
     EVENT_PAYMENT_CREATED,
     EVENT_RESUMED,
     EVENT_START,
+    EVENT_START_LINK,
     log_event,
 )
 from app.services.filter_brands import pack_brand_ids, unpack_brand_ids
@@ -78,6 +79,7 @@ from app.services.referral import (
     parse_deep_link,
     referral_stats,
 )
+from app.services.start_source import parse_source
 from app.services.subscription import is_subscription_active
 from app.services.trial import is_trial_active, start_trial, trial_used
 
@@ -517,8 +519,13 @@ def _handle_start_once(
             )
             is None
         )
+        source = parse_source(deep_link_payload)
         if first_start:
-            log_event(session, user.id, EVENT_START)
+            log_event(session, user.id, EVENT_START, {"source": source} if source else None)
+            if source and user.start_source is None:
+                user.start_source = source
+        if source:
+            log_event(session, user.id, EVENT_START_LINK, {"source": source, "first": first_start})
 
         referrer_attached = False
         code = parse_deep_link(deep_link_payload)

@@ -392,6 +392,9 @@ class BotUser(Base, TimestampMixin):
     # REFERRAL_FRIENDS_PER_BONUS засчитанных друзей). Счётчик, а не флаг:
     # начисление идемпотентно — сравниваем с числом заслуженных бонусов.
     referral_bonuses_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Метка первого касания из t.me/<бот>?start=<метка> (`hrd`, `ig`, `site_345153`…);
+    # ставится один раз, на первом /start. Каждый переход — событие `start_link`.
+    start_source: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
 class AdminLoginToken(Base):
