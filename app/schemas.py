@@ -509,6 +509,8 @@ class PublicDescription(BaseModel):
 
 class PublicListing(BaseModel):
     id: int
+    # Публичный id для адресов сайта (`/car/Q041bg`, Sqids); null — выключено (PUBLIC_ID_ALPHABET пуст).
+    public_id: str | None = None
     brand: str
     model: str
     year: int | None

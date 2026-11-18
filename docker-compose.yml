@@ -120,6 +120,8 @@ services:
       NUXT_API_BASE_SERVER: http://api:8000/api/v1
       NUXT_PUBLIC_SITE_URL: https://${SITE_DOMAIN:-localhost}
       NUXT_PUBLIC_BOT_URL: ${SITE_BOT_URL:-}
+      # Подпись серверных запросов сайта к api (ведро лимита для кэшированного рендера).
+      NUXT_API_SSR_KEY: ${SSR_SHARED_KEY:-}
     mem_limit: 512m
 
   # Публичный HTTPS-вход для webhook/redirect Finik. Пробрасывает наружу

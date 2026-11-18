@@ -120,10 +120,7 @@ def find_new_listings(
     )
     price_changed_ids = (
         select(ListingStatusHistory.listing_id)
-        .where(
-            ListingStatusHistory.event_type == "price_changed",
-            ListingStatusHistory.observed_at >= since,
-        )
+        .where(price_drop_condition(), ListingStatusHistory.observed_at >= since)
         .distinct()
     )
     published_after = utcnow() - timedelta(hours=max_age_hours)
@@ -143,6 +140,18 @@ def find_new_listings(
                 ),
             )
         ).all()
+    )
+
+
+def price_drop_condition():
+    """Событие «цена снижена»: `price_changed` с `details.direction = down`.
+
+    Рост цены — не повод для пуша (кандидаты — «подешевевшие», разбор 16.11.2026).
+    Направление пишет `sync.price_change_details`; у событий до 18.11.2026 его
+    нет — они в окно кандидатов уже не попадают."""
+    return and_(
+        ListingStatusHistory.event_type == "price_changed",
+        ListingStatusHistory.details["direction"].as_string() == "down",
     )
 
 

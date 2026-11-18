@@ -25,10 +25,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.bot.matching import filter_matches, has_real_photo, is_plausible_discount, passes_below_market
+from app.bot.matching import filter_matches, has_real_photo, is_plausible_discount, passes_below_market, price_drop_condition
 from app.core.config import get_settings
 from app.models import BotUser, Brand, CarModel, Listing, ListingStatusHistory, UserFilter
 from app.services.blocklist import load_block_sets
@@ -209,7 +209,7 @@ def _candidates(session: Session, spec: PushFilterSpec, since: datetime, now: da
     H = ListingStatusHistory
     events = (
         select(H.listing_id, H.event_type, func.min(H.observed_at).label("at"))
-        .where(H.event_type.in_(("new", "price_changed")), H.observed_at >= since, H.observed_at <= now)
+        .where(or_(H.event_type == "new", price_drop_condition()), H.observed_at >= since, H.observed_at <= now)
         .group_by(H.listing_id, H.event_type)
         .subquery()
     )

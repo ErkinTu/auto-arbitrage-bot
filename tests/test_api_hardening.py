@@ -126,6 +126,27 @@ def test_public_route_gets_429_after_burst(client: TestClient, settings) -> None
     assert refused.headers["x-request-id"]
 
 
+def test_ssr_key_gets_own_bucket_only_without_visitor_ip(client: TestClient, settings) -> None:
+    """Кэшированный рендер сайта (нет IP посетителя) — своё ведро по X-SSR-Key;
+    с X-Forwarded-For или с неверным ключом — обычный лимит по IP."""
+    settings(rate_limit_public_burst=1, rate_limit_public_per_minute=1, ssr_shared_key="s3cret",
+             rate_limit_ssr_burst=5, rate_limit_ssr_per_minute=60)
+    ssr = {"X-SSR-Key": "s3cret"}
+    assert [client.get("/api/v1/catalog/brands", headers=ssr).status_code for _ in range(4)] == [200] * 4
+    # Чужой ключ — по IP: первый проходит, второй упирается в burst=1.
+    bad = {"X-SSR-Key": "nope"}
+    assert [client.get("/api/v1/catalog/brands", headers=bad).status_code for _ in range(2)] == [200, 429]
+    # С IP посетителя ключ ведро не открывает.
+    with_ip = {"X-SSR-Key": "s3cret", "X-Forwarded-For": "203.0.113.7"}
+    assert client.get("/api/v1/catalog/brands", headers=with_ip).status_code == 429
+
+
+def test_ssr_bucket_off_without_key(client: TestClient, settings) -> None:
+    settings(rate_limit_public_burst=1, rate_limit_public_per_minute=1, ssr_shared_key="")
+    ssr = {"X-SSR-Key": ""}
+    assert [client.get("/api/v1/catalog/brands", headers=ssr).status_code for _ in range(2)] == [200, 429]
+
+
 def test_health_and_webhook_are_never_rate_limited(client: TestClient, settings) -> None:
     settings(rate_limit_public_burst=1, rate_limit_public_per_minute=1)
     for _ in range(5):

@@ -31,7 +31,7 @@ from app.bot.matching import MarketEstimate, is_complete_listing
 from app.core.config import get_settings
 from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, ParserRun, Source
 from app.services.exchange import get_latest_usd_rate
-from app.services import best_picks
+from app.services import best_picks, public_ids
 from app.services.images import real_photo
 from app.services.normalizer import MAX_PLAUSIBLE_PRICE_USD, MIN_PLAUSIBLE_PRICE_USD
 from app.services.regions import REGION_LABELS, is_foreign, region_matches, region_of
@@ -537,6 +537,8 @@ def serialize(
     gallery = [url for url in (listing.image_urls or []) if real_photo(url)]
     return {
         "id": listing.id,
+        # Для адресов сайта: /car/<public_id> (Sqids, services/public_ids.py); null — выключено.
+        "public_id": public_ids.encode(listing.id),
         "brand": brand,
         "model": model,
         "year": listing.year,
