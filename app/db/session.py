@@ -145,6 +145,10 @@ def _upgrade_postgres_schema() -> None:
         # Телефон продавца для «WhatsApp» под альбомом (01.11.2026); nullable,
         # без бэкфилла — lalafo заполнит лента, mashina — нажатия.
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_phone VARCHAR(20)",
+        # Признак номера (HMAC, 18.11.2026, services/phones.py): объявления одного
+        # продавца, в том числе снятые — не стирается.
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_phone_hash VARCHAR(64)",
+        "CREATE INDEX IF NOT EXISTS ix_listings_seller_phone_hash ON listings (seller_phone_hash)",
         # Лента сайта (09.11.2026): «свежие» с курсором по (first_seen_at, id),
         # только активные — частичный индекс в разы меньше полного.
         "CREATE INDEX IF NOT EXISTS ix_listing_feed_fresh ON listings (first_seen_at DESC, id DESC) WHERE is_active",

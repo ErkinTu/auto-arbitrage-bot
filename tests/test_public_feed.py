@@ -132,7 +132,7 @@ def client(db):
 
 def test_no_personal_data_in_public_schema() -> None:
     fields = set(PublicListingDetail.model_fields)
-    assert "seller_phone" not in fields
+    assert "seller_phone" not in fields and "seller_phone_hash" not in fields
     assert not {"raw_payload", "title", "description", "quality_flags"} & fields
 
 
