@@ -75,6 +75,9 @@ def _upgrade_postgres_schema() -> None:
         "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS referral_bonuses_granted INTEGER NOT NULL DEFAULT 0",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_bot_users_invite_code ON bot_users (invite_code)",
         "CREATE INDEX IF NOT EXISTS ix_bot_users_referrer_id ON bot_users (referrer_id)",
+        # Метка источника первого /start (18.11.2026, services/start_source.py).
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS start_source VARCHAR(64)",
+        "CREATE INDEX IF NOT EXISTS ix_bot_users_start_source ON bot_users (start_source)",
         # Чёрный список — новая таблица, её создаёт create_all; ALTER не нужен.
         # Админ-панель: is_superuser — колонка на существующей bot_users, поэтому
         # ALTER обязателен. Значения не задаём: DEFAULT FALSE — единственно
