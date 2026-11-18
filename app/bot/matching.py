@@ -34,7 +34,7 @@ from app.services.filter_presets import load_brand_groups, min_year_for_age
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.plans import TIER_DELAYED, effective_tier
 from app.services.regions import is_foreign, region_matches
-from app.services.stats import mileage_bucket
+from app.services.stats import mileage_bucket, plausible_mileage
 from app.services.sync import utcnow
 from app.services.vehicle_summary import _build_source_url as build_source_url
 
@@ -249,11 +249,10 @@ def load_model_names(session: Session) -> dict[int, str]:
     return {row.id: row.name for row in session.execute(select(CarModel.id, CarModel.name))}
 
 
-# Пробег меньше этого у подержанной машины — почти всегда заглушка («100»,
-# «400» км у машины 1998 года), а не реальное значение. У новых (не старше
-# года) малый пробег законен: «2025, 27 км» — машина из салона.
-MIN_PLAUSIBLE_MILEAGE_KM = 1000
-MAX_PLAUSIBLE_MILEAGE_KM = 1_000_000
+# Пробег меньше MIN_PLAUSIBLE_MILEAGE_KM у подержанной машины — почти всегда
+# заглушка («100», «400» км у машины 1998 года), а не реальное значение. У новых
+# (не старше года) малый пробег законен: «2025, 27 км» — машина из салона.
+# Константы и правило — `stats.plausible_mileage` (одно на статистику, бот и сайт).
 
 
 def is_complete_listing(listing: Listing, now: datetime | None = None) -> bool:
@@ -270,10 +269,7 @@ def is_complete_listing(listing: Listing, now: datetime | None = None) -> bool:
         or listing.mileage_km is None
     ):
         return False
-    if listing.mileage_km > MAX_PLAUSIBLE_MILEAGE_KM:
-        return False
-    current_year = (now or utcnow()).year
-    return listing.mileage_km >= MIN_PLAUSIBLE_MILEAGE_KM or listing.year >= current_year - 1
+    return plausible_mileage(listing.mileage_km, listing.year, now or utcnow()) is not None
 
 
 def has_real_photo(listing: Listing) -> bool:
@@ -427,8 +423,11 @@ def market_estimate(
     # набирает min_samples → честнее агрегировать ВСЕ бакеты модель+года (взвешенно
     # по sample_count — суммирование ниже уже это делает). Безопасно только вместе
     # с отсевом выбросов в stats (иначе средняя заражается выбросом из unknown).
-    if listing.mileage_km is not None:
-        conditions.append(DailyMarketStat.mileage_bucket == mileage_bucket(listing.mileage_km))
+    # Неправдоподобный пробег («270 км» у Audi 2004) — как неизвестный: иначе
+    # старая машина сравнивается с почти новыми и выходит ложное «−40%».
+    mileage = plausible_mileage(listing.mileage_km, listing.year)
+    if mileage is not None:
+        conditions.append(DailyMarketStat.mileage_bucket == mileage_bucket(mileage))
     # По растаможке НЕ делим: это артефакт источника, а не сегмент рынка. mashina.kg
     # поле не отдаёт вовсе (весь её парк — customs_status='unknown'), lalafo парсит
     # «Растаможку» → её объявления с 'cleared' сравнивались лишь с другими lalafo-

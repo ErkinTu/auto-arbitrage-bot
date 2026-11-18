@@ -37,7 +37,7 @@ from app.services.normalizer import MAX_PLAUSIBLE_PRICE_USD, MIN_PLAUSIBLE_PRICE
 from app.services.regions import REGION_LABELS, is_foreign, region_matches, region_of
 from app.services.sources import listing_public_url
 from app.services.specs import group_labels, spec_group
-from app.services.stats import mileage_bucket
+from app.services.stats import mileage_bucket, plausible_mileage
 
 Sort = Literal["fresh", "price_asc", "price_desc", "similar"]
 
@@ -157,6 +157,9 @@ def _feed_conditions() -> list:
         # (`price_implausibly_low/high` в нормализаторе).
         Listing.current_price_usd >= MIN_PLAUSIBLE_PRICE_USD,
         Listing.current_price_usd <= MAX_PLAUSIBLE_PRICE_USD,
+        # Цена — выброс своей когорты (> 3× / < ⅓ медианы «модель+год»; ставит
+        # пересчёт статистики): Spark за $72 тыс. — опечатка, а не машина.
+        Listing.price_suspect.is_not(True),
     ]
 
 
@@ -339,10 +342,13 @@ def batch_market_estimates(
         return result
     by_bucket, by_triple = _latest_stat_rows(session, triples, since=latest - timedelta(days=7))
 
+    # Неправдоподобный пробег — как неизвестный (то же правило, что у бота).
+    mileage = {item.id: plausible_mileage(item.mileage_km, item.year) for item in eligible}
+
     def group_of(item: Listing) -> list:
         triple = (item.brand_id, item.car_model_id, item.year)
-        if item.mileage_km is not None:
-            return by_bucket.get((*triple, mileage_bucket(item.mileage_km)), [])
+        if mileage[item.id] is not None:
+            return by_bucket.get((*triple, mileage_bucket(mileage[item.id])), [])
         return by_triple.get(triple, [])
 
     # У когорты нет строк в окне — её последняя дата старше. Второй проход по
@@ -357,7 +363,7 @@ def batch_market_estimates(
     cache: dict[tuple, MarketEstimate | None] = {}
     for item in eligible:
         triple = (item.brand_id, item.car_model_id, item.year)
-        key = (*triple, mileage_bucket(item.mileage_km)) if item.mileage_km is not None else triple
+        key = (*triple, mileage_bucket(mileage[item.id])) if mileage[item.id] is not None else triple
         if key not in cache:
             group = group_of(item)
             total = sum(row.sample_count for row in group)
@@ -401,12 +407,14 @@ _BUCKET_LABELS = {
 OPEN_BUCKET_MAX_KM = 300_000
 
 
-def mileage_basis(mileage_km: int | None) -> tuple[bool, str | None]:
+def mileage_basis(mileage_km: int | None, year: int | None = None) -> tuple[bool, str | None]:
     """(учтён ли пробег в оценке, с каким пробегом сравнили).
 
-    Пробег не указан — оценка по всем корзинам модели+года: не учтён, подписи
-    нет. Пробег выше `OPEN_BUCKET_MAX_KM` — сравнили «от 200 тыс.», это не
-    поправка на пробег, а её видимость: тоже не учтён."""
+    Пробег не указан или неправдоподобен («270 км» у машины 2004 г.) — оценка
+    по всем корзинам модели+года: не учтён, подписи нет. Пробег выше
+    `OPEN_BUCKET_MAX_KM` — сравнили «от 200 тыс.», это не поправка на пробег,
+    а её видимость: тоже не учтён."""
+    mileage_km = plausible_mileage(mileage_km, year)
     if mileage_km is None:
         return False, None
     bucket = mileage_bucket(mileage_km)
@@ -429,8 +437,8 @@ def _market(listing: Listing, estimate) -> dict | None:
         "diff_usd": round(diff),
         "diff_percent": round(percent, 1),
         "verdict": _verdict(percent),
-        "mileage_accounted": mileage_basis(listing.mileage_km)[0],
-        "mileage_range": mileage_basis(listing.mileage_km)[1],
+        "mileage_accounted": mileage_basis(listing.mileage_km, listing.year)[0],
+        "mileage_range": mileage_basis(listing.mileage_km, listing.year)[1],
     }
 
 

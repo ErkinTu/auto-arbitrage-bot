@@ -365,6 +365,36 @@ def test_stats_excludes_cohort_price_outlier() -> None:
     assert stat.max_price_usd == Decimal("7000")
 
 
+def test_stats_marks_price_suspect_with_k3() -> None:
+    """K=3 (18.11.2026): 3,5× медианы — выброс, метка для ленты; в мелкой когорте — не проверялось."""
+    session = _session()
+    ok = [_add_listing(session, external_id=f"ok{i}", last_seen_days_ago=1, price_usd=Decimal("7000")) for i in range(6)]
+    junk = _add_listing(session, external_id="junk", last_seen_days_ago=1, price_usd=Decimal("24500"))
+
+    rebuild_daily_market_stats(session, outlier_min_cohort=5, outlier_price_median_multiple=3.0)
+
+    assert junk.price_suspect is True
+    assert all(item.price_suspect is False for item in ok)
+    assert session.scalar(select(DailyMarketStat)).sample_count == 6
+    # Цена исправлена — метка снимается следующим пересчётом.
+    junk.current_price_usd = Decimal("7200")
+    session.commit()
+    rebuild_daily_market_stats(session, outlier_min_cohort=5, outlier_price_median_multiple=3.0)
+    assert junk.price_suspect is False
+
+
+def test_stats_puts_implausible_mileage_to_unknown_bucket() -> None:
+    """«270 км» у машины 2019 года — не пробег: в unknown, а не в 0-50k."""
+    session = _session()
+    junk = _add_listing(session, external_id="km", last_seen_days_ago=1)
+    junk.mileage_km = 270
+    session.commit()
+
+    rebuild_daily_market_stats(session)
+
+    assert [row.mileage_bucket for row in session.scalars(select(DailyMarketStat))] == ["unknown"]
+
+
 def test_stats_keeps_outlier_in_small_cohort() -> None:
     session = _session()
     for i in range(2):
