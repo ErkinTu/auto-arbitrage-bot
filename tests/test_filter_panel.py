@@ -111,16 +111,57 @@ def test_current_choice_is_marked() -> None:
 # --- применение кнопок ----------------------------------------------------------------
 
 
-def test_changing_brand_resets_model_and_group() -> None:
-    draft = {**fp.new_draft(), "brand_id": 1, "car_model_id": 10, "model_name": "Camry"}
-    draft, advance = fp.apply_choice(draft, "brand", "2")
-    assert advance and draft["brand_id"] == 2 and draft["car_model_id"] is None
-    same, _ = fp.apply_choice({**draft, "car_model_id": 11}, "brand", "2")
-    assert same["car_model_id"] == 11  # та же марка — модель не сбрасываем
-    grouped, _ = fp.apply_choice(draft, "group", "japan")
-    assert grouped["brand_group"] == "japan" and grouped["brand_id"] is None
-    everything, _ = fp.apply_choice(grouped, "brand", "0")
-    assert everything["brand_id"] is None and everything["brand_group"] is None
+LEXUS = BrandDTO(id=3, name="Lexus")
+SUBARU = BrandDTO(id=4, name="Subaru")
+KIA = BrandDTO(id=5, name="Kia")
+CATALOG = [TOYOTA, HONDA, LEXUS, SUBARU, KIA]
+
+
+def test_brand_is_toggle_and_model_only_for_single_brand() -> None:
+    """Несколько марок (10.11.2026): нажатие переключает, модель — только у одной."""
+    draft = {**fp.new_draft(), "brand_id": 1, "brand_name": "Toyota", "car_model_id": 10, "model_name": "Camry"}
+    draft, advance = fp.apply_choice(draft, "brand", "5", CATALOG)
+    assert not advance  # переключатель: остаёмся на шаге
+    assert draft["brand_ids"] == [5, 1] and draft["brand_labels"] == ["Kia", "Toyota"]
+    assert draft["brand_id"] is None and draft["car_model_id"] is None
+    fields = fp.filter_fields(draft)
+    assert fields["brand_id"] is None and fields["brand_ids"] == "1,5" and fields["car_model_id"] is None
+    assert "Kia, Toyota" in fp.render_text(draft, fp.STEP_BRAND)
+    # Снять одну — снова ровно одна марка, к ней можно модель.
+    draft, _ = fp.apply_choice(draft, "brand", "5", CATALOG)
+    assert draft["brand_id"] == 1 and draft["brand_name"] == "Toyota"
+    assert fp.filter_fields(draft)["brand_ids"] is None
+    # «Готово» — дальше; «Все марки» — сброс и дальше.
+    done, advance = fp.apply_choice(draft, "bdone", "", CATALOG)
+    assert advance and fp.is_done(done, fp.STEP_BRAND)
+    everything, advance = fp.apply_choice(done, "brand", "0", CATALOG)
+    assert advance and everything["brand_ids"] == [] and everything["brand_id"] is None
+
+
+def test_group_button_marks_its_brands_and_can_be_trimmed() -> None:
+    """«Японские марки» — не отдельное поле, а отметка её марок; лишнюю можно снять."""
+    draft, _ = fp.apply_choice(fp.new_draft(), "group", "japan", CATALOG)
+    assert set(draft["brand_ids"]) == {1, 2, 3, 4} and draft["brand_group"] is None
+    keyboard = fp.render_keyboard(draft, fp.STEP_BRAND, brands=CATALOG)
+    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    assert "✅ Японские марки" in texts and "✅ Lexus" in texts and "Готово (4) →" in texts
+    trimmed, _ = fp.apply_choice(draft, "brand", "3", CATALOG)
+    assert fp.filter_fields(trimmed)["brand_ids"] == "1,2,4"
+    # Повторное нажатие на полную группу снимает её.
+    cleared, _ = fp.apply_choice(draft, "group", "japan", CATALOG)
+    assert cleared["brand_ids"] == []
+
+
+def test_brand_limit() -> None:
+    many = [BrandDTO(id=i, name=f"B{i:02d}") for i in range(1, 13)]
+    draft = fp.new_draft()
+    for brand in many[: fp.MAX_FILTER_BRANDS]:
+        draft, _ = fp.apply_choice(draft, "brand", str(brand.id), many)
+    assert len(draft["brand_ids"]) == fp.MAX_FILTER_BRANDS
+    assert fp.brand_limit_reached(draft, "brand", "11", many)
+    assert not fp.brand_limit_reached(draft, "brand", "1", many)  # снять можно
+    same, _ = fp.apply_choice(draft, "brand", "11", many)
+    assert same is draft
 
 
 @pytest.mark.parametrize(
@@ -225,6 +266,7 @@ def test_draft_round_trip_keeps_every_field() -> None:
     fields = fp.filter_fields(fp.draft_from_filter(item))
     assert fields == {
         "brand_id": 1,
+        "brand_ids": None,
         "car_model_id": 10,
         "year_from": 2015,
         "year_to": None,
@@ -484,7 +526,8 @@ def test_create_flow_in_one_message(flow) -> None:
     assert asyncio.run(state.get_state()) == FilterPanel.active.state
     assert panel.edited and "🔧 Новый фильтр" in panel.edited[0]  # панель на месте пресетов
 
-    _press(panel, state, "brand", "1")  # Toyota → шаг 2
+    _press(panel, state, "brand", "1")  # Toyota (переключатель)
+    _press(panel, state, "bdone")  # «Готово» → шаг 2
     _press(panel, state, "model", "10")  # Camry → шаг 3
     typed = _Message(bot, message_id=60, text="2015-2020")
     asyncio.run(handlers.panel_text(typed, state))

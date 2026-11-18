@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.config import get_settings
 from app.core.logging_setup import setup_logging
 from app.db.session import SessionLocal, init_db
-from app.models import Brand, NormalizationIssue, Source, SyncTarget
+from app.models import Brand, Listing, NormalizationIssue, Source, SyncTarget
 from app.services.catalog_service import (
     add_generation_alias,
     add_model_alias,
@@ -323,6 +323,63 @@ def command_grant_subscription(args: argparse.Namespace) -> None:
         )
 
 
+def command_dev_login(args: argparse.Namespace) -> None:
+    """Ссылки входа на сайт за тестовых пользователей — для локальной проверки ролей.
+
+    Заводит (или переиспользует) трёх пользователей с несуществующими
+    telegram_id 9_000_000_001..003 — по одному на роль: без подписки,
+    подписчик (подписка на 30 дней), админ — и печатает одноразовые ссылки.
+    Гость — просто открыть сайт без входа.
+
+    Только для локального стенда: SITE_URL обязан указывать на localhost.
+    На проде такие пользователи (особенно с is_superuser) недопустимы — без
+    `--i-know-this-is-not-prod` команда откажет.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.core.config import get_settings
+    from app.db.session import SessionLocal
+    from app.models import BotUser
+    from app.services.site_auth import issue_login_token
+
+    settings = get_settings()
+    local = settings.site_url.startswith(("http://localhost", "http://127.0.0.1"))
+    if not settings.site_url:
+        raise SystemExit("SITE_URL пуст — задайте SITE_URL=http://localhost:3000 в .env")
+    if not local and not args.i_know_this_is_not_prod:
+        raise SystemExit(f"SITE_URL={settings.site_url} — не localhost. Это похоже на прод: отказ.")
+
+    now = datetime.now(timezone.utc)
+    roles = {
+        "user": dict(telegram_id=9_000_000_001, first_name="Тест · без подписки", username="dev_user"),
+        "subscriber": dict(telegram_id=9_000_000_002, first_name="Тест · подписчик", username="dev_subscriber"),
+        "admin": dict(telegram_id=9_000_000_003, first_name="Тест · админ", username="dev_admin"),
+    }
+    with SessionLocal() as session:
+        print("Гость: просто откройте", settings.site_url)
+        for role, fields in roles.items():
+            if args.role and args.role != role:
+                continue
+            user = session.scalar(select(BotUser).where(BotUser.telegram_id == fields["telegram_id"]))
+            if user is None:
+                user = BotUser(**fields)
+                session.add(user)
+            # Состояние роли выставляем каждый раз — тестовый юзер мог «протухнуть».
+            user.access_status = "subscriber" if role == "subscriber" else "revoked"
+            user.subscription_expires_at = now + timedelta(days=30) if role == "subscriber" else None
+            user.trial_expires_at = None
+            user.is_superuser = role == "admin"
+            user.last_access_check_at = now
+            # Тестовые юзеры не должны получать рассылки бота.
+            user.is_active = False
+            session.commit()
+            token = issue_login_token(session, user.telegram_id)
+            print(f"{role:>10}: {settings.site_login_url(token)}")
+    print(f"Ссылки живут {settings.site_login_token_ttl_minutes} мин и открываются один раз.")
+
+
 def command_funnel(args: argparse.Namespace) -> None:
     """Воронка: старты → триалы → пейвол → платежи → оплаты.
 
@@ -408,6 +465,52 @@ def command_lalafo_maintenance(_: argparse.Namespace) -> None:
     from app.worker import run_lalafo_maintenance
 
     run_lalafo_maintenance()
+
+
+def command_phone_hash_backfill(args: argparse.Namespace) -> None:
+    """Признак номера (`seller_phone_hash`) объявлениям, у которых номер уже есть
+    (план 18.11.2026, № 7) — один раз после выката и после задания ключа.
+    Новые получают признак сами при записи номера. Только чтение номера и
+    запись признака; номера не печатаются."""
+    from app.services.phones import phone_hash
+
+    if not get_settings().seller_phone_hash_key:
+        raise SystemExit("SELLER_PHONE_HASH_KEY пуст — признак не считается")
+    done = 0
+    with SessionLocal() as session:
+        while True:
+            rows = session.execute(
+                select(Listing.id, Listing.seller_phone)
+                .where(Listing.seller_phone.is_not(None), Listing.seller_phone_hash.is_(None))
+                .order_by(Listing.id)
+                .limit(args.batch)
+            ).all()
+            if not rows:
+                break
+            for listing_id, phone in rows:
+                session.execute(
+                    update(Listing).where(Listing.id == listing_id).values(seller_phone_hash=phone_hash(phone))
+                )
+            session.commit()
+            done += len(rows)
+    print(f"признак номера проставлен: {done}")
+
+
+def command_price_history_cleanup(args: argparse.Namespace) -> None:
+    """Ложные «смены цены» (курс, а не продавец) из истории цен — разбор 16.11.2026.
+    Без `--apply` — только счёт. Запускать синхронно с `</dev/null`."""
+    from app.services.price_history_cleanup import delete_rows, find_false_changes
+
+    with SessionLocal() as session:
+        ids, report = find_false_changes(session)
+        print(
+            f"объявлений {report.listings}, строк истории {report.rows}, "
+            f"ложных «смен цены» {report.false_changes}"
+        )
+        if args.apply and ids:
+            print(f"удалено {delete_rows(session, ids)}")
+        elif ids:
+            print("сухой прогон: ничего не удалено (добавьте --apply)")
 
 
 def command_fuel_backfill(args: argparse.Namespace) -> None:
@@ -644,6 +747,20 @@ def parser() -> argparse.ArgumentParser:
     )
     maintenance.set_defaults(func=command_lalafo_maintenance)
 
+    phone_hash = sub.add_parser(
+        "phone-hash-backfill",
+        help="Fill listings.seller_phone_hash for listings that already have a phone (needs SELLER_PHONE_HASH_KEY)",
+    )
+    phone_hash.add_argument("--batch", type=int, default=2000)
+    phone_hash.set_defaults(func=command_phone_hash_backfill)
+
+    cleanup = sub.add_parser(
+        "price-history-cleanup",
+        help="Delete false price_changed rows (exchange-rate noise) from listing_price_history; dry run without --apply",
+    )
+    cleanup.add_argument("--apply", action="store_true")
+    cleanup.set_defaults(func=command_price_history_cleanup)
+
     fuel = sub.add_parser(
         "fuel-backfill",
         help="Fill listings.fuel_group: lalafo from fuel_type, mashina via API fuel lists",
@@ -686,6 +803,13 @@ def parser() -> argparse.ArgumentParser:
     funnel = sub.add_parser("funnel", help="Bot funnel: starts -> trials -> payments -> paid")
     funnel.add_argument("--days", type=int, default=30)
     funnel.set_defaults(func=command_funnel)
+
+    dev_login = sub.add_parser(
+        "dev-login", help="Local only: login links for test users of each site role"
+    )
+    dev_login.add_argument("--role", choices=["user", "subscriber", "admin"])
+    dev_login.add_argument("--i-know-this-is-not-prod", action="store_true")
+    dev_login.set_defaults(func=command_dev_login)
     return main
 
 

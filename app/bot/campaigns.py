@@ -22,7 +22,7 @@ from app.bot.matching import (
     BASIS_AVG,
     BASIS_MEDIAN,
     filter_matches,
-    is_complete_listing,
+    has_real_photo,
     is_plausible_discount,
     passes_below_market,
 )
@@ -55,12 +55,11 @@ def _listings_published(session: Session, since) -> list[Listing]:
     """Всё, что появилось за окно, включая уже снятое: замер про поток рынка,
     а не про то, что ещё висит.
 
-    Правила полноты и правдоподобной скидки — те же, что у рассылки
-    (`BOT_REQUIRE_COMPLETE_LISTINGS`, `BOT_MAX_BELOW_MARKET_PERCENT`): замер и
+    Правила фото и правдоподобной скидки — те же, что у рассылки
+    (`BOT_PUSH_REQUIRE_PHOTO`, `BOT_MAX_BELOW_MARKET_PERCENT`): замер и
     обещание «N машин по вашему фильтру» не должны считать то, что бот не шлёт.
     """
     settings = get_settings()
-    now = utcnow()
     listings = list(
         session.scalars(
             select(Listing).where(
@@ -70,8 +69,8 @@ def _listings_published(session: Session, since) -> list[Listing]:
             )
         ).all()
     )
-    if settings.bot_require_complete_listings:
-        listings = [listing for listing in listings if is_complete_listing(listing, now)]
+    if settings.bot_push_require_photo:
+        listings = [listing for listing in listings if has_real_photo(listing)]
     return listings
 
 

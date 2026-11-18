@@ -28,7 +28,7 @@ DIESEL = "diesel"
 FUEL_GROUPS: tuple[str, ...] = (PETROL, PETROL_GAS, HYBRID, ELECTRIC, DIESEL)
 FUEL_LABELS: dict[str, str] = {
     PETROL: "Бензин",
-    PETROL_GAS: "Бензин/газ",
+    PETROL_GAS: "Газ",
     HYBRID: "Гибрид",
     ELECTRIC: "Электро",
     DIESEL: "Дизель",

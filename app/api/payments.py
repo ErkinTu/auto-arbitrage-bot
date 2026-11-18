@@ -78,7 +78,9 @@ async def finik_webhook(
         query=dict(request.query_params),
     )
     if not signature_ok:
-        logger.warning("finik webhook: bad signature (payload=%s)", payload)
+        # Тело неподписанного запроса — от кого угодно: в лог только кусок,
+        # иначе любой желающий пишет в наши логи по 64 КБ за запрос.
+        logger.warning("finik webhook: bad signature (payload=%.500s)", payload)
         return JSONResponse({"error": "invalid signature"}, status_code=401)
 
     fields = payload.get("fields") or {}

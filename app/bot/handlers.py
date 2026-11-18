@@ -14,7 +14,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 
-from app.bot import db, photos, throttle
+from app.bot import db, photo_upload, photos, throttle
 from app.bot.executors import run_click
 from app.bot import filter_panel as fp
 from app.bot import menu_screens as ms
@@ -87,6 +87,7 @@ from app.bot.messages import (
     SUBSCRIPTION_SOON_TEXT,
     SUBSCRIPTION_UNAVAILABLE_TEXT,
     admin_login_text,
+    site_login_text,
     block_added_text,
     block_limit_text,
     blocks_text,
@@ -130,6 +131,7 @@ from app.bot.states import FilterPanel
 from app.core.config import get_settings
 from app.services.phones import whatsapp_url
 from app.services.blocklist import MAX_BLOCKS_PER_USER
+from app.services.filter_brands import MAX_FILTER_BRANDS
 from app.services.filter_presets import base_preset, find_preset
 from app.services.finik import init_payment
 from app.services.plans import find_plan
@@ -541,6 +543,7 @@ def _filter_summary(item: db.FilterDTO) -> str:
         brand_group=item.brand_group,
         max_age_years=item.max_age_years,
         fuel_groups=item.fuel_groups,
+        brand_names=item.brand_names,
     )
 
 
@@ -558,7 +561,7 @@ def _priority_level(item: db.FilterDTO) -> int:
     """Уровень фильтра — зеркало `matching.filter_priority`, но по DTO."""
     if item.below_market_only:
         return PRIORITY_BELOW_MARKET
-    if item.brand_name is not None or item.model_name is not None or item.brand_group:
+    if item.brand_name is not None or item.model_name is not None or item.brand_group or item.brand_ids:
         return PRIORITY_SPECIFIC
     return PRIORITY_ALL_CARS
 
@@ -947,15 +950,16 @@ async def _remember_phone(gallery: db.Gallery, card: photos.Card) -> str | None:
 
 
 async def _send_album(message: Message, album: list[str], reply_to: int) -> None:
-    """Один альбом (или хвост из одного фото) — по file_id из кэша, где он есть.
+    """Один альбом (или хвост из одного фото). Лесенка, как у карточек
+    (`photo_upload`): file_id из кэша, где он есть → файлы, скачанные самим ботом
+    → ссылки → ссылки с `?cb=`. Следующая ступень — только если Telegram не взял
+    картинку; ошибка последней ступени уходит наверх («не удалось загрузить»).
 
-    Кэш общий с карточками (`notifier`): повторный альбом Telegram не качает с
-    CDN. Отвергнутый file_id (Telegram его забыл) — забываем и повторяем по
-    ссылкам; ошибка по ссылкам уходит наверх (там «не удалось загрузить»).
+    Кэш file_id общий с карточками (`notifier`). Отвергнутый file_id —
+    забываем, фото докачиваем ступенями ниже.
     """
-    cached = [notifier.cached_photo_id(url) or url for url in album]
 
-    async def send(media: list[str]) -> list:
+    async def send(media: list) -> list:
         if len(media) == 1:  # альбом — минимум 2 фото
             sent = await message.answer_photo(media[0], reply_to_message_id=reply_to)
             return [sent]
@@ -964,14 +968,44 @@ async def _send_album(message: Message, album: list[str], reply_to: int) -> None
         )
         return list(sent or [])
 
-    if cached != album:
+    cached = {url: notifier.cached_photo_id(url) for url in album}
+    to_fetch = [url for url in album if cached[url] is None]
+    files = await photo_upload.fetch_many(to_fetch) if to_fetch else {}
+
+    def build(mode: str) -> list:
+        if mode == "cache":  # что есть в кэше, остальное файлом или ссылкой
+            return [cached[url] or files.get(url) or url for url in album]
+        if mode == "files":  # файлы вместо ссылок там, где скачали
+            return [files.get(url) or cached[url] or url for url in album]
+        if mode == "urls":
+            return [cached[url] or url for url in album]
+        return [cached[url] or photo_upload.cache_busted(url) for url in album]  # urls_cb
+
+    modes = ["cache"] if any(cached.values()) else []
+    modes += ["files"] if files else []
+    modes += ["urls", "urls_cb"]
+
+    sent: list = []
+    last_error: TelegramBadRequest | None = None
+    tried: list[list] = []
+    for mode in modes:
+        step = build(mode)
+        if mode != "urls_cb" and step in tried:
+            continue
+        tried.append(step)
         try:
-            sent = await send(cached)
-        except TelegramBadRequest:
-            notifier.forget_photo_ids(album)
-            sent = await send(album)
+            sent = await send(step)
+            break
+        except TelegramBadRequest as exc:
+            if not notifier.is_photo_fetch_error(exc):
+                raise
+            if mode == "cache":  # file_id отвергнут — дальше без кэша
+                notifier.forget_photo_ids(album)
+                cached = {url: None for url in album}
+            last_error = exc
     else:
-        sent = await send(album)
+        assert last_error is not None
+        raise last_error
     for url, item in zip(album, sent):
         sizes = getattr(item, "photo", None)
         if sizes:
@@ -1378,14 +1412,18 @@ async def cb_panel(query: CallbackQuery, callback_data: fp.PanelCB, state: FSMCo
     elif action == "mpage" and value.lstrip("-").isdigit():
         updates["model_page"] = int(value)
     else:
-        draft, advance = fp.apply_choice(data["draft"], action, value)
-        if action == "brand" and draft.get("brand_id"):
-            brands = await asyncio.to_thread(db.list_brands)
-            brand = next((b for b in brands if b.id == draft["brand_id"]), None)
-            if brand is None:
-                await query.answer("Такой марки больше нет", show_alert=True)
-                return
-            draft["brand_name"] = brand.name
+        brands = await asyncio.to_thread(db.list_brands) if action in ("brand", "group") else ()
+        if fp.brand_limit_reached(data["draft"], action, value, brands):
+            await query.answer(
+                f"В одном фильтре - до {MAX_FILTER_BRANDS} марок. Снимите лишнюю или выберите «Все марки».",
+                show_alert=True,
+            )
+            return
+        draft, advance = fp.apply_choice(data["draft"], action, value, brands)
+        if action == "brand" and value not in ("", "0") and draft is data["draft"]:
+            await query.answer("Такой марки больше нет", show_alert=True)
+            return
+        if action in ("brand", "group"):
             updates["model_page"] = 0
         if action == "model" and draft.get("car_model_id"):
             models = await asyncio.to_thread(db.list_models, draft.get("brand_id") or 0)
@@ -1398,7 +1436,7 @@ async def cb_panel(query: CallbackQuery, callback_data: fp.PanelCB, state: FSMCo
         if advance:
             step = data["step"]
             # «Все марки» и группа марок — модель выбирать не из чего, сразу к годам.
-            if action in ("brand", "group") and not draft.get("brand_id"):
+            if action in ("brand", "group", "bdone") and not draft.get("brand_id"):
                 step = fp.STEP_MODEL
             updates["step"] = fp.next_step(step)
     await state.update_data(**updates)
@@ -1749,6 +1787,23 @@ async def _menu_show(message: Message, screen: ms.Screen) -> None:
     except TelegramBadRequest as error:
         if "message is not modified" not in str(error):
             raise
+
+
+@router.message(Command("login"))
+async def cmd_login(message: Message) -> None:
+    """Вход на сайт: одноразовая ссылка → сессия в куке. Роль на сайте
+    (пользователь / подписчик / админ) считается по доступу в боте."""
+    settings = get_settings()
+    if not settings.site_url:
+        return  # сайт ещё не запущен — команды для человека нет
+    token = await asyncio.to_thread(db.issue_site_login_token, message.from_user.id)
+    if token is None:
+        await message.answer("Сначала отправьте /start — затем /login.")
+        return
+    await message.answer(
+        site_login_text(settings.site_login_token_ttl_minutes),
+        reply_markup=pay_kb(settings.site_login_url(token), "🌐 Открыть сайт"),
+    )
 
 
 @router.message(Command("admin"))

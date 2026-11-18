@@ -75,6 +75,9 @@ def _upgrade_postgres_schema() -> None:
         "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS referral_bonuses_granted INTEGER NOT NULL DEFAULT 0",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_bot_users_invite_code ON bot_users (invite_code)",
         "CREATE INDEX IF NOT EXISTS ix_bot_users_referrer_id ON bot_users (referrer_id)",
+        # Метка источника первого /start (18.11.2026, services/start_source.py).
+        "ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS start_source VARCHAR(64)",
+        "CREATE INDEX IF NOT EXISTS ix_bot_users_start_source ON bot_users (start_source)",
         # Чёрный список — новая таблица, её создаёт create_all; ALTER не нужен.
         # Админ-панель: is_superuser — колонка на существующей bot_users, поэтому
         # ALTER обязателен. Значения не задаём: DEFAULT FALSE — единственно
@@ -124,9 +127,31 @@ def _upgrade_postgres_schema() -> None:
         # fuel_type, mashina — разметкой через API).
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS fuel_group VARCHAR(16)",
         "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS fuel_groups VARCHAR(64)",
+        # Описание продавца для сайта (11.11.2026, services/descriptions.py).
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS description TEXT",
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS description_fetched_at TIMESTAMPTZ",
+        # Видео продавца и живая проверка «не снято ли» (12.11.2026, services/liveness.py).
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS video_id VARCHAR(16)",
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ",
+        # Цена вне [медиана/K, медиана×K] своей когорты «модель+год» — ставит
+        # пересчёт статистики (stats.py, 18.11.2026); лента сайта такие прячет.
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS price_suspect BOOLEAN",
+        # Плавное появление новых в ленте сайта (11.11.2026, sync._schedule_feed_reveal).
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS feed_at TIMESTAMPTZ",
+        # Список устройств в профиле сайта (11.11.2026).
+        "ALTER TABLE site_sessions ADD COLUMN IF NOT EXISTS device VARCHAR(80)",
+        # Несколько марок в фильтре бота (10.11.2026, services/filter_brands.py).
+        "ALTER TABLE user_filters ADD COLUMN IF NOT EXISTS brand_ids VARCHAR(255)",
         # Телефон продавца для «WhatsApp» под альбомом (01.11.2026); nullable,
         # без бэкфилла — lalafo заполнит лента, mashina — нажатия.
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_phone VARCHAR(20)",
+        # Признак номера (HMAC, 18.11.2026, services/phones.py): объявления одного
+        # продавца, в том числе снятые — не стирается.
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_phone_hash VARCHAR(64)",
+        "CREATE INDEX IF NOT EXISTS ix_listings_seller_phone_hash ON listings (seller_phone_hash)",
+        # Лента сайта (09.11.2026): «свежие» с курсором по (first_seen_at, id),
+        # только активные — частичный индекс в разы меньше полного.
+        "CREATE INDEX IF NOT EXISTS ix_listing_feed_fresh ON listings (first_seen_at DESC, id DESC) WHERE is_active",
     )
     for statement in statements:
         _apply(statement)

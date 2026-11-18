@@ -17,6 +17,7 @@ from typing import Awaitable, Callable, Protocol
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup
 
+from app.bot import photo_upload
 from app.bot.digest import DIGEST_MAX_ITEMS, LEGACY_DIGEST_MAX_ITEMS, order_digest
 from app.bot.keyboards import block_menu_kb, card_kb, digest_kb, with_rows
 from app.bot.matching import PendingNotification
@@ -102,7 +103,9 @@ def _card(note: PendingNotification, *, rich: bool = False, legacy: bool = False
     photo_url = note.image_url if rich and len(text) <= CAPTION_MAX_LENGTH else None
     # «Все фото» — только у карточки с фото и только если фото не одно (None —
     # галерея неизвестна, кнопка её дотянет).
-    photos = photo_url is not None and (note.photo_count is None or note.photo_count > 1)
+    # У текстовой карточки (не вошла в топ с фото) кнопка тоже нужна: человеку
+    # должно быть можно запросить альбом, фото известно по `image_url`.
+    photos = note.image_url is not None and (note.photo_count is None or note.photo_count > 1)
     return OutgoingMessage(
         chat_id=note.chat_id,
         text=text,
@@ -130,8 +133,8 @@ def build_outgoing(
     `group_min>0` — новый вид: если сверх топа набралось столько и больше,
     всё «остальное» уходит ОДНИМ списком с разделами по маркам и одной кнопкой
     «Показать с фото» (при известном `batch_id`; превью и витрина шлют без
-    него — кнопки нет); меньше — карточками. Прежний вид — список на каждую
-    марку от `group_min` штук, без кнопки.
+    него — кнопки нет); меньше — тоже карточками с фото, как топ. Прежний
+    вид — список на каждую марку от `group_min` штук, без кнопки.
 
     Порядок результата — по кругу между чатами: соседние сообщения уходят
     разным людям, поэтому пауза «не чаще 1/с в один чат» почти не срабатывает
@@ -154,7 +157,11 @@ def build_outgoing(
         elif len(notes) >= group_min:
             per_chat[chat_id] = top_cards + _digest(chat_id, notes, batch_id)
         else:
-            per_chat[chat_id] = top_cards + [_card(note) for note in notes]
+            # Списка нет — каждое объявление отдельной карточкой, и голая
+            # карточка без фото рядом с топом выглядит сломанной (решение
+            # владельца 02.11.2026): 1–5 объявлений — все с фото, от
+            # rich_cards + group_min — топ с фото и список.
+            per_chat[chat_id] = top_cards + [_card(note, rich=True) for note in notes]
 
     result: list[OutgoingMessage] = []
     queues = list(per_chat.values())
@@ -244,11 +251,30 @@ def forget_photo_ids(urls: list[str]) -> None:
         _photo_ids.pop(url, None)
 
 
-async def _send_photo(bot: BotLike, message: OutgoingMessage) -> None:
-    """send_photo по file_id из кэша, иначе по ссылке (и запомнить file_id).
+# Тексты отказа Telegram, означающие «картинку по ссылке не взял» (а не «наш баг
+# в подписи/кнопках»). Только по ним идём вниз по лесенке отправки.
+_PHOTO_FETCH_MARKERS = (
+    "failed to get http url content",
+    "wrong type of the web page content",
+    "webpage_",
+    "wrong file identifier",
+    "wrong remote file",
+    "image_process_failed",
+    "photo_invalid_dimensions",
+    "photo_as_inputfile_invalid",
+)
 
-    Отвергнутый file_id (Telegram его забыл) — не повод терять фото: забываем
-    и повторяем по ссылке.
+
+def is_photo_fetch_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _PHOTO_FETCH_MARKERS)
+
+
+async def _send_photo(bot: BotLike, message: OutgoingMessage) -> None:
+    """Лесенка (photo_upload): file_id из кэша → файл, скачанный самим ботом →
+    ссылка → ссылка с `?cb=`. Следующая ступень — только если Telegram не взял
+    картинку (`is_photo_fetch_error`); иные отказы (подпись, кнопки) и «чата
+    нет» уходят наверх сразу. Отвергнутый file_id — забываем и идём дальше.
     """
     url = message.photo_url
     cached = _photo_ids.get(url)
@@ -262,10 +288,26 @@ async def _send_photo(bot: BotLike, message: OutgoingMessage) -> None:
             if is_gone_chat(exc):
                 raise
             _photo_ids.pop(url, None)
-    sent = await bot.send_photo(
-        message.chat_id, photo=url, caption=message.text, reply_markup=message.reply_markup
-    )
-    _remember_photo(url, sent)
+    media: list = []
+    uploaded = await photo_upload.fetch_photo(url)
+    if uploaded is not None:
+        media.append(uploaded)
+    media.extend([url, photo_upload.cache_busted(url)])
+    last_error: TelegramBadRequest | None = None
+    for item in media:
+        try:
+            sent = await bot.send_photo(
+                message.chat_id, photo=item, caption=message.text, reply_markup=message.reply_markup
+            )
+        except TelegramBadRequest as exc:
+            if is_gone_chat(exc) or not is_photo_fetch_error(exc):
+                raise
+            last_error = exc
+            continue
+        _remember_photo(url, sent)
+        return
+    assert last_error is not None
+    raise last_error
 
 
 async def _deliver(bot: BotLike, message: OutgoingMessage) -> None:

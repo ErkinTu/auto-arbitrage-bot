@@ -16,8 +16,16 @@
 важно); фильтр без марки разрешён, но с подсказкой про низкий приоритет;
 редактирование — кнопкой ✏️ в «Мои фильтры» и командой /edit_filter.
 
-Шаг 8 «Топливо» (план 01.11.2026, п. Е) — единственный с выбором нескольких
-вариантов: нажатие переключает тип и оставляет на шаге, «Все типы» сбрасывает.
+Шаг 8 «Топливо» (план 01.11.2026, п. Е) — выбор нескольких вариантов:
+нажатие переключает тип и оставляет на шаге, «Все типы» сбрасывает.
+
+Шаг 1 «Марка» (решение владельца 10.11.2026) — тоже несколько: нажатие на марку
+переключает её, «Готово →» идёт дальше, «Все марки» сбрасывает. Кнопка группы
+(«Японские марки») отмечает разом её марки — дальше лишнюю можно снять.
+Модель выбирается, только если марка одна. В черновике — `brand_ids` и
+`brand_labels` (имена в том же порядке); `brand_id`/`brand_name` — производные
+«ровно одна марка», на них опирается шаг модели. Хранение —
+`services/filter_brands.py`.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.messages import format_filter_line
+from app.services.filter_brands import MAX_FILTER_BRANDS, brands_label, pack_brand_ids
 from app.services.filter_presets import BRAND_GROUPS, brand_group_label
 from app.services.fuel import (
     FUEL_GROUPS,
@@ -119,12 +128,46 @@ def is_done(draft: dict, step: int) -> bool:
     return step in (draft.get("done") or ()) or step_value(draft, step) is not None
 
 
+def _draft_brands(draft: dict) -> list[int]:
+    """Выбранные марки черновика (старый черновик без `brand_ids` — по `brand_id`)."""
+    if "brand_ids" in draft:
+        return list(draft.get("brand_ids") or [])
+    return [draft["brand_id"]] if draft.get("brand_id") else []
+
+
+def _set_brands(draft: dict, ids: list[int], labels: list[str]) -> dict:
+    """Записать выбор марок и производные «ровно одна марка»."""
+    single = len(ids) == 1
+    if not single or ids[0] != draft.get("brand_id"):
+        draft.update(car_model_id=None, model_name=None)
+    draft.update(
+        brand_ids=ids,
+        brand_labels=labels,
+        brand_id=ids[0] if single else None,
+        brand_name=labels[0] if single else None,
+        brand_group=None,
+    )
+    return draft
+
+
 def draft_from_filter(item) -> dict:
-    """Черновик из готового фильтра (`db.FilterDTO`) — для редактирования."""
+    """Черновик из готового фильтра (`db.FilterDTO`) — для редактирования.
+
+    Legacy-группа приходит уже развёрнутой в марки (`FilterDTO.brand_ids`):
+    сохранённая правка запишет её набором марок.
+    """
+    if item.brand_ids:
+        ids, labels = list(item.brand_ids), list(item.brand_names)
+    elif item.brand_id:
+        ids, labels = [item.brand_id], [item.brand_name or ""]
+    else:
+        ids, labels = [], []
     return {
-        "brand_id": item.brand_id,
-        "brand_name": item.brand_name,
-        "brand_group": item.brand_group,
+        "brand_ids": ids,
+        "brand_labels": labels,
+        "brand_id": item.brand_id if len(ids) == 1 else None,
+        "brand_name": item.brand_name if len(ids) == 1 else None,
+        "brand_group": item.brand_group if not ids else None,
         "car_model_id": item.car_model_id,
         "model_name": item.model_name,
         "year_from": item.year_from,
@@ -145,9 +188,12 @@ def draft_from_filter(item) -> dict:
 def filter_fields(draft: dict) -> dict:
     """Поля для `db.create_filter` / `db.update_filter`."""
     below = bool(draft.get("below_market_only"))
+    ids = _draft_brands(draft)
+    single = ids[0] if len(ids) == 1 else None
     return {
-        "brand_id": draft.get("brand_id"),
-        "car_model_id": draft.get("car_model_id") if draft.get("brand_id") else None,
+        "brand_id": single,
+        "brand_ids": pack_brand_ids(ids),
+        "car_model_id": draft.get("car_model_id") if single else None,
         "year_from": draft.get("year_from"),
         "year_to": draft.get("year_to"),
         "mileage_max_km": draft.get("mileage_max_km"),
@@ -156,7 +202,7 @@ def filter_fields(draft: dict) -> dict:
         "below_market_percent": draft.get("below_market_percent") if below else None,
         "skip_foreign": bool(draft.get("skip_foreign")),
         "region": draft.get("region"),
-        "brand_group": None if draft.get("brand_id") else draft.get("brand_group"),
+        "brand_group": None if ids else draft.get("brand_group"),
         "max_age_years": draft.get("max_age_years"),
         "fuel_groups": draft.get("fuel_groups"),
     }
@@ -166,6 +212,7 @@ def summary(draft: dict) -> str:
     fields = filter_fields(draft)
     return format_filter_line(
         brand_name=draft.get("brand_name") if fields["brand_id"] else None,
+        brand_names=draft.get("brand_labels") or () if fields["brand_ids"] else (),
         model_name=draft.get("model_name") if fields["car_model_id"] else None,
         year_from=fields["year_from"],
         year_to=fields["year_to"],
@@ -204,8 +251,11 @@ def years_label(draft: dict) -> str | None:
 def step_value(draft: dict, step: int) -> str | None:
     """Выбранное значение шага; None — «любой» (шаг не задан)."""
     if step == STEP_BRAND:
-        if draft.get("brand_id"):
+        ids = _draft_brands(draft)
+        if len(ids) == 1:
             return draft.get("brand_name")
+        if ids:
+            return brands_label(draft.get("brand_labels") or [str(i) for i in ids])
         return brand_group_label(draft.get("brand_group"))
     if step == STEP_MODEL:
         return draft.get("model_name") if draft.get("brand_id") and draft.get("car_model_id") else None
@@ -244,7 +294,10 @@ _EMPTY_LABELS = {
 }
 
 _PROMPTS = {
-    STEP_BRAND: "Марка. «Все марки» - без ограничения.",
+    STEP_BRAND: (
+        f"Марки - можно отметить несколько (до {MAX_FILTER_BRANDS}), затем «Готово». "
+        "Модель - если выбрана одна марка. «Все марки» - без ограничения."
+    ),
     STEP_MODEL: "Модель выбранной марки.",
     STEP_YEARS: "Годы выпуска. Пример: <code>2015-2022</code>, <code>от 2018</code> или <code>до 2012</code>.",
     STEP_MILEAGE: "Максимальный пробег, км. Пример: <code>150000</code> или <code>150к</code>.",
@@ -274,14 +327,18 @@ def render_text(draft: dict, step: int, *, editing: bool = False, notice: str | 
         lines.append(f"{mark} {number} {STEP_TITLES[number]}: {shown}{tail}")
     lines.append(LINE)
     lines.append(f"Итог: {html.escape(summary(draft))}")
-    if not draft.get("brand_id") and not draft.get("brand_group") and not draft.get("below_market_only"):
+    if not _draft_brands(draft) and not draft.get("brand_group") and not draft.get("below_market_only"):
         lines.append(ALL_CARS_HINT)
     lines.append("")
     if notice:
         lines.append(f"⚠️ {html.escape(notice)}")
     prompt = _PROMPTS[step]
     if step == STEP_MODEL and not draft.get("brand_id"):
-        prompt = "Модель выбирается после марки - сначала шаг 1."
+        prompt = (
+            "Модель выбирается, когда марка одна. Сейчас марок несколько - модель любая."
+            if len(_draft_brands(draft)) > 1
+            else "Модель выбирается после марки - сначала шаг 1."
+        )
     if step in TEXT_STEPS:
         prompt += "\nМожно написать своё значение сообщением."
     lines.append(prompt)
@@ -310,14 +367,20 @@ def render_keyboard(
     sizes: list[int] = []
 
     if step == STEP_BRAND:
-        _button(builder, _chosen("🌐 Все марки", not draft.get("brand_id") and not draft.get("brand_group")), "brand", 0)
+        chosen_ids = set(_draft_brands(draft))
+        _button(builder, _chosen("🌐 Все марки", not chosen_ids and not draft.get("brand_group")), "brand", 0)
         sizes.append(1)
-        for code, (label, _) in BRAND_GROUPS.items():
-            _button(builder, _chosen(f"🧩 {label}", draft.get("brand_group") == code and not draft.get("brand_id")), "group", code)
+        for code, (label, members) in BRAND_GROUPS.items():
+            member_ids = {b.id for b in brands if b.name in members}
+            full = bool(member_ids) and member_ids <= chosen_ids
+            _button(builder, f"{'✅' if full else '🧩'} {label}", "group", code)
             sizes.append(1)
         for brand in brands:
-            _button(builder, _chosen(brand.name, draft.get("brand_id") == brand.id), "brand", brand.id)
+            _button(builder, f"✅ {brand.name}" if brand.id in chosen_ids else brand.name, "brand", brand.id)
         sizes.extend(_pairs(len(brands)))
+        if chosen_ids:
+            _button(builder, f"Готово ({len(chosen_ids)}) →", "bdone")
+            sizes.append(1)
     elif step == STEP_MODEL:
         if draft.get("brand_id"):
             _button(builder, _chosen("🔓 Любая модель", not draft.get("car_model_id")), "model", 0)
@@ -388,6 +451,12 @@ def render_keyboard(
     return builder.as_markup()
 
 
+def _ordered(ids: set[int], names: dict[int, str]) -> tuple[list[int], list[str]]:
+    """Марки по имени — подпись фильтра не зависит от порядка нажатий."""
+    ordered = sorted(ids, key=lambda i: names.get(i, "").lower())
+    return ordered, [names.get(i, "") for i in ordered]
+
+
 def _pairs(count: int) -> list[int]:
     return [2] * (count // 2) + ([1] if count % 2 else [])
 
@@ -402,6 +471,7 @@ def next_step(step: int) -> int:
 _ACTION_STEPS = {
     "brand": STEP_BRAND,
     "group": STEP_BRAND,
+    "bdone": STEP_BRAND,
     "model": STEP_MODEL,
     "years": STEP_YEARS,
     "mileage": STEP_MILEAGE,
@@ -411,45 +481,73 @@ _ACTION_STEPS = {
     "fuel": STEP_FUEL,
 }
 # Выбор нескольких вариантов: нажатие не уводит со шага.
-_STAY_ACTIONS = frozenset({"fuel"})
+_STAY_ACTIONS = frozenset({"fuel", "group"})
 FUEL_ALL = "all"
 
 
-def apply_choice(draft: dict, action: str, value: str) -> tuple[dict, bool]:
+def brand_limit_reached(draft: dict, action: str, value: str, brands=()) -> bool:
+    """Нажатие добавит марок сверх `MAX_FILTER_BRANDS` — хендлер покажет отказ."""
+    chosen = set(_draft_brands(draft))
+    if action == "brand" and value.isdigit() and int(value) and int(value) not in chosen:
+        return len(chosen) + 1 > MAX_FILTER_BRANDS
+    if action == "group" and value in BRAND_GROUPS:
+        members = {b.id for b in brands if b.name in BRAND_GROUPS[value][1]}
+        return len(chosen | members) > MAX_FILTER_BRANDS
+    return False
+
+
+def apply_choice(draft: dict, action: str, value: str, brands=()) -> tuple[dict, bool]:
     """Применяет кнопку выбора; возвращает (черновик, перейти ли к следующему шагу).
 
-    Топливо — переключатель: черновик меняется, но шаг остаётся (False).
+    Топливо и марки — переключатели: черновик меняется, шаг остаётся (False);
+    дальше — «Готово →» (`bdone`) или «Все марки». `brands` — каталог марок
+    (`db.list_brands`): из него имена выбранных и состав группы.
 
     Принятый выбор отмечает шаг пройденным; «Все марки» и группа — ещё и шаг
     модели (выбирать её не из чего). Неизвестное значение (старая кнопка,
     подделанный callback) не меняет черновик.
     """
-    new, accepted = _apply_choice(draft, action, value)
+    new, accepted = _apply_choice(draft, action, value, brands)
     if not accepted:
         return draft, False
     steps = [_ACTION_STEPS[action]]
-    if action in ("brand", "group") and not new.get("brand_id"):
+    if action in ("brand", "group", "bdone") and not new.get("brand_id"):
         steps.append(STEP_MODEL)
+    if action == "brand":
+        # Марка — переключатель; дальше идёт только «Все марки» (value 0).
+        return mark_done(new, *steps), value == "0"
     return mark_done(new, *steps), action not in _STAY_ACTIONS
 
 
-def _apply_choice(draft: dict, action: str, value: str) -> tuple[dict, bool]:
+def _apply_choice(draft: dict, action: str, value: str, brands=()) -> tuple[dict, bool]:
     draft = dict(draft)
+    names = {b.id: b.name for b in brands}
     if action == "brand":
         brand_id = int(value) if value.isdigit() else -1
         if brand_id < 0:
             return draft, False
-        if brand_id != draft.get("brand_id"):
-            draft.update(car_model_id=None, model_name=None)
-        draft.update(brand_id=brand_id or None, brand_group=None)
-        if not brand_id:
-            draft["brand_name"] = None
-        return draft, True
+        if brand_id == 0:
+            return _set_brands(draft, [], []), True
+        if brand_id not in names:
+            return draft, False  # марки нет в каталоге (старая кнопка)
+        chosen = set(_draft_brands(draft)) ^ {brand_id}
+        if len(chosen) > MAX_FILTER_BRANDS:
+            return draft, False
+        return _set_brands(draft, *_ordered(chosen, names)), True
     if action == "group":
         if value not in BRAND_GROUPS:
             return draft, False
-        draft.update(brand_group=value, brand_id=None, brand_name=None, car_model_id=None, model_name=None)
-        return draft, True
+        members = {i for i, n in names.items() if n in BRAND_GROUPS[value][1]}
+        if not members:
+            return draft, False
+        chosen = set(_draft_brands(draft))
+        # Повторное нажатие на полностью отмеченную группу снимает её.
+        chosen = chosen - members if members <= chosen else chosen | members
+        if len(chosen) > MAX_FILTER_BRANDS:
+            return draft, False
+        return _set_brands(draft, *_ordered(chosen, names)), True
+    if action == "bdone":
+        return draft, bool(_draft_brands(draft))
     if action == "model":
         if not value.isdigit():
             return draft, False

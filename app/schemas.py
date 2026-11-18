@@ -1,6 +1,8 @@
+from typing import Literal
+
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class EstimateResponse(BaseModel):
@@ -42,6 +44,52 @@ class BrandStat(BaseModel):
     active_count: int
     average_price_usd: float
     median_price_usd: float
+
+
+class MarketIntakeDay(BaseModel):
+    day: date
+    mashina: int
+    lalafo: int
+    total: int
+
+
+class MarketPriceDistribution(BaseModel):
+    step: float
+    bins: list["PriceBin"]
+    below: int
+    above: int
+    total: int
+    median_usd: float | None
+
+
+class BrandLiquidity(BaseModel):
+    brand: str
+    removed: int
+    median_days: float
+
+
+class TopModel(BaseModel):
+    brand_id: int
+    brand: str
+    model_id: int
+    model: str
+    active: int
+    new_7d: int
+    median_price_usd: int
+    p25_price_usd: int
+    p75_price_usd: int
+    median_year: int | None
+    median_mileage_km: int | None
+    price_change_30d: float | None
+
+
+class MarketOverview(BaseModel):
+    """Графики раздела «Аналитика» сайта (services/market_overview.py)."""
+
+    intake: list[MarketIntakeDay]
+    price_distribution: MarketPriceDistribution
+    liquidity: list[BrandLiquidity]
+    liquidity_days: int
 
 
 class BrandItem(BaseModel):
@@ -400,6 +448,22 @@ class MileageInfo(BaseModel):
     adjustment_usd: float
 
 
+class PriceBin(BaseModel):
+    from_usd: float
+    to_usd: float
+    count: int
+
+
+class PriceDistribution(BaseModel):
+    """Гистограмма цен когорты: корзины в усах IQR + хвосты отдельно."""
+
+    step: float
+    bins: list[PriceBin]
+    below: int
+    above: int
+    total: int
+
+
 class VehicleSummary(BaseModel):
     vehicle: VehicleHeader
     currency: str
@@ -412,6 +476,263 @@ class VehicleSummary(BaseModel):
     mileage: MileageInfo
     representative_listing: RepresentativeListing | None
     anomalies: AnomalySummary
+    price_distribution: PriceDistribution
     granularity: str
     trend: list[VehicleSummaryTrendPoint]
     intake: list[VehicleIntakePoint]
+
+
+# --- Публичный сайт (api/public/) --------------------------------------------
+# Это контракт с фронтом: из этих моделей генерируются TS-типы
+# (openapi-typescript). Полей с ПДн (seller_phone) здесь нет и быть не должно —
+# тест tests/test_public_feed.py::test_no_personal_data_in_public_schema.
+
+
+class PublicMarket(BaseModel):
+    avg_price_usd: int
+    samples: int
+    diff_usd: int
+    diff_percent: float
+    verdict: Literal["good", "market", "high"]
+    # Пробег в оценке: учтён — сравнили с корзиной `mileage_range` («50–100 тыс. км»);
+    # не учтён (не указан или выше 300 тыс.) — сайт пишет это и красит бейдж серым.
+    mileage_accounted: bool = False
+    mileage_range: str | None = None
+
+
+class PublicDescription(BaseModel):
+    """Описание продавца (телефоны замаскированы); text=None — описания нет."""
+
+    text: str | None
+    fetched_at: datetime | None
+
+
+class PublicListing(BaseModel):
+    id: int
+    # Публичный id для адресов сайта (`/car/Q041bg`, Sqids); null — выключено (PUBLIC_ID_ALPHABET пуст).
+    public_id: str | None = None
+    brand: str
+    model: str
+    year: int | None
+    mileage_km: int | None
+    engine_volume: float | None
+    fuel_group: str | None
+    gearbox: str | None
+    body_type: str | None
+    drive_type: str | None
+    steering_wheel: str | None
+    customs_status: str | None
+    city: str | None
+    is_foreign: bool
+    seller_type: str | None
+    source: str
+    source_url: str
+    image_url: str | None
+    image_url_hd: str | None
+    photo_count: int
+    # До 3 лёгких фото (обложка первой) — веер миниатюр в карточке-строке.
+    thumbs: list[str] = []
+    price_usd: int | None
+    price_kgs: int | None
+    price_drop_usd: int | None
+    market: PublicMarket | None
+    published_at: datetime
+    first_seen_at: datetime
+    is_active: bool
+    deactivated_at: datetime | None
+
+
+class PublicPricePoint(BaseModel):
+    at: datetime
+    price_usd: int
+
+
+class PublicListingDetail(PublicListing):
+    images: list[str]
+    # Видео продавца (id YouTube) — со страницы источника (services/listing_media.py).
+    video_id: str | None = None
+    price_history: list[PublicPricePoint]
+    # Гостю и пользователю без подписки история (график) не отдаётся.
+    price_history_locked: bool = False
+
+
+class PublicMedia(BaseModel):
+    """Фото и видео после сверки со страницей источника (`/listings/{id}/media`)."""
+
+    images: list[str]
+    video_id: str | None
+    photo_count: int
+    is_active: bool
+
+
+class PublicFeedPage(BaseModel):
+    items: list[PublicListing]
+    next_cursor: str | None
+
+
+class PublicFeedCount(BaseModel):
+    count: int
+    approximate: bool
+    # Конец последнего успешного обхода любого источника (UTC) — «обновлено N мин назад».
+    updated_at: datetime | None = None
+
+
+class PublicHistogram(BaseModel):
+    """Корзины по `step` от `min` до `max`: последняя — «`max` и больше»,
+    первая у года — «`min` и раньше»."""
+
+    min: int
+    max: int
+    step: int
+    counts: list[int]
+
+
+class PublicFeedHistograms(BaseModel):
+    price: PublicHistogram
+    year: PublicHistogram
+    mileage: PublicHistogram
+
+
+class PublicFacetItem(BaseModel):
+    value: str
+    count: int
+    label: str | None = None  # подпись, если value — код (регионы)
+
+
+class PublicFeedFacets(BaseModel):
+    """Значения для чипов панели фильтров (из базы). `value` — что слать в
+    одноимённый параметр ленты; сравнение там без учёта регистра."""
+
+    regions: list[PublicFacetItem]
+    body_types: list[PublicFacetItem]
+    gearboxes: list[PublicFacetItem]
+    drive_types: list[PublicFacetItem]
+    steering: list[PublicFacetItem]
+    cities: list[PublicFacetItem]
+    customs: list[PublicFacetItem]
+
+
+
+# --- Роли сайта (api/auth.py) --------------------------------------------------
+
+
+class SiteUser(BaseModel):
+    telegram_id: int
+    username: str | None
+    first_name: str | None
+
+
+class SiteAccess(BaseModel):
+    status: Literal["member", "subscriber", "trial", "revoked"]
+    active: bool
+    expires_at: datetime | None
+
+
+class SiteDevice(BaseModel):
+    id: int
+    device: str | None
+    created_at: datetime | None
+    last_seen_at: datetime | None
+    current: bool
+
+
+class SiteMe(BaseModel):
+    role: Literal["guest", "user", "subscriber", "admin"]
+    user: SiteUser | None
+    access: SiteAccess | None
+    session_expires_at: datetime | None = None
+
+
+# --- Фильтры уведомлений (профиль сайта = фильтры бота) ------------------------
+
+
+FuelGroupCode = Literal["petrol", "petrol_gas", "hybrid", "electric", "diesel"]
+
+
+class PushFilterIn(BaseModel):
+    """Фильтр уведомлений с сайта — те же 8 критериев, что в панели бота.
+
+    Несколько марок — без модели; модель — только при одной марке. Годы —
+    либо диапазон, либо «не старше N лет». `below_market_percent` = null —
+    без «ниже рынка»; `region` = null — «Все авто» (вся КР и зарубеж).
+    """
+
+    brand_ids: list[int] = Field(default_factory=list, max_length=10)
+    model_id: int | None = Field(default=None, ge=1)
+    year_from: int | None = None
+    year_to: int | None = None
+    max_age_years: int | None = None
+    mileage_max_km: int | None = None
+    price_max_usd: int | None = None
+    below_market_percent: int | None = None
+    region: str | None = Field(default=None, max_length=16)
+    fuel_groups: list[FuelGroupCode] = Field(default_factory=list, max_length=5)
+
+
+class PushFilterUpdate(PushFilterIn):
+    """Правка: `updated_at` — версия, которую человек видел (иначе 409)."""
+
+    updated_at: datetime | None = None
+
+
+class PushFilterBrand(BaseModel):
+    id: int
+    name: str
+
+
+class PushFilter(BaseModel):
+    id: int
+    summary: str  # та же строка, что в боте («Toyota, Lexus · до $15 000 · ниже рынка на 10%+»)
+    brands: list[PushFilterBrand]
+    model_id: int | None
+    model_name: str | None
+    year_from: int | None
+    year_to: int | None
+    max_age_years: int | None
+    mileage_max_km: int | None
+    price_max_usd: int | None
+    below_market_percent: int | None
+    region: str | None
+    fuel_groups: list[str]
+    # «Ниже рынка» без порога и «без зарубежных» — старые фильтры бота; сайт их
+    # показывает, а при сохранении записывает уже в новом виде.
+    legacy: bool
+    sent_7d: int
+    best_percent_7d: float | None
+    updated_at: datetime | None
+
+
+class PushFilterOptionsRegion(BaseModel):
+    value: str
+    label: str
+
+
+class PushFilters(BaseModel):
+    items: list[PushFilter]
+    used: int
+    limit: int
+    can_edit: bool  # доступ к пушам есть (подписка, триал, группа)
+    max_brands: int
+    brands: list[PushFilterBrand]  # марки, которые есть у бота (выбирать можно только их)
+    market_percents: list[int]
+    regions: list[PushFilterOptionsRegion]
+
+
+class PushPreviewDay(BaseModel):
+    date: date
+    count: int
+
+
+class PushFilterPreview(BaseModel):
+    """«За 7 дней прислал бы N авто»: по дням (местное время) и до 6 примеров
+    (самые выгодные из ещё продающихся)."""
+
+    days: int
+    total: int
+    per_day_avg: float
+    by_day: list[PushPreviewDay]
+    without_market: int  # из total — без оценки рынка (фильтр без «ниже рынка»)
+    samples: list[PublicListing]
+    # Без подписки: машин не показываем (только цифры), проверок в сутки — лимит.
+    limited: bool = False
+    free_left: int | None = None

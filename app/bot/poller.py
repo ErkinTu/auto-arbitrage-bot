@@ -156,7 +156,7 @@ def collect_matches(cycle_counts: dict[int, int] | None = None) -> list[PendingN
             max_per_user_delayed=settings.bot_max_notifications_per_user_per_cycle_delayed,
             delayed_lag_minutes=settings.delayed_tier_lag_minutes,
             flush_deadline=flush_deadline,
-            require_complete=settings.bot_require_complete_listings,
+            require_photo=settings.bot_push_require_photo,
             max_below_percent=settings.bot_max_below_market_percent,
             cycle_counts=cycle_counts,
         )

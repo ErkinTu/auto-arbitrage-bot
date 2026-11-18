@@ -3,6 +3,8 @@
 import pytest
 
 from app.bot import handlers
+from app.core.cache import response_cache
+from app.core.ratelimit import limiter
 
 
 @pytest.fixture(autouse=True)
@@ -13,3 +15,49 @@ def _reset_click_limits():
     handlers.reset_click_limits()
     yield
     handlers.reset_click_limits()
+
+
+@pytest.fixture(autouse=True)
+def _reset_api_limits():
+    """Лимитер запросов и кэш ответов API — тоже память процесса: без сброса
+    кэш отдал бы ответ по базе из прошлого теста, а лимитер копил бы попытки."""
+    from app.api import me_filters
+    from app.services import liveness
+
+    limiter.reset()
+    response_cache.clear()
+    liveness.reset_limits()
+    me_filters.reset_limits()
+    yield
+    limiter.reset()
+    response_cache.clear()
+    liveness.reset_limits()
+    me_filters.reset_limits()
+
+
+@pytest.fixture()
+def lenient_best(monkeypatch):
+    """Мягкий отбор «лучших» для тестов, которые проверяют не скоринг, а фильтры
+    витрины (повторы, заглушки, свежесть номера, возраст): без минимума фото и базы,
+    любой год, один широкий ярус. Сам скоринг — tests/test_best_picks.py."""
+    from app.services import best_picks
+
+    monkeypatch.setattr(
+        best_picks,
+        "current_config",
+        lambda: best_picks.BestConfig(min_photos=1, min_year=1950, old_min_score=0.0, new_slots=5, max_per_model=99),
+    )
+    monkeypatch.setattr(best_picks, "TIERS", (best_picks.Tier(24, 0.0, 100.0, 1),))
+
+
+@pytest.fixture(autouse=True)
+def _no_photo_download(monkeypatch):
+    """Тесты не ходят в сеть за фото: «скачать самим» по умолчанию не удаётся
+    (ступень пропускается), отдельные тесты подменяют `fetch_photo`."""
+    from app.bot import photo_upload
+
+    async def _none(url):
+        return None
+
+    monkeypatch.setattr(photo_upload, "fetch_photo", _none)
+    yield

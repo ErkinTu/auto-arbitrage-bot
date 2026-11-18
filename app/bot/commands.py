@@ -39,6 +39,19 @@ BOT_COMMANDS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Появляется в меню, только когда задан SITE_URL: до запуска сайта команда
+# молчала бы, и пункт меню выглядел бы поломкой.
+SITE_COMMAND: tuple[str, str] = ("login", "Войти на сайт")
+
+
+def menu_commands() -> tuple[tuple[str, str], ...]:
+    from app.core.config import get_settings
+
+    if get_settings().site_url:
+        return (*BOT_COMMANDS[:-2], SITE_COMMAND, *BOT_COMMANDS[-2:])
+    return BOT_COMMANDS
+
+
 async def setup_bot_commands(bot: Bot) -> None:
     """Публикует меню команд.
 
@@ -49,10 +62,10 @@ async def setup_bot_commands(bot: Bot) -> None:
         await bot.set_my_commands(
             [
                 BotCommand(command=name, description=description)
-                for name, description in BOT_COMMANDS
+                for name, description in menu_commands()
             ]
         )
     except Exception:
         logger.exception("failed to publish bot commands menu")
     else:
-        logger.info("bot commands menu published: %s command(s)", len(BOT_COMMANDS))
+        logger.info("bot commands menu published: %s command(s)", len(menu_commands()))

@@ -27,6 +27,7 @@ EVENT_PAUSED = "paused"  # /pause — кто и надолго ли уходит
 EVENT_RESUMED = "resumed"  # /play (payload: сколько часов был на паузе)
 EVENT_PAUSE_REMINDER = "pause_reminder"  # ежедневное «вы на паузе»
 EVENT_MENU_OPEN = "menu_open"  # /menu и «⚙️ Меню»: пользуются ли меню вообще
+EVENT_START_LINK = "start_link"  # /start по ссылке с меткой источника (services/start_source.py)
 
 # Порядок = порядок воронки в отчёте.
 FUNNEL_EVENTS = (

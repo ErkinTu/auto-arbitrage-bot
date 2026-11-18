@@ -82,6 +82,10 @@ class NormalizedListing:
     # синк стирает известный ранее.
     seller_phone: str | None = None
     seller_phone_hidden: bool = False
+    # Описание продавца для сайта: mashina — из ленты API, lalafo — из
+    # карточки, которую обход и так дотягивает (services/descriptions.py).
+    # Вне `payload_hash`: текст правят часто, «updated» из-за него не нужен.
+    description: str | None = None
 
     def analytics_payload(self) -> dict[str, Any]:
         data = asdict(self)
@@ -91,6 +95,7 @@ class NormalizedListing:
         data.pop("fuel_group", None)
         data.pop("seller_phone", None)
         data.pop("seller_phone_hidden", None)
+        data.pop("description", None)
         return data
 
     @property
@@ -424,6 +429,7 @@ def normalize_lalafo_listing(
         image_url=extract_image_url(raw),
         image_urls=extract_image_urls(raw) or None,
         seller_phone=None if raw.get("hide_phone") else normalize_phone(raw.get("mobile")),
+        description=raw.get("description") or None,
         seller_phone_hidden=bool(raw.get("hide_phone")),
     )
 
@@ -491,6 +497,8 @@ def normalize_mashina_listing(
         status=raw.get("status") or "active",
         source_created_at=_parse_datetime(raw.get("created_at")),
         source_upped_at=_parse_datetime(raw.get("upped_at")),
+        # Описание есть прямо в ленте API (замер 11.11.2026: 31 из 31, ~400 знаков).
+        description=raw.get("description") or None,
         safe_payload=_safe_payload(raw),
         image_url=extract_image_url(raw),
         image_urls=extract_image_urls(raw) or None,

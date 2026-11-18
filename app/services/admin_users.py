@@ -41,6 +41,7 @@ from app.models import (
     UserFilter,
 )
 from app.services.access_schedule import full_speed_starts_at, schedule_for_user
+from app.services.filter_brands import unpack_brand_ids
 from app.services.plans import effective_tier
 from app.services.subscription import is_subscription_active
 from app.services.trial import is_trial_active, trial_used
@@ -241,7 +242,11 @@ def get_user(session: Session, user_id: int) -> dict:
     filters = session.scalars(
         select(UserFilter).where(UserFilter.user_id == user.id).order_by(UserFilter.id)
     ).all()
-    brand_names = _names(session, Brand, {f.brand_id for f in filters if f.brand_id})
+    brand_names = _names(
+        session,
+        Brand,
+        {f.brand_id for f in filters if f.brand_id} | {i for f in filters for i in unpack_brand_ids(f.brand_ids)},
+    )
     model_names = _names(session, CarModel, {f.car_model_id for f in filters if f.car_model_id})
 
     blocks = session.scalars(
@@ -336,6 +341,9 @@ def get_user(session: Session, user_id: int) -> dict:
                     brand_group=item.brand_group,
                     max_age_years=item.max_age_years,
                     fuel_groups=item.fuel_groups,
+                    brand_names=sorted(
+                        brand_names[i] for i in unpack_brand_ids(item.brand_ids) if i in brand_names
+                    ),
                 ),
             }
             for item in filters

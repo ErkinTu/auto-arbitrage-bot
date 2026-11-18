@@ -29,11 +29,12 @@ from app.services.images import real_photo
 from app.services.fuel import fuel_display, unpack_fuel_groups
 from app.services.access_schedule import active_tier, load_active_tiers
 from app.services.blocklist import load_block_sets
+from app.services.filter_brands import filter_brand_set, unpack_brand_ids
 from app.services.filter_presets import load_brand_groups, min_year_for_age
 from app.services.normalizer import MIN_PLAUSIBLE_PRICE_USD
 from app.services.plans import TIER_DELAYED, effective_tier
 from app.services.regions import is_foreign, region_matches
-from app.services.stats import mileage_bucket
+from app.services.stats import mileage_bucket, plausible_mileage
 from app.services.sync import utcnow
 from app.services.vehicle_summary import _build_source_url as build_source_url
 
@@ -119,10 +120,7 @@ def find_new_listings(
     )
     price_changed_ids = (
         select(ListingStatusHistory.listing_id)
-        .where(
-            ListingStatusHistory.event_type == "price_changed",
-            ListingStatusHistory.observed_at >= since,
-        )
+        .where(price_drop_condition(), ListingStatusHistory.observed_at >= since)
         .distinct()
     )
     published_after = utcnow() - timedelta(hours=max_age_hours)
@@ -142,6 +140,18 @@ def find_new_listings(
                 ),
             )
         ).all()
+    )
+
+
+def price_drop_condition():
+    """Событие «цена снижена»: `price_changed` с `details.direction = down`.
+
+    Рост цены — не повод для пуша (кандидаты — «подешевевшие», разбор 16.11.2026).
+    Направление пишет `sync.price_change_details`; у событий до 18.11.2026 его
+    нет — они в окно кандидатов уже не попадают."""
+    return and_(
+        ListingStatusHistory.event_type == "price_changed",
+        ListingStatusHistory.details["direction"].as_string() == "down",
     )
 
 
@@ -248,11 +258,10 @@ def load_model_names(session: Session) -> dict[int, str]:
     return {row.id: row.name for row in session.execute(select(CarModel.id, CarModel.name))}
 
 
-# Пробег меньше этого у подержанной машины — почти всегда заглушка («100»,
-# «400» км у машины 1998 года), а не реальное значение. У новых (не старше
-# года) малый пробег законен: «2025, 27 км» — машина из салона.
-MIN_PLAUSIBLE_MILEAGE_KM = 1000
-MAX_PLAUSIBLE_MILEAGE_KM = 1_000_000
+# Пробег меньше MIN_PLAUSIBLE_MILEAGE_KM у подержанной машины — почти всегда
+# заглушка («100», «400» км у машины 1998 года), а не реальное значение. У новых
+# (не старше года) малый пробег законен: «2025, 27 км» — машина из салона.
+# Константы и правило — `stats.plausible_mileage` (одно на статистику, бот и сайт).
 
 
 def is_complete_listing(listing: Listing, now: datetime | None = None) -> bool:
@@ -269,10 +278,16 @@ def is_complete_listing(listing: Listing, now: datetime | None = None) -> bool:
         or listing.mileage_km is None
     ):
         return False
-    if listing.mileage_km > MAX_PLAUSIBLE_MILEAGE_KM:
-        return False
-    current_year = (now or utcnow()).year
-    return listing.mileage_km >= MIN_PLAUSIBLE_MILEAGE_KM or listing.year >= current_year - 1
+    return plausible_mileage(listing.mileage_km, listing.year, now or utcnow()) is not None
+
+
+def has_real_photo(listing: Listing) -> bool:
+    """Есть ли у объявления настоящее главное фото (не пусто и не заглушка).
+
+    Без фото пуш уходит голой текстовой карточкой — владелец решил 02.11.2026
+    такие не слать вовсе.
+    """
+    return real_photo(listing.image_url) is not None
 
 
 def is_plausible_discount(below_percent: float | None, max_percent: float) -> bool:
@@ -296,12 +311,10 @@ def filter_matches(
     Фильтр с группой без переданной карты не матчит ничего: та же логика
     «не доказано — не шлём».
     """
-    if user_filter.brand_id is not None and listing.brand_id != user_filter.brand_id:
+    # Марки: несколько (`brand_ids`) / одна / legacy-группа — `filter_brand_set`.
+    allowed_brands = filter_brand_set(user_filter, brand_groups)
+    if allowed_brands is not None and listing.brand_id not in allowed_brands:
         return False
-    if user_filter.brand_group is not None:
-        group = (brand_groups or {}).get(user_filter.brand_group)
-        if not group or listing.brand_id not in group:
-            return False
     if user_filter.car_model_id is not None and listing.car_model_id != user_filter.car_model_id:
         return False
     if user_filter.year_from is not None and (
@@ -362,6 +375,7 @@ def _match_signature(user_filter: UserFilter) -> tuple:
         user_filter.brand_group,
         user_filter.max_age_years,
         user_filter.fuel_groups,
+        user_filter.brand_ids,
     )
 
 
@@ -418,8 +432,11 @@ def market_estimate(
     # набирает min_samples → честнее агрегировать ВСЕ бакеты модель+года (взвешенно
     # по sample_count — суммирование ниже уже это делает). Безопасно только вместе
     # с отсевом выбросов в stats (иначе средняя заражается выбросом из unknown).
-    if listing.mileage_km is not None:
-        conditions.append(DailyMarketStat.mileage_bucket == mileage_bucket(listing.mileage_km))
+    # Неправдоподобный пробег («270 км» у Audi 2004) — как неизвестный: иначе
+    # старая машина сравнивается с почти новыми и выходит ложное «−40%».
+    mileage = plausible_mileage(listing.mileage_km, listing.year)
+    if mileage is not None:
+        conditions.append(DailyMarketStat.mileage_bucket == mileage_bucket(mileage))
     # По растаможке НЕ делим: это артефакт источника, а не сегмент рынка. mashina.kg
     # поле не отдаёт вовсе (весь её парк — customs_status='unknown'), lalafo парсит
     # «Растаможку» → её объявления с 'cleared' сравнивались лишь с другими lalafo-
@@ -491,6 +508,7 @@ def filter_priority(user_filter: UserFilter) -> int:
         user_filter.brand_id is not None
         or user_filter.car_model_id is not None
         or user_filter.brand_group is not None
+        or user_filter.brand_ids is not None
     ):
         return PRIORITY_SPECIFIC
     return PRIORITY_ALL_CARS
@@ -544,7 +562,7 @@ def match_new_listings(
     max_per_user_delayed: int = 0,
     delayed_lag_minutes: int = 0,
     flush_deadline: datetime | None = None,
-    require_complete: bool = False,
+    require_photo: bool = False,
     max_below_percent: float = 0,
     cycle_counts: dict[int, int] | None = None,
 ) -> list[PendingNotification]:
@@ -575,7 +593,8 @@ def match_new_listings(
     не применяется вовсе (аварийный выключатель тарифов). Частота циклов при этом
     не меняется — сдвинуто только окно кандидатов.
 
-    require_complete — только объявления с полными данными (`is_complete_listing`);
+    require_photo — только объявления с настоящим фото (`has_real_photo`);
+    пробег и прочая полнота для пуша не требуются (решение владельца 02.11.2026);
     max_below_percent (>0) — скидка больше этой считается мусором и не уходит.
 
     flush_deadline — момент последнего цикла на сегодня (см. `window_end_utc`).
@@ -592,8 +611,8 @@ def match_new_listings(
     """
     listings = find_new_listings(session, since, max_age_hours=max_age_hours)
     now = utcnow()
-    if require_complete:
-        listings = [listing for listing in listings if is_complete_listing(listing, now)]
+    if require_photo:
+        listings = [listing for listing in listings if has_real_photo(listing)]
     if not listings:
         return []
     event_times = qualifying_event_times(session, since)
@@ -668,9 +687,11 @@ def match_new_listings(
     # нему фильтры чужих марок незачем. Ключ None — фильтры «все марки», их
     # проверяем всегда. Порядок внутри группы — `_filter_order`: сильный
     # приоритет раньше слабого, при равном — по id фильтра.
+    # Фильтр на несколько марок кладём под каждую свою марку.
     filters_by_brand: dict[int | None, list[tuple[UserFilter, BotUser]]] = {}
     for pair in filter_user_pairs:
-        filters_by_brand.setdefault(pair[0].brand_id, []).append(pair)
+        for key in unpack_brand_ids(pair[0].brand_ids) or (pair[0].brand_id,):
+            filters_by_brand.setdefault(key, []).append(pair)
     for group in filters_by_brand.values():
         group.sort(key=_filter_order)
     any_brand_pairs = filters_by_brand.get(None, [])
@@ -817,6 +838,7 @@ def preview_for_filter(
     delayed_lag_minutes: int = 0,
     max_below_percent: float = 0,
     exclude_listing_ids: frozenset[int] = frozenset(),
+    require_photo: bool = False,
 ) -> list[PendingNotification]:
     """Разовая подборка сразу после создания фильтра.
 
@@ -832,9 +854,9 @@ def preview_for_filter(
     обычной рассылкой. Сортировка — по величине отставания от рынка, чтобы в
     ограниченный лимит попало лучшее, а не случайное.
 
-    Только объявления с полными данными (`is_complete_listing`) и без
-    неправдоподобной скидки: это первое, что человек видит от фильтра, и
-    «Civic 1998, пробег не указан, −51%» убеждает в обратном.
+    Правила отбора — как у пушей (решение владельца 02.11.2026): любые
+    пробеги и без пробега, `require_photo` — только с настоящим фото, без
+    неправдоподобной скидки. Полные данные требует только витрина.
 
     Тариф с отставанием получает здесь верхнюю границу свежести: без неё обход
     тарифа сводился бы к «удалить фильтр и создать заново» — превью отдало бы
@@ -863,12 +885,9 @@ def preview_for_filter(
             Listing.source_created_at <= now - timedelta(minutes=delayed_lag_minutes)
         )
     brand_groups = load_brand_groups(session)
-    if user_filter.brand_id is not None:
-        query = query.where(Listing.brand_id == user_filter.brand_id)
-    elif user_filter.brand_group is not None:
-        query = query.where(
-            Listing.brand_id.in_(brand_groups.get(user_filter.brand_group) or ())
-        )
+    allowed_brands = filter_brand_set(user_filter, brand_groups)
+    if allowed_brands is not None:
+        query = query.where(Listing.brand_id.in_(allowed_brands or ()))
     candidates = list(session.scalars(query).all())
     if not candidates:
         return []
@@ -887,7 +906,9 @@ def preview_for_filter(
 
     scored: list[tuple[float, Listing, float | None, MarketEstimate | None]] = []
     for listing in candidates:
-        if listing.id in already_sent or not is_complete_listing(listing, now):
+        if listing.id in already_sent:
+            continue
+        if require_photo and not has_real_photo(listing):
             continue
         if not filter_matches(listing, user_filter, brand_groups, now=now):
             continue

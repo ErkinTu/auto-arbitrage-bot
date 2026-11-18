@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
 from app.bot.matching import PendingNotification
@@ -248,7 +249,7 @@ def test_rich_cards_top_n_per_chat_get_photo() -> None:
     assert [message.photo_url for message in messages if message.chat_id == 2] == [None]
     # Новый текст и «Не то» — у всех карточек, не только у топа.
     assert all(message.text.startswith("<b>Toyota Camry: 2018 г.</b>") for message in messages)
-    assert _button_callbacks(chat1[4].reply_markup) == [HideCB(listing_id=4).pack()]
+    assert HideCB(listing_id=4).pack() in _button_callbacks(chat1[4].reply_markup)
     urls = [button.url for row in chat1[0].reply_markup.inline_keyboard for button in row if button.url]
     assert urls == [notes[0].url]
 
@@ -258,6 +259,17 @@ def test_rich_top_is_not_swallowed_by_digest() -> None:
     messages = build_outgoing(notes, rich_cards=3, group_min=3)
     assert [message.photo_url is not None for message in messages] == [True, True, True, False]
     assert messages[3].listing_id is None  # остальные три — одним списком
+
+
+@pytest.mark.parametrize("count", [4, 5])
+def test_singles_beyond_top_also_get_photo(count) -> None:
+    """Решение владельца 02.11.2026: 1–5 объявлений — все с фото, без голых
+    текстовых карточек; список начинается с rich_cards + group_min."""
+    notes = [_rich_note(chat_id=1, listing_id=index, brand_name="Toyota") for index in range(count)]
+    messages = build_outgoing(notes, rich_cards=3, group_min=3, batch_id=1)
+    assert len(messages) == count
+    assert all(message.photo_url is not None for message in messages)
+    assert all(message.listing_id is not None for message in messages)
 
 
 def test_send_notifications_sends_photo_for_top() -> None:
@@ -270,9 +282,11 @@ def test_send_notifications_sends_photo_for_top() -> None:
 
 def test_send_notifications_photo_rejected_falls_back_to_text() -> None:
     """Битая картинка — не наш баг: карточка доходит текстом."""
+    # Лесенка (18.11.2026): ссылка и ссылка с ?cb= отвергнуты — только тогда текст.
     bot = FakeBot(
         photo_errors=[
-            TelegramBadRequest(method=None, message="Bad Request: wrong type of the web page content")
+            TelegramBadRequest(method=None, message="Bad Request: wrong type of the web page content"),
+            TelegramBadRequest(method=None, message="Bad Request: failed to get HTTP URL content"),
         ]
     )
     blocked: list[int] = []
@@ -286,6 +300,81 @@ def test_send_notifications_photo_rejected_falls_back_to_text() -> None:
     assert sent == 1
     assert bot.messages == [(42, format_notification(_rich_note()))]
     assert blocked == []
+
+
+# --- лесенка отправки фото (18.11.2026) ----------------------------------------
+
+
+def _fetch_error() -> TelegramBadRequest:
+    return TelegramBadRequest(method=None, message="Bad Request: failed to get HTTP URL content")
+
+
+def _stub_fetch(monkeypatch, result) -> None:
+    from app.bot import photo_upload
+
+    async def fake(url):
+        return result
+
+    monkeypatch.setattr(photo_upload, "fetch_photo", fake)
+
+
+def test_photo_ladder_prefers_downloaded_file(monkeypatch) -> None:
+    """Скачали сами — Telegram получает файл, ссылка ему не нужна."""
+    from aiogram.types import BufferedInputFile
+
+    file = BufferedInputFile(b"img", filename="photo.jpg")
+    _stub_fetch(monkeypatch, file)
+    bot = FakeBot()
+    asyncio.run(send_notifications(bot, [_rich_note(listing_id=901)], rich_cards=3))
+    assert [photo for _, photo, _ in bot.photos] == [file]
+
+
+def test_photo_ladder_falls_to_url_when_upload_rejected(monkeypatch) -> None:
+    from aiogram.types import BufferedInputFile
+
+    _stub_fetch(monkeypatch, BufferedInputFile(b"img", filename="photo.jpg"))
+    bot = FakeBot(photo_errors=[_fetch_error()])  # файл не принят
+    note = _rich_note(listing_id=902)
+    asyncio.run(send_notifications(bot, [note], rich_cards=3))
+    assert [photo for _, photo, _ in bot.photos] == [note.image_url]
+
+
+def test_photo_ladder_cache_busted_url_is_last_step() -> None:
+    """Telegram запомнил неудачу для адреса: тот же файл с ?cb= он берёт."""
+    bot = FakeBot(photo_errors=[_fetch_error()])  # скачать самим не вышло (conftest) -> ссылка, отказ
+    note = _rich_note(listing_id=903)
+    asyncio.run(send_notifications(bot, [note], rich_cards=3))
+    (_, photo, _), = bot.photos
+    assert photo.startswith(note.image_url + "?cb=")
+
+
+def test_photo_ladder_remembers_file_id_under_original_url() -> None:
+    """Дальше фото уходит по file_id, а не заново: ключ кэша — исходный адрес."""
+    from types import SimpleNamespace
+
+    from app.bot import notifier
+
+    sent_photo = SimpleNamespace(photo=[SimpleNamespace(file_id="FID")])
+
+    class _Bot(FakeBot):
+        async def send_photo(self, chat_id, photo, **kwargs):
+            await super().send_photo(chat_id, photo, **kwargs)
+            return sent_photo
+
+    note = _rich_note(listing_id=904, image_url="https://img5.lalafo.com/i/x.jpeg")
+    bot = _Bot(photo_errors=[_fetch_error()])
+    asyncio.run(send_notifications(bot, [note], rich_cards=3))
+    assert notifier.cached_photo_id("https://img5.lalafo.com/i/x.jpeg") == "FID"
+
+
+def test_photo_ladder_does_not_retry_our_own_errors() -> None:
+    """Битая разметка подписи — не вина картинки: без повторов ступенями."""
+    bot = FakeBot(
+        photo_errors=[TelegramBadRequest(method=None, message="Bad Request: can't parse entities")]
+    )
+    asyncio.run(send_notifications(bot, [_rich_note(listing_id=905)], rich_cards=3))
+    assert bot.photos == []  # одна попытка, дальше — текст
+    assert len(bot.messages) == 1
 
 
 def test_send_notifications_gone_chat_on_photo_is_not_retried_as_text() -> None:

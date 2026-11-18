@@ -84,6 +84,16 @@ def _set_current_fields(listing: Listing, item: NormalizedListing) -> None:
         listing.seller_phone = None
     elif item.seller_phone:
         listing.seller_phone = item.seller_phone
+    # Описание — из того же ответа (mashina — лента, lalafo — карточка), без
+    # отдельных запросов (services/descriptions.py). Пустое не затирает
+    # известное; неизменное не пишем — полный обход видит каждое объявление.
+    if item.description:
+        from app.services.descriptions import clean_description
+
+        cleaned = clean_description(item.description)
+        if cleaned != listing.description or listing.description_fetched_at is None:
+            listing.description = cleaned
+            listing.description_fetched_at = utcnow()
     listing.customs_status = item.customs_status
     listing.seller_type = item.seller_type
     listing.is_verified_seller = item.is_verified_seller
@@ -123,10 +133,14 @@ def _append_status_history(
     old_status: str | None,
     new_status: str | None,
     details: dict | None = None,
+    *,
+    keep_phone: bool = False,
 ) -> None:
-    if event_type == "deactivated":
+    if event_type == "deactivated" and not keep_phone:
         # Единая точка всех деактиваций (full-scan, валидатор, «зависшие»,
         # «Все фото»): номер снятого объявления не храним (services/phones.py).
+        # Исключение — живая проверка сайта (`keep_phone`, решение владельца
+        # 12.11.2026): снятое скрываем от пользователей, данные остаются у нас.
         listing.seller_phone = None
     session.add(
         ListingStatusHistory(
@@ -191,14 +205,8 @@ def _apply_listing(
         _save_raw_payload(session, source.id, listing, run.id, item)
         return "new", listing
 
-    # У конвертированного по курсу USD (usd_converted) колебание — это смена
-    # курса НБКР, а не цены продавцом: сравниваем только оригинальную цену.
-    usd_is_derived = "usd_converted" in item.quality_flags
-    price_changed = (
-        listing.current_price_amount != item.price_amount
-        or listing.current_price_currency != item.price_currency
-        or (not usd_is_derived and listing.current_price_usd != item.price_usd)
-    )
+    price_changed = is_real_price_change(listing, item)
+    old_price_usd = listing.current_price_usd
     was_active = listing.is_active
     changed = listing.payload_hash != item.payload_hash
 
@@ -212,7 +220,15 @@ def _apply_listing(
 
     if price_changed:
         _append_price_history(session, listing, item, "price_changed")
-        _append_status_history(session, listing, "price_changed", old_status, item.status)
+        _append_status_history(
+            session,
+            listing,
+            "price_changed",
+            old_status,
+            item.status,
+            # Направление нужно боту и предпросмотру фильтра: пуш — только о снижении.
+            details=price_change_details(old_price_usd, item.price_usd),
+        )
         _save_raw_payload(session, source.id, listing, run.id, item)
         return "price_changed", listing
 
@@ -227,6 +243,46 @@ def _apply_listing(
         return "updated", listing
 
     return "unchanged", listing
+
+
+def is_real_price_change(listing: Listing, item: NormalizedListing) -> bool:
+    """Поменял ли цену продавец, а не курс (разбор 16.11.2026, TODO § «Ложная смена цены»).
+
+    У объявления две цены — в долларах и в сомах; одна из них задана продавцом,
+    другую источник пересчитывает по своему курсу. mashina при этом помечает
+    «исходной» сомовую сумму и у долларовых объявлений, а полный обход отдаёт её
+    пересчитанной заново: $33 800 неизменны, а сомы гуляют 2 955 810 ↔ 2 955 769
+    — и раньше это давало «смену цены» почти всем объявлениям каждую субботу.
+    lalafo пересчитывает сомы в доллары сами мы (`usd_converted`) — то же самое.
+
+    Правило: курс двигает только пересчитанную цену, продавец — обе. Поэтому
+    смена — когда изменились И доллары, И сомы. С обеих сторон известна одна из
+    двух — по ней. Цены не было вовсе и она появилась (или пропала) — смена.
+    """
+    old_usd, new_usd = listing.current_price_usd, item.price_usd
+    old_kgs, new_kgs = listing.current_price_kgs, item.price_kgs
+    if old_kgs is None and new_kgs is None:  # сомов нет — сумма в валюте продавца
+        old_kgs, new_kgs = listing.current_price_amount, item.price_amount
+    usd_known = old_usd is not None and new_usd is not None
+    kgs_known = old_kgs is not None and new_kgs is not None
+    if usd_known and kgs_known:
+        return old_usd != new_usd and old_kgs != new_kgs
+    if usd_known:
+        return old_usd != new_usd
+    if kgs_known:
+        return old_kgs != new_kgs
+    return (old_usd, old_kgs) != (new_usd, new_kgs)  # цены не было — появилась (или пропала)
+
+
+def price_change_details(old_usd, new_usd) -> dict | None:
+    """`{"direction": "down"|"up", "old_usd": …, "new_usd": …}` для истории статусов."""
+    if old_usd is None or new_usd is None or old_usd == new_usd:
+        return None
+    return {
+        "direction": "down" if new_usd < old_usd else "up",
+        "old_usd": float(old_usd),
+        "new_usd": float(new_usd),
+    }
 
 
 def _deactivate_missing(
@@ -473,7 +529,12 @@ def validate_stale_lalafo_listings(
 
 
 def deactivate_by_card(
-    session: Session, listing: Listing, *, reason: str, status_id: int | None = None
+    session: Session,
+    listing: Listing,
+    *,
+    reason: str,
+    status_id: int | None = None,
+    keep_phone: bool = False,
 ) -> None:
     old_status = listing.status
     listing.is_active = False
@@ -482,7 +543,9 @@ def deactivate_by_card(
     details: dict = {"reason": reason}
     if status_id is not None:
         details["status_id"] = status_id
-    _append_status_history(session, listing, "deactivated", old_status, "inactive", details=details)
+    _append_status_history(
+        session, listing, "deactivated", old_status, "inactive", details=details, keep_phone=keep_phone
+    )
 
 
 def _enrich_or_skip(
@@ -537,6 +600,33 @@ def _enrich_or_skip(
         return raw
 
 
+def _schedule_feed_reveal(session: Session, listings: list[Listing], *, now: datetime | None = None) -> None:
+    """Плавное появление новых на сайте (решение владельца 11.11.2026).
+
+    Бот шлёт новинки сразу, а лента сайта показывает их по одной, равномерно в
+    течение `SITE_FEED_SPREAD_SECONDS` после обхода: `listings.feed_at` —
+    момент, с которого объявление видно в ленте (`public_feed._base_query`).
+    Порядок появления = порядок `first_seen_at`, поэтому каждое новое встаёт
+    в «Свежих» наверх, а не в середину. Очередь общая: следующий обход (другая
+    марка, другой источник) встаёт после уже запланированных, но окно
+    не растягивается дальше `now + spread` (иначе очередь копилась бы).
+    NULL у старых строк — видно сразу. 0 — выключено.
+    """
+    spread = get_settings().site_feed_spread_seconds
+    if spread <= 0 or not listings:
+        return
+    now = now or utcnow()
+    tail = session.scalar(select(func.max(Listing.feed_at)).where(Listing.feed_at > now))
+    if tail is not None and tail.tzinfo is None:
+        tail = tail.replace(tzinfo=timezone.utc)
+    start = max(now, tail or now)
+    end = now + timedelta(seconds=spread)
+    step = (end - start) / len(listings) if end > start else timedelta(seconds=1)
+    ordered = sorted(listings, key=lambda item: (item.first_seen_at or now, item.id or 0))
+    for index, listing in enumerate(ordered, start=1):
+        listing.feed_at = start + step * index
+
+
 def run_sync(
     session: Session,
     parser: ParserAdapter,
@@ -559,6 +649,7 @@ def run_sync(
     session.add(run)
     session.commit()
     session.refresh(run)
+    new_listings: list[Listing] = []
 
     created_period = period_override or target.fresh_period if mode == "fresh" else None
     page_size = page_size_override or target.page_size
@@ -623,8 +714,10 @@ def run_sync(
                             raw.get("title"),
                         )
                         continue
-                    event, _ = _apply_listing(session, source, run, item)
+                    event, applied = _apply_listing(session, source, run, item)
                     seen_external_ids.add(item.external_id)
+                    if event == "new" and applied is not None:
+                        new_listings.append(applied)
                     tail_event = event
                     run.processed_count += 1
                     if event == "new":
@@ -690,6 +783,7 @@ def run_sync(
         # interfere with the worker's iter_due_targets scheduling.
         if update_target_bookkeeping:
             target.last_success_at = utcnow()
+        _schedule_feed_reveal(session, new_listings)
         run.status = "completed"
         run.finished_at = utcnow()
         session.commit()

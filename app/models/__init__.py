@@ -2,6 +2,8 @@ from app.models.entities import (
     AccessBlock,
     AdminLoginToken,
     AdminSession,
+    SiteLoginToken,
+    SiteSession,
     BotUser,
     Brand,
     CarModel,
@@ -23,12 +25,16 @@ from app.models.entities import (
     UserBlock,
     UserEvent,
     UserFilter,
+    WatchedListing,
 )
 
 __all__ = [
+    "WatchedListing",
     "AccessBlock",
     "AdminLoginToken",
     "AdminSession",
+    "SiteLoginToken",
+    "SiteSession",
     "BotUser",
     "Brand",
     "CarModel",

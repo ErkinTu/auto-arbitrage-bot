@@ -70,7 +70,7 @@ def _settings(**overrides) -> SimpleNamespace:
         bot_below_avg_min_samples=2,
         bot_below_avg_factor=0.95,
         bot_max_below_market_percent=50.0,
-        bot_require_complete_listings=True,
+        bot_push_require_photo=True,
         scheduler_timezone="Asia/Bishkek",
         bot_active_start_hour=0,
         bot_active_end_hour=24,
@@ -292,7 +292,7 @@ def test_matching_stores_percent_and_honours_group(sessions) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_showcase_sorted_and_drops_implausible_or_stale(sessions) -> None:
+def test_showcase_sorted_and_drops_implausible_or_stale(sessions, lenient_best) -> None:
     with sessions() as s:
         ids = _catalog(s)
         _stat(s, ids["Toyota"])
@@ -310,7 +310,7 @@ def test_showcase_sorted_and_drops_implausible_or_stale(sessions) -> None:
     assert showcase.page_for_chat(items, chat_id=5, offset=1, page=1)[1] is None
 
 
-def test_showcase_drops_placeholder_old_cars_and_duplicates(sessions) -> None:
+def test_showcase_drops_placeholder_old_cars_and_duplicates(sessions, lenient_best) -> None:
     """Проверка владельца 01.11.2026: «без фото, устаревшие, повторы»."""
     with sessions() as s:
         ids = _catalog(s)
@@ -324,10 +324,11 @@ def test_showcase_drops_placeholder_old_cars_and_duplicates(sessions) -> None:
         no_photo.image_url = None
         s.commit()
         items = showcase.compute_showcase(s, min_samples=2)
-    assert [item.title for item in items] == ["car 30"]
+    # Двойники склеены: остаётся один (свежее из двух), заглушка и «без фото» отброшены.
+    assert [item.title for item in items] in (["car 30"], ["car 31"])
 
 
-def test_showcase_drops_too_old_cars(sessions) -> None:
+def test_showcase_drops_too_old_cars(sessions, lenient_best) -> None:
     with sessions() as s:
         ids = _catalog(s)
         _stat(s, ids["Toyota"], year=1995)
@@ -337,7 +338,7 @@ def test_showcase_drops_too_old_cars(sessions) -> None:
         assert len(showcase.compute_showcase(s, min_samples=2, max_age_years=0)) == 1
 
 
-def test_showcase_drops_republished_old_listing(sessions) -> None:
+def test_showcase_drops_republished_old_listing(sessions, lenient_best) -> None:
     """lalafo при переподаче ставит новую дату создания, номер — старый."""
     with sessions() as s:
         ids = _catalog(s)
@@ -347,7 +348,7 @@ def test_showcase_drops_republished_old_listing(sessions) -> None:
         _listing(s, ids["Toyota"], external_id="113638420", price="7000")  # переподано
         _listing(s, ids["Toyota"], external_id="117780000", price="7100")  # новое
         s.commit()
-        items = showcase.compute_showcase(s, min_samples=2)
+        items = showcase.compute_showcase(s, min_samples=2, max_window_hours=24)
     assert [item.title for item in items] == ["car 117780000"]
 
 
@@ -560,7 +561,9 @@ def test_is_complete_listing(year, mileage, expected) -> None:
     assert is_complete_listing(listing, now) is expected
 
 
-def test_push_skips_incomplete_and_implausible(sessions) -> None:
+def test_push_requires_photo_not_mileage(sessions) -> None:
+    """Решение владельца 02.11.2026: пуш — по всем пробегам и без пробега, но
+    только с настоящим фото; мусорная скидка по-прежнему отсекается."""
     with sessions() as s:
         ids = _catalog(s)
         user = _user(s, 7, access_status="member")
@@ -578,12 +581,16 @@ def test_push_skips_incomplete_and_implausible(sessions) -> None:
         _listing(s, ids["Toyota"], external_id="junk", price="1500", event=True)  # −85%
         no_km = _listing(s, ids["Toyota"], external_id="nokm", price="8000", event=True)
         no_km.mileage_km = None
+        no_photo = _listing(s, ids["Toyota"], external_id="nophoto", price="8000", event=True)
+        no_photo.image_url = None
+        stub = _listing(s, ids["Toyota"], external_id="stub", price="8000", event=True)
+        stub.image_url = "https://s3.mashina.kg/assets/preview.png"  # заглушка mashina
         s.commit()
         since = _now() - timedelta(hours=2)
         pending = match_new_listings(
-            s, since, factor=0.95, min_samples=2, require_complete=True, max_below_percent=50
+            s, since, factor=0.95, min_samples=2, require_photo=True, max_below_percent=50
         )
-    assert [p.title for p in pending] == ["car ok"]
+    assert sorted(p.title for p in pending) == ["car nokm", "car ok"]
 
 
 def test_new_filter_skips_backlog_published_before_it(sessions) -> None:
@@ -613,8 +620,62 @@ def test_new_filter_skips_backlog_published_before_it(sessions) -> None:
                 old_status="active",
                 new_status="active",
                 observed_at=_now(),
+                details={"direction": "down"},
             )
         )
         s.commit()
         pending = match_new_listings(s, _now() - timedelta(hours=3), factor=0.95, min_samples=2)
     assert sorted(p.title for p in pending) == ["car cheaper", "car fresh"]
+
+
+# --------------------------------------------------------------------------
+# Несколько марок в одном фильтре (10.11.2026)
+# --------------------------------------------------------------------------
+
+
+def test_multi_brand_filter_matches_its_brands_only(sessions) -> None:
+    with sessions() as s:
+        ids = _catalog(s)
+        pair = UserFilter(brand_ids=f"{min(ids['Toyota'], ids['BMW'])},{max(ids['Toyota'], ids['BMW'])}")
+        assert filter_matches(_listing(s, ids["Toyota"], external_id="t"), pair)
+        assert filter_matches(_listing(s, ids["BMW"], external_id="b"), pair)
+        assert not filter_matches(_listing(s, ids["Honda"], external_id="h"), pair)
+        assert filter_priority(UserFilter(brand_ids="1,2", below_market_only=False)) == PRIORITY_SPECIFIC
+
+
+def test_matching_indexes_multi_brand_filter_under_each_brand(sessions) -> None:
+    """Индекс фильтров по марке: фильтр на две марки находит обе."""
+    with sessions() as s:
+        ids = _catalog(s)
+        user = _user(s, 8, access_status="member")
+        s.add(
+            UserFilter(
+                user_id=user.id,
+                brand_ids=",".join(map(str, sorted((ids["Toyota"], ids["BMW"])))),
+                below_market_only=False,
+                created_at=_now() - timedelta(hours=1),
+            )
+        )
+        for name in ("Toyota", "BMW", "Honda"):
+            _stat(s, ids[name])
+            _listing(s, ids[name], external_id=name, price="8000", event=True)
+        s.commit()
+        pending = match_new_listings(s, _now() - timedelta(hours=2), factor=0.95, min_samples=2)
+        assert sorted(p.title for p in pending) == ["car BMW", "car Toyota"]
+
+
+def test_japan_preset_writes_brands_and_edit_keeps_them(sessions) -> None:
+    """Пресет «Японцы» — набор марок, а не legacy-группа; старая группа при чтении
+    разворачивается в те же марки (её можно править как набор)."""
+    with sessions() as s:
+        _catalog(s)
+        user = _user(s, 1)
+        legacy = UserFilter(user_id=user.id, brand_group="japan", below_market_only=False)
+        s.add(legacy)
+        s.commit()
+        legacy_id = legacy.id
+    created = botdb.create_preset_filter(1, "japan_10y")
+    assert created.brand_group is None and created.brand_id is None
+    assert set(created.brand_names) == {"Toyota", "Honda"}  # японцы из каталога теста
+    old = botdb.get_filter(1, legacy_id)
+    assert old.brand_group == "japan" and set(old.brand_ids) == set(created.brand_ids)

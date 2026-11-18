@@ -1,0 +1,68 @@
+"""Плавное появление новых в ленте сайта: обход расписывает `feed_at`."""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from app.models import Listing
+from app.services.normalizer import normalize_mashina_listing
+from app.services.sync import run_sync
+from tests.test_rich_cards import _FeedParser, _lalafo_setup, _mashina_raw, _sync_session
+
+
+class _MashinaFeed(_FeedParser):
+    source_name = "mashina.kg"
+    needs_detail_enrichment = False
+
+    def normalize(self, raw, *, fallback_make=None):
+        return normalize_mashina_listing(raw, fallback_make=fallback_make)
+
+
+def test_sync_schedules_new_listings_for_gradual_feed() -> None:
+    """Обход ставит новым `feed_at` в пределах 5 минут; повторная встреча его не трогает."""
+    from datetime import datetime, timedelta, timezone
+
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    source.name = "mashina.kg"
+    session.commit()
+    before = datetime.now(timezone.utc)
+    run_sync(session, _MashinaFeed([_mashina_raw()], {}), source, target, mode="fresh")
+    listing = session.scalar(select(Listing))
+    planned = listing.feed_at.replace(tzinfo=timezone.utc) if listing.feed_at.tzinfo is None else listing.feed_at
+    assert before < planned <= before + timedelta(seconds=305)
+    run_sync(session, _MashinaFeed([_mashina_raw(title="Toyota Camry 70 2.5 AT!")], {}), source, target, mode="fresh")
+    session.refresh(listing)
+    again = listing.feed_at.replace(tzinfo=timezone.utc) if listing.feed_at.tzinfo is None else listing.feed_at
+    assert again == planned
+
+
+def test_lalafo_sync_stores_description_from_card_it_already_fetches() -> None:
+    """Описание lalafo — из карточки обхода (тот же запрос), телефоны скрыты."""
+    from tests.test_rich_cards import _FeedParser, _lalafo_item
+
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    card = {**_lalafo_item(None), "description": "Без ДТП. Звоните 0555 12 34 56"}
+    parser = _FeedParser([_lalafo_item(None)], {101: card})
+    run_sync(session, parser, source, target, mode="fresh")
+    listing = session.scalar(select(Listing).where(Listing.external_id == "101"))
+    assert parser.detail_calls == [101]  # один запрос карточки — как и раньше
+    assert listing.description == "Без ДТП. Звоните [номер скрыт]"
+    assert listing.description_fetched_at is not None
+
+
+def test_mashina_sync_stores_description_from_feed() -> None:
+    """Описание mashina — прямо из ленты API, без запроса страницы."""
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    source.name = "mashina.kg"
+    session.commit()
+    raw = {**_mashina_raw(), "description": "Один хозяин, тел +996 555 123 456"}
+    run_sync(session, _MashinaFeed([raw], {}), source, target, mode="fresh")
+    listing = session.scalar(select(Listing))
+    assert listing.description == "Один хозяин, тел [номер скрыт]"
+    stamp = listing.description_fetched_at
+    run_sync(session, _MashinaFeed([{**raw, "title": "Toyota Camry 70 2.5 AT!"}], {}), source, target, mode="fresh")
+    session.refresh(listing)
+    assert listing.description_fetched_at == stamp  # не изменилось — не переписываем

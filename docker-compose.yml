@@ -53,7 +53,19 @@ services:
       # (localhost:8000, /docs, Vite-прокси), а на сервере наружу не публикуется.
       # Открыть наружу осознанно: API_HOST=0.0.0.0 в .env.
       - "${API_HOST:-127.0.0.1}:8000:8000"
-    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # --proxy-headers: реальный IP клиента из X-Forwarded-For от Caddy — на нём
+    # держатся лимиты запросов (core/ratelimit.py). Доверяем всем (`*`), потому
+    # что порт 8000 наружу не опубликован: достучаться до него могут только
+    # Caddy и соседние контейнеры, а Caddy (≥2.5) входящий X-Forwarded-For от
+    # клиента не пропускает — подделать адрес снаружи нельзя. Если API_HOST
+    # когда-нибудь станет 0.0.0.0 — сузить FORWARDED_ALLOW_IPS до адреса Caddy.
+    # --timeout-keep-alive и --limit-concurrency: медленные/висящие соединения
+    # не должны копиться без предела; сверх лимита uvicorn отвечает 503.
+    command: >
+      uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS:-*}
+      --timeout-keep-alive 5 --limit-concurrency ${API_LIMIT_CONCURRENCY:-200}
+      --no-server-header
 
   worker:
     build: .
@@ -90,6 +102,26 @@ services:
       - ./secrets:/run/secrets:ro
     command: uv run python -m app.bot
 
+  # Сайт SKUPKA.KG (Nuxt 4, SSR). Исходники фронта кладутся в ./site (rsync из
+  # analytics-front, без node_modules), образ собирается на месте. Наружу порт
+  # не публикуется — только Caddy ({$SITE_DOMAIN} → web:3000). SSR ходит в api
+  # по внутренней сети, браузер — на тот же origin через Caddy (CORS не нужен).
+  # Профиль site: локально `docker compose up` его не поднимает (нет ./site).
+  web:
+    build:
+      context: ./site
+      dockerfile: apps/web/Dockerfile
+    container_name: car_analytics_web
+    restart: ${RESTART_POLICY:-unless-stopped}
+    profiles: ["site"]
+    depends_on:
+      - api
+    environment:
+      NUXT_API_BASE_SERVER: http://api:8000/api/v1
+      NUXT_PUBLIC_SITE_URL: https://${SITE_DOMAIN:-localhost}
+      NUXT_PUBLIC_BOT_URL: ${SITE_BOT_URL:-}
+    mem_limit: 512m
+
   # Публичный HTTPS-вход для webhook/redirect Finik. Пробрасывает наружу
   # ТОЛЬКО /api/v1/payments/* (см. Caddyfile); api остаётся на 127.0.0.1.
   # Профиль payments: локально НЕ стартует (docker compose up), на проде —
@@ -108,6 +140,8 @@ services:
       PAYMENTS_DOMAIN: ${PAYMENTS_DOMAIN}
       # Домен админ-панели. Пусто — блок в Caddyfile просто не поднимется.
       ADMIN_DOMAIN: ${ADMIN_DOMAIN:-}
+      # Домен сайта (профиль site). Не задан — блок слушает только внутренний localhost:8081 (наружу не публикуется), на платежи не влияет.
+      SITE_DOMAIN: ${SITE_DOMAIN:-http://localhost:8081}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Собранный фронт (pnpm build → dist/), залитый в admin-dist/. Каталога

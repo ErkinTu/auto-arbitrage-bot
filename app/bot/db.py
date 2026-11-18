@@ -66,9 +66,11 @@ from app.services.events import (
     EVENT_PAYMENT_CREATED,
     EVENT_RESUMED,
     EVENT_START,
+    EVENT_START_LINK,
     log_event,
 )
-from app.services.filter_presets import base_preset, find_preset
+from app.services.filter_brands import pack_brand_ids, unpack_brand_ids
+from app.services.filter_presets import base_preset, find_preset, load_brand_groups
 from app.services.plans import TIER_FULL, effective_tier, find_plan
 from app.services.referral import (
     ReferralStats,
@@ -77,6 +79,8 @@ from app.services.referral import (
     parse_deep_link,
     referral_stats,
 )
+from app.services.start_source import parse_source
+from app.services.phones import phone_hash
 from app.services.subscription import is_subscription_active
 from app.services.trial import is_trial_active, start_trial, trial_used
 
@@ -116,6 +120,18 @@ class FilterLimitError(Exception):
         self.limit = limit
         self.used = used
         super().__init__(f"filter limit reached: {used}/{limit}")
+
+
+class StaleFilterError(Exception):
+    """Фильтр изменили в другом месте (бот ↔ сайт) после того, как его открыли.
+
+    Сайт присылает `updated_at` того фильтра, что показывал человеку: молча
+    затереть правку из бота хуже, чем попросить обновить страницу.
+    """
+
+    def __init__(self, filter_id: int) -> None:
+        self.filter_id = filter_id
+        super().__init__(f"filter {filter_id} changed elsewhere")
 
 
 class DuplicateFilterError(Exception):
@@ -162,6 +178,13 @@ class FilterDTO:
     # id — для панели редактирования (предзаполнить выбор марки/модели).
     brand_id: int | None = None
     car_model_id: int | None = None
+    # Несколько марок (services/filter_brands.py): id и имена в одном порядке.
+    # У legacy-группы сюда разворачиваются её марки — при правке группа
+    # сохраняется уже как набор марок.
+    brand_ids: tuple[int, ...] = ()
+    brand_names: tuple[str, ...] = ()
+    # Версия строки для сайта (защита от одновременной правки в боте и на сайте).
+    updated_at: datetime | None = None
 
 
 def _utcnow() -> datetime:
@@ -497,8 +520,13 @@ def _handle_start_once(
             )
             is None
         )
+        source = parse_source(deep_link_payload)
         if first_start:
-            log_event(session, user.id, EVENT_START)
+            log_event(session, user.id, EVENT_START, {"source": source} if source else None)
+            if source and user.start_source is None:
+                user.start_source = source
+        if source:
+            log_event(session, user.id, EVENT_START_LINK, {"source": source, "first": first_start})
 
         referrer_attached = False
         code = parse_deep_link(deep_link_payload)
@@ -673,11 +701,20 @@ def _filter_signature(user_filter: UserFilter) -> tuple:
         user_filter.brand_group,
         user_filter.max_age_years,
         user_filter.fuel_groups,
+        user_filter.brand_ids,
     )
 
 
 def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
     brand = session.get(Brand, user_filter.brand_id) if user_filter.brand_id else None
+    many = unpack_brand_ids(user_filter.brand_ids)
+    if not many and user_filter.brand_group:
+        many = tuple(sorted(load_brand_groups(session).get(user_filter.brand_group, ())))
+    brand_rows = (
+        session.execute(select(Brand.id, Brand.name).where(Brand.id.in_(many)).order_by(Brand.name)).all()
+        if many
+        else []
+    )
     model = session.get(CarModel, user_filter.car_model_id) if user_filter.car_model_id else None
     return FilterDTO(
         id=user_filter.id,
@@ -698,6 +735,9 @@ def _filter_dto(session, user_filter: UserFilter) -> FilterDTO:
         fuel_groups=user_filter.fuel_groups,
         brand_id=user_filter.brand_id,
         car_model_id=user_filter.car_model_id,
+        brand_ids=tuple(row.id for row in brand_rows),
+        brand_names=tuple(row.name for row in brand_rows),
+        updated_at=user_filter.updated_at,
     )
 
 
@@ -767,6 +807,7 @@ def create_filter(
     brand_group: str | None = None,
     max_age_years: int | None = None,
     fuel_groups: str | None = None,
+    brand_ids: str | None = None,
 ) -> FilterDTO:
     with SessionLocal() as session:
         user = session.scalar(select(BotUser).where(BotUser.telegram_id == telegram_id))
@@ -793,6 +834,7 @@ def create_filter(
                 brand_group,
                 max_age_years,
                 fuel_groups,
+                brand_ids,
             ),
         )
         user_filter = UserFilter(
@@ -810,6 +852,7 @@ def create_filter(
             brand_group=brand_group,
             max_age_years=max_age_years,
             fuel_groups=fuel_groups,
+            brand_ids=brand_ids,
         )
         session.add(user_filter)
         session.commit()
@@ -857,6 +900,8 @@ def update_filter(
     brand_group: str | None = None,
     max_age_years: int | None = None,
     fuel_groups: str | None = None,
+    brand_ids: str | None = None,
+    expected_updated_at: datetime | None = None,
 ) -> FilterDTO:
     """Правка готового фильтра (панель, /edit_filter) — UPDATE той же строки.
 
@@ -878,6 +923,11 @@ def update_filter(
         )
         if user_filter is None:
             raise LookupError(f"filter {filter_id} of {telegram_id} not found")
+        # Сайт: правку из бота после открытия формы не затираем (бот не передаёт).
+        if expected_updated_at is not None and user_filter.updated_at is not None and (
+            _as_aware(user_filter.updated_at) != _as_aware(expected_updated_at)
+        ):
+            raise StaleFilterError(user_filter.id)
         price = float(price_max_usd) if price_max_usd is not None else None
         _check_duplicate(
             session,
@@ -896,6 +946,7 @@ def update_filter(
                 brand_group,
                 max_age_years,
                 fuel_groups,
+                brand_ids,
             ),
             exclude_id=user_filter.id,
         )
@@ -912,6 +963,7 @@ def update_filter(
         user_filter.brand_group = brand_group
         user_filter.max_age_years = max_age_years
         user_filter.fuel_groups = fuel_groups
+        user_filter.brand_ids = brand_ids
         session.commit()
         return _filter_dto(session, user_filter)
 
@@ -925,9 +977,16 @@ def create_preset_filter(telegram_id: int, preset_code: str) -> FilterDTO:
     preset = find_preset(preset_code)
     if preset is None:
         raise LookupError(f"unknown preset {preset_code!r}")
+    # Группа пресета («Японцы») пишется набором марок, а не legacy-полем:
+    # потом в панели можно снять лишнюю марку (решение владельца 10.11.2026).
+    group_ids: tuple[int, ...] = ()
+    if preset.brand_group:
+        with SessionLocal() as session:
+            group_ids = tuple(sorted(load_brand_groups(session).get(preset.brand_group, ())))
     return create_filter(
         telegram_id,
-        brand_id=None,
+        brand_id=group_ids[0] if len(group_ids) == 1 else None,
+        brand_ids=pack_brand_ids(group_ids),
         car_model_id=None,
         year_from=None,
         year_to=None,
@@ -936,7 +995,9 @@ def create_preset_filter(telegram_id: int, preset_code: str) -> FilterDTO:
         below_market_only=True,
         below_market_percent=preset.below_market_percent,
         region=preset.region,
-        brand_group=preset.brand_group,
+        # Марок группы в базе нет вовсе — остаётся legacy-группа (матчит пусто,
+        # как и раньше), а не «все марки».
+        brand_group=preset.brand_group if preset.brand_group and not group_ids else None,
         max_age_years=preset.max_age_years,
     )
 
@@ -1148,6 +1209,14 @@ def log_menu_open(telegram_id: int) -> None:
         session.commit()
 
 
+def issue_site_login_token(telegram_id: int) -> str | None:
+    """Ссылка входа на сайт для любого пользователя бота (services/site_auth.py)."""
+    from app.services.site_auth import issue_login_token
+
+    with SessionLocal() as session:
+        return issue_login_token(session, telegram_id)
+
+
 def issue_admin_login_token(telegram_id: int) -> str | None:
     """Выдаёт одноразовый токен входа в панель; None — если человек не админ.
 
@@ -1308,10 +1377,12 @@ def mark_listing_gone(listing_id: int, reason: str, status_id: int | None = None
 
 def save_seller_phone(listing_id: int, phone: str | None) -> None:
     """Номер продавца, взятый по нажатию «Все фото» (None — продавец скрыл)."""
+    values: dict = {"seller_phone": phone}
+    digest = phone_hash(phone)  # bulk update минует событие ORM — признак считаем сами
+    if digest is not None:
+        values["seller_phone_hash"] = digest
     with SessionLocal() as session:
-        session.execute(
-            update(Listing).where(Listing.id == listing_id).values(seller_phone=phone)
-        )
+        session.execute(update(Listing).where(Listing.id == listing_id).values(**values))
         session.commit()
 
 
@@ -1346,6 +1417,7 @@ def preview_for_filter(filter_id: int, exclude_ids=frozenset()) -> list[PendingN
             delayed_lag_minutes=settings.delayed_tier_lag_minutes,
             max_below_percent=settings.bot_max_below_market_percent,
             exclude_listing_ids=frozenset(exclude_ids),
+            require_photo=settings.bot_push_require_photo,
         )
 
 

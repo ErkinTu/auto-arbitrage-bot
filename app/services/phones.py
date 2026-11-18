@@ -6,7 +6,17 @@
 - продавец скрыл номер на источнике (lalafo `hide_phone`) — не храним, а
   известный ранее стираем;
 - снятое объявление номер теряет (`sync._append_status_history`, событие
-  `deactivated`);
+  `deactivated`) — кроме живой проверки сайта (`keep_phone`, 12.11.2026);
+- **признак номера** `listings.seller_phone_hash` (решение владельца 18.11.2026:
+  «больше данных лучше, мы не продаём чужие данные») — HMAC-SHA256 цифр с
+  ключом `SELLER_PHONE_HASH_KEY` из `.env`. Восстановить по нему номер нельзя
+  без ключа (а с ключом — только перебором ~10⁹ номеров КР, поэтому ключ —
+  секрет, как токен бота). Нужен, чтобы находить объявления одного продавца
+  (дубли, перезаливы) и после снятия: **не стирается никогда**, даже когда
+  стирается сам номер. Ставится сам при любой записи номера (событие ORM в
+  `models/entities.py`), обходной путь — `bot/db.save_seller_phone` (bulk
+  update) — считает его явно; старым — `cli.py phone-hash-backfill`. Как и
+  номер, в API, админку и логи не попадает. Пустой ключ — хэш не считается;
 - в боте номер отдаётся только под альбомом «Все фото»: для звонка — текстом
   под спойлером, для переписки — кнопкой «Написать в WhatsApp» (wa.me с
   готовым текстом про объявление). Номер всё равно лежит в данных сообщения —
@@ -17,6 +27,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 from urllib.parse import quote
 
@@ -41,6 +53,16 @@ def normalize_phone(value: object) -> str | None:
     if not 10 <= len(digits) <= 15:
         return None
     return digits
+
+
+def phone_hash(digits: str | None) -> str | None:
+    """HMAC-SHA256 цифр номера (hex, 64 знака); None — нет номера или ключа."""
+    from app.core.config import get_settings
+
+    key = get_settings().seller_phone_hash_key
+    if not digits or not key:
+        return None
+    return hmac.new(key.encode(), digits.encode(), hashlib.sha256).hexdigest()
 
 
 def display_phone(digits: str) -> str:

@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -173,6 +174,24 @@ class Listing(Base, TimestampMixin):
     # API, стирается при деактивации (services/phones.py). lalafo — из ленты
     # (`mobile`, если не `hide_phone`), mashina — со страницы по нажатию.
     seller_phone: Mapped[str | None] = mapped_column(String(20))
+    # Цена — выброс своей когорты (> K× или < 1/K медианы «модель+год», K =
+    # OUTLIER_PRICE_MEDIAN_MULTIPLE). Ставит/снимает пересчёт статистики; NULL —
+    # не проверялось (мелкая когорта, зарубежное, давно не видели). Лента прячет True.
+    price_suspect: Mapped[bool | None] = mapped_column(Boolean)
+    # Признак номера: HMAC-SHA256 цифр (services/phones.py). Не стирается при
+    # снятии, ставится сам при записи номера (слушатель внизу файла).
+    seller_phone_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    # Описание продавца для сайта (services/descriptions.py): по запросу со
+    # страницы авто, телефоны замаскированы; вне payload_hash.
+    description: Mapped[str | None] = mapped_column(Text)
+    description_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Видео продавца (YouTube id) — с живой проверки (services/liveness.py). Вне payload_hash, как фото.
+    video_id: Mapped[str | None] = mapped_column(String(16))
+    # Последняя живая проверка «не снято ли» у источника (services/liveness.py).
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # С какого момента новое объявление видно в ленте сайта (плавное появление,
+    # sync._schedule_feed_reveal); NULL — сразу. Бот этим полем не пользуется.
+    feed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     customs_status: Mapped[str] = mapped_column(String(30), default="unknown", nullable=False, index=True)
     seller_type: Mapped[str | None] = mapped_column(String(30))
     is_verified_seller: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -381,6 +400,9 @@ class BotUser(Base, TimestampMixin):
     # REFERRAL_FRIENDS_PER_BONUS засчитанных друзей). Счётчик, а не флаг:
     # начисление идемпотентно — сравниваем с числом заслуженных бонусов.
     referral_bonuses_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Метка первого касания из t.me/<бот>?start=<метка> (`hrd`, `ig`, `site_345153`…);
+    # ставится один раз, на первом /start. Каждый переход — событие `start_link`.
+    start_source: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
 class AdminLoginToken(Base):
@@ -444,6 +466,56 @@ class AdminSession(Base):
     )
 
 
+
+class SiteLoginToken(Base):
+    """Одноразовая ссылка входа на САЙТ — для любого пользователя бота.
+
+    Тот же принцип, что у `AdminLoginToken` (sha256, срок, гашение отметкой), но
+    отдельная таблица: админский вход на проде живёт своей жизнью, а роль на
+    сайте вычисляется при каждом запросе (`services/site_auth.py`), а не
+    фиксируется при входе. Команда в боте — `/login`.
+    """
+
+    __tablename__ = "site_login_tokens"
+    __table_args__ = (Index("ix_site_login_token_user_created", "user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class SiteSession(Base):
+    """Сессия сайта в httpOnly-куке `sk_session` (sha256 в базе, отзыв удалением).
+
+    Роль в сессии НЕ хранится: гость/пользователь/подписчик/админ считается
+    на каждом запросе по `bot_users` — истёкшая подписка или снятый флаг
+    админа действуют сразу, без перелогина.
+    """
+
+    __tablename__ = "site_sessions"
+    __table_args__ = (Index("ix_site_session_user", "user_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("bot_users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # «Chrome · Android» — грубая метка из User-Agent для списка устройств в
+    # профиле (services/site_auth.py::device_label); IP не храним.
+    device: Mapped[str | None] = mapped_column(String(80))
+
 class UserEvent(Base):
     """Лог событий воронки: старт → триал → оплата.
 
@@ -492,6 +564,9 @@ class UserFilter(Base, TimestampMixin):
     # Группа марок (services/filter_presets.py::BRAND_GROUPS), напр. 'japan'.
     # Одно поле, а не N фильтров по марке: иначе пресет «Японцы» съел бы 4 слота.
     brand_group: Mapped[str | None] = mapped_column(String(16))
+    # Несколько марок (10.11.2026): id через запятую по возрастанию, только при
+    # двух и более — одна марка живёт в brand_id (services/filter_brands.py).
+    brand_ids: Mapped[str | None] = mapped_column(String(255))
     # «Не старше N лет» — год считается при матчинге, поэтому не устаревает,
     # в отличие от year_from. NULL = без ограничения.
     max_age_years: Mapped[int | None] = mapped_column(Integer)
@@ -641,3 +716,32 @@ class AccessBlock(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class WatchedListing(Base):
+    """Объявления, которые сайт недавно запрашивал по id (избранное в браузере).
+
+    Избранное живёт в localStorage — сервер не знает, у кого что лежит. Ручка
+    `/public/listings?ids=` отмечает здесь запрошенные id, а проверка «не снято
+    ли» (services/liveness.py) раз в полчаса сверяет их с источником. Без
+    пользователей и устройств — только id объявления и время запроса.
+    """
+
+    __tablename__ = "watched_listings"
+
+    listing_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+@event.listens_for(Listing.seller_phone, "set")
+def _hash_seller_phone(target: Listing, value: str | None, _old: Any, _initiator: Any) -> None:
+    """Номер записан — обновить его признак; стёрт (None) — признак остаётся.
+
+    Одна точка вместо правки каждого пути записи (sync, лента lalafo, карточка):
+    новый путь не сможет «забыть» хэш. Bulk `update()` событие минует —
+    `bot/db.save_seller_phone` считает хэш сам."""
+    from app.services.phones import phone_hash
+
+    digest = phone_hash(value)
+    if digest is not None:
+        target.seller_phone_hash = digest

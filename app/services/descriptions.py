@@ -1,0 +1,142 @@
+"""Описание продавца для страницы авто на сайте (заметка владельца 11.11.2026).
+
+Описание пишет **обход**, из ответа, который он и так получает
+(`sync._set_current_fields`):
+
+- **mashina** — поле `description` есть в ленте API (замер 11.11.2026: 31 из
+  31). Новые получают его в цикле бота, старые — при полном обходе worker-а.
+  Запасной путь, если в базе пусто (объявление ещё не попало в полный обход):
+  API карточки по открытию (`…/ads/{slug}/detail`, ~5 КБ; с 12.11.2026 — вместо
+  страницы ~450 КБ) — с таймаутом `MASHINA_PAGE_TIMEOUT`, не ждём дольше. Пробуем один
+  раз на объявление: «описания нет» тоже запоминаем (`description_fetched_at`),
+  дальше его допишет обход. Сбой источника — повтор не раньше чем через 5 мин
+  (кэш ручки). **Хранится бессрочно** — срока нет, обновляет только обход.
+- **lalafo** — **без отдельных запросов**: описание приходит в карточке, которую
+  обход и так дотягивает для новых и подешевевших (`sync._enrich_or_skip`), и
+  пишется в базу там же (`sync._set_current_fields`). Запрос к lalafo идёт
+  через платный прокси, поэтому по открытию страницы его не делаем
+  (`SITE_DESCRIPTION_LALAFO_ON_DEMAND=false`): у объявлений, увиденных до
+  колонки, описания просто нет, пока lalafo не переподаст/не изменит цену.
+
+Текст — чужие данные: на сайте только как текст (никакого `v-html`),
+**телефоны маскируем** — номер продавца у нас персональные данные
+(`CLAUDE.md § Номер продавца`), а в описаниях его пишут часто. Длина — до
+`MAX_LENGTH`.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
+
+from app.core.config import get_settings
+from app.models import Listing, Source
+
+logger = logging.getLogger(__name__)
+
+MASHINA_PAGE_TIMEOUT = 15  # секунд: страница mashina бывает очень медленной
+MAX_LENGTH = 4000
+PHONE_MASK = "[номер скрыт]"
+
+_MASHINA_RE = re.compile(r'\\"description\\":\\"((?:[^"\\]|\\.)*?)\\",\\"category_id\\"')
+_PHONE_RUN_RE = re.compile(r"\+?\d[\d\s\-().]{7,}\d")
+_BLANKS_RE = re.compile(r"\n{3,}")
+
+
+def mashina_description_from_page(html: str) -> str | None:
+    """Описание объявления из страницы mashina (данные Next.js экранированы дважды)."""
+    match = _MASHINA_RE.search(html)
+    if not match:
+        return None
+    escaped = match.group(1)
+    try:
+        # Внешний слой — строка JS (\" и \\), внутренний — JSON-строка.
+        inner = escaped.replace('\\\\', '\\').replace('\\"', '"')
+        return json.loads(f'"{inner}"')
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def _mask_phone(match: re.Match) -> str:
+    digits = sum(ch.isdigit() for ch in match.group(0))
+    return PHONE_MASK if 9 <= digits <= 13 else match.group(0)
+
+
+def clean_description(text: str | None) -> str | None:
+    """Пробелы, пустые строки, маска телефонов, потолок длины. Пусто → None."""
+    if not text:
+        return None
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "\n".join(line.rstrip() for line in text.split("\n"))
+    text = _BLANKS_RE.sub("\n\n", text).strip()
+    text = _PHONE_RUN_RE.sub(_mask_phone, text)
+    if len(text) > MAX_LENGTH:
+        text = text[:MAX_LENGTH].rstrip() + "…"
+    return text or None
+
+
+def _fetch(source_name: str, listing: Listing, url: str) -> str | None:
+    # Импорт здесь: модуль бота тянет httpx-клиенты и настройки прокси.
+    from app.bot.photos import can_fetch
+    from app.services.sources import LALAFO, MASHINA
+
+    if source_name == MASHINA:
+        # API карточки (~5 КБ, 12.11.2026) вместо страницы (~450 КБ): то же поле `description`.
+        import httpx
+
+        from app.services.liveness import mashina_detail_url
+
+        response = httpx.get(
+            mashina_detail_url(listing.source_slug or ""),
+            timeout=MASHINA_PAGE_TIMEOUT,
+            headers={"User-Agent": get_settings().user_agent, "Accept": "application/json"},
+        )
+        if response.status_code in (404, 410):
+            return None
+        response.raise_for_status()
+        return (response.json() or {}).get("description")
+    if source_name == LALAFO and get_settings().site_description_lalafo_on_demand and can_fetch(source_name):
+        from app.parsers.lalafo import LalafoParser
+
+        parser = LalafoParser(timeout=8, retry_attempts=1)
+        try:
+            return (parser.fetch_details(listing.external_id) or {}).get("description")
+        finally:
+            parser.close()
+    return None
+
+
+def listing_description(session: Session, listing_id: int, *, now: datetime | None = None) -> dict:
+    """Описание объявления: из базы, если свежее, иначе — у источника (и в базу)."""
+    from app.services.sources import listing_public_url
+
+    now = now or datetime.now(timezone.utc)
+    listing = session.get(Listing, listing_id)
+    if listing is None:
+        raise LookupError("Объявление не найдено")
+    fetched = listing.description_fetched_at
+    if fetched is not None and fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    if not listing.is_active or listing.description or fetched is not None:
+        # Описание хранится бессрочно (обновляет обход); уже проверяли и его
+        # нет — тоже не ходим снова; снятое — не ходим.
+        return {"text": listing.description, "fetched_at": fetched}
+    source = session.get(Source, listing.source_id)
+    from app.services.sources import LALAFO
+
+    if source is not None and source.name == LALAFO and not get_settings().site_description_lalafo_on_demand:
+        # Описание lalafo пишет обход; сами к lalafo не ходим (прокси — деньги).
+        return {"text": listing.description, "fetched_at": fetched}
+    try:
+        raw = _fetch(source.name if source else "", listing, listing_public_url(listing.source_slug, listing.external_id))
+    except Exception:  # источник недоступен — отдаём, что было, повторим позже
+        logger.warning("description fetch failed for listing %s", listing_id, exc_info=True)
+        return {"text": listing.description, "fetched_at": fetched}
+    listing.description = clean_description(raw)
+    listing.description_fetched_at = now
+    session.commit()
+    return {"text": listing.description, "fetched_at": now}

@@ -130,3 +130,38 @@ GROUP BY 1;
 - Клоны `dev_inject.py` копируют `image_urls`, но у старых оригиналов галереи нет, а
   запасной запрос по `devtest-*` id для lalafo не сработает — дотянуть галерею
   клону с оригинала (по `source_slug`).
+
+## Сайт локально с ролями (09.11.2026)
+
+Прод не трогаем: локальная база (`car-analytics-mvp_postgres_data`), тестовый
+бот `@lyambarbot` из локального `.env`. В `.env` нужно `SITE_URL=http://localhost:3000`.
+
+```bash
+# бэкенд (из каталога с нужной веткой; -p — чтобы взять ту же локальную базу)
+docker compose -p car-analytics-mvp up -d --build migrate api bot   # worker не нужен
+
+# сайт
+cd ../analytics-front/apps/web
+NUXT_PUBLIC_BOT_URL=https://t.me/lyambarbot pnpm dev --port 3000     # http://localhost:3000
+```
+
+Войти под ролью:
+
+- **по-настоящему** — `/login` в `@lyambarbot` (роль — по вашему доступу в
+  локальной базе: группа/подписка/триал → подписчик, `is_superuser` → админ);
+- **быстро** — ссылки за тестовых юзеров (telegram_id 9000000001..003, не
+  настоящие, рассылок не получают):
+
+```bash
+docker compose -p car-analytics-mvp exec -T api uv run python -m app.cli dev-login
+#       user: http://localhost:3000/login?t=…   (без подписки)
+# subscriber: http://localhost:3000/login?t=…   (подписка 30 дней)
+#      admin: http://localhost:3000/login?t=…   (is_superuser)
+```
+
+Гость — открыть сайт в приватном окне. Ссылки одноразовые, 10 минут;
+сменить роль — «Выйти» в профиле и открыть другую ссылку (или другой браузер).
+`dev-login` отказывает, если `SITE_URL` не localhost.
+
+Грабля: бот на старте догоняет пропущенное с последнего запуска и шлёт это
+одной рассылкой реальным юзерам локальной базы (ваши тест-аккаунты).

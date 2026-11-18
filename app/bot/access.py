@@ -38,7 +38,10 @@ CHAT_PROBLEM_MARKER = "chat not found"
 # /pause и /play — тоже: включить/выключить свои же уведомления можно всегда
 # (пауза у истёкшего доступа ничего не стоит, а «доступ закончился» на /play
 # путал бы сильнее, чем молчание).
-ENTRY_COMMANDS = {"start", "help", "subscribe", "status", "cancel", "invite", "pause", "play", "menu"}
+# login — вход на сайт открыт всем: без доступа человек входит с ролью «пользователь».
+ENTRY_COMMANDS = {
+    "start", "help", "subscribe", "status", "cancel", "invite", "pause", "play", "menu", "login",
+}
 # Callback-и, доступные без активного доступа (префикс aiogram CallbackData):
 # кнопка триала в онбординге и выбор тарифа в /subscribe. Без второго меню
 # тарифов открывалось (команда — входная), а нажатие на план упиралось в

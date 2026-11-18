@@ -365,7 +365,7 @@ def test_market_basis_volume_counts_both_bases() -> None:
     assert by_label["порог 20%: только при этой базе"].avg_per_day == 1
 
 
-def test_showcase_card_carries_photo_model_and_samples() -> None:
+def test_showcase_card_carries_photo_model_and_samples(lenient_best) -> None:
     session = _bot_session()
     _stat(session, avg="12500", samples=31)
     _listing(session, current_price_usd=Decimal("10000"))

@@ -38,7 +38,98 @@ class Settings(BaseSettings):
     default_max_items: int = 500
     default_sync_interval_minutes: int = 60
 
+    # Кэш ответов публичных справочников и аналитики (`core/cache.py`). Данные
+    # меняются раз в цикл бота (10 мин), так что 5 минут — безопасно. 0 = выкл.
     api_cache_ttl_seconds: int = 300
+    # Потолок записей в кэше: ключ = ручка + параметры, перебор параметров
+    # снаружи не должен раздуть память процесса.
+    api_cache_max_entries: int = 2000
+    # Сколько браузер/CDN может держать публичный GET (заголовок Cache-Control).
+    # Меньше серверного TTL: клиент не должен залипать на старых данных.
+    api_public_max_age_seconds: int = 60
+
+    # --- Внешний API: лимиты и защита (`core/ratelimit.py`, `core/http.py`) ----
+    # Swagger/OpenAPI. На проде выключать: схема — карта всех ручек для чужих.
+    api_docs_enabled: bool = True
+    # Swagger для внешнего разработчика на домене сайта (`api/partner_docs.py`):
+    # `/api/v1/docs`, только открытые наружу ручки, HTTP Basic. Формат —
+    # `логин:пароль,логин2:пароль2`. Пусто — ручки нет (404). Убрать человека —
+    # удалить его пару и перезапустить api.
+    partner_docs_users: str = ""
+    # Потолок тела запроса. Самый большой легитимный — webhook Finik (~1-2 КБ).
+    api_max_body_bytes: int = 65_536
+    # Выключатель лимитов целиком (аварийный, не для прода).
+    rate_limit_enabled: bool = True
+    # Токен-бакет на IP: N запросов в минуту в среднем, всплеск до BURST.
+    # public — справочники/дашборд; heavy — оценка и графики (тяжёлые SQL);
+    # admin — панель (экран делает 5-10 запросов разом, лимит щедрый).
+    rate_limit_public_per_minute: int = 120
+    rate_limit_public_burst: int = 60
+    rate_limit_heavy_per_minute: int = 30
+    rate_limit_heavy_burst: int = 15
+    rate_limit_admin_per_minute: int = 600
+    rate_limit_admin_burst: int = 200
+    # Общий на всех потолок тяжёлых ручек: распределённый скрейпинг с сотни IP
+    # не должен положить базу, даже если каждый IP в своей норме. 0 = без него.
+    rate_limit_heavy_global_per_minute: int = 600
+    # Медленный запрос — warning в лог (с X-Request-ID), чтобы видеть, что
+    # тормозит, до того как начнутся таймауты. 0 = не логировать.
+    api_slow_request_ms: int = 1500
+    # Потолок одного SQL-запроса из API (мс). База общая с ботом и worker:
+    # тяжёлый запрос снаружи не должен держать её дольше этого. Ставится только
+    # соединениям процесса `api` (main.py); бот и worker его не получают —
+    # у rebuild-stats запросы законно длинные. 0 = без потолка.
+    api_statement_timeout_ms: int = 10_000
+
+    # --- Публичный сайт (services/public_feed.py, api/public/) -----------------
+    # Адрес сайта: канонические ссылки, Open Graph, sitemap. Пока sslip.io,
+    # переезд на свой домен — только смена переменной (PLATFORM_ADR.md § Домен).
+    site_url: str = ""
+    # Порог раскраски «выгодно / в рынке / дорого» по отклонению от средней, %.
+    public_deal_threshold_percent: float = 5.0
+    # Кэш ленты короче общего: она пополняется каждые 10 минут, и «Новые» не
+    # должны запаздывать на полный TTL справочников.
+    public_feed_cache_seconds: int = 60
+    # Прогрев кэша главной сайта (services/warmup.py): раз в N секунд пересчитываем
+    # ленту/счётчик/«лучшее»/справочники ДО истечения TTL, чтобы посетитель не ждал
+    # холодного запроса. 0 — выключить.
+    public_warmup_interval_seconds: int = 45
+    # Новые объявления появляются в ленте сайта по одному за это время после
+    # обхода (sync._schedule_feed_reveal); 0 — сразу, как раньше.
+    site_feed_spread_seconds: int = 300
+    public_feed_max_limit: int = 48
+    # Вход на сайт через бота (`/login`): срок ссылки и сессии обычного
+    # пользователя (7 дней). Админу — `site_admin_session_ttl_hours` (1 ч).
+    site_login_token_ttl_minutes: int = 10
+    site_session_ttl_days: int = 7
+    # Админ на сайте — короткая сессия (база пользователей с телефона); у старой
+    # панели своя `admin_session_ttl_hours`. Решение владельца 11.11.2026: 1 ч.
+    site_admin_session_ttl_hours: int = 1
+    # Устройств (сессий) на пользователя сайта: новый вход выбивает самое
+    # старое — подписку не раздать на всех (решение владельца 11.11.2026).
+    site_max_sessions: int = 2
+    # Фильтры уведомлений с сайта (`api/me_filters.py`): пауза между изменениями
+    # одного человека и потолок в час (создать/изменить/удалить) — сайт не должен
+    # стать способом дёргать базу и бота сериями; сообщение «фильтр изменён на
+    # сайте» в бота — не чаще раза в N минут (серия правок ≠ серия сообщений).
+    site_filter_write_pause_seconds: int = 5
+    site_filter_writes_per_hour: int = 30
+    site_filter_bot_notify_minutes: int = 10
+    # Предпросмотр фильтра уведомлений без подписки: расчётов в сутки на
+    # человека (тяжёлый запрос) — и без самих машин, только цифры.
+    site_filter_preview_free_per_day: int = 30
+    # Описание lalafo по открытию страницы авто — запрос через платный прокси.
+    # Выключено: описание пишет обход из карточки, которую он и так берёт.
+    site_description_lalafo_on_demand: bool = False
+    # Живая проверка «не снято ли» (services/liveness.py, 12.11.2026): снятое —
+    # из «Лучшего», избранного и со страницы авто раньше, чем дойдёт обход.
+    liveness_enabled: bool = True
+    liveness_lalafo: bool = True  # lalafo — через прокси (~4–9 КБ на карточку)
+    liveness_best_minutes: int = 5  # «Лучшее сейчас» на сайте
+    liveness_watched_minutes: int = 30  # избранное (id из /public/listings?ids=)
+    liveness_watched_hours: int = 24  # сколько помним запрошенные id
+    liveness_open_minutes: int = 60  # страница авто по открытию
+    liveness_max_per_pass: int = 200
 
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 
@@ -78,12 +169,14 @@ class Settings(BaseSettings):
     # пресеты «КР»/«Бишкек»). 20% — выбор 52% пользователей и самый тихий вариант;
     # перед сменой — замер объёма: `cli.py preset-volume`.
     bot_base_filter_percent: int = 20
-    # Слать в рассылке только объявления с полными данными: марка, модель, год
-    # и правдоподобный пробег (`matching.is_complete_listing`). Витрина и превью
-    # нового фильтра требуют этого всегда — это первое, что видит человек.
-    # Замер 21.10.2026 (локально, новичок с базовым фильтром): из 54 пушей у 35
-    # не было пробега — на lalafo он пуст у ~43% объявлений. False — как раньше.
-    bot_require_complete_listings: bool = True
+    # Пуши — только объявления с настоящим фото (`images.real_photo`: заглушка
+    # mashina не фото). Пробег для пуша НЕ обязателен (решение владельца
+    # 02.11.2026, вместо прежнего BOT_REQUIRE_COMPLETE_LISTINGS): пуши идут по
+    # всем пробегам и без пробега — рынок для них считается по всем пробегам
+    # модели и года. Превью нового фильтра — по тем же правилам. Полные данные
+    # (`matching.is_complete_listing`) требует только витрина «Лучшее сейчас».
+    # False — без проверки фото.
+    bot_push_require_photo: bool = True
     # Скидка к рынку больше этого — почти всегда не находка, а ошибка цены,
     # аренда или «цена за долю» (Lexus ES 2020 за $1800 = «−93%»). Такие не
     # шлём и не показываем нигде. 0 = без отсечки.
@@ -91,7 +184,15 @@ class Settings(BaseSettings):
     # Витрина «Лучшее сейчас» (01.11.2026): машины не старше стольких лет —
     # у старых (1993 г., 450 тыс. км) средняя по рынку шумная, и они забивали
     # топ «скидками» 50–59%. 0 = без ограничения.
-    bot_showcase_max_age_years: int = 20
+    bot_showcase_max_age_years: int = 21  # 2005+ допускаются при хорошем скоре (best_picks)
+    # «Лучшее сейчас» (сайт `/public/best` и бот `/best`) — общий скоринг
+    # `services/best_picks.py`, описание — `docs/planning/BEST_PICKS.md`.
+    best_min_photos: int = 3
+    best_new_age_years: int = 8  # «новая» = не старше 8 лет (2018+ в 2026)
+    best_new_slots: int = 5  # первые N мест — новые машины
+    best_min_year: int = 2005  # старше — не берём вообще
+    best_old_min_score: float = 0.55  # не новые — только с хорошим скором
+    best_max_per_model: int = 2
     # Потолок пушей одному чату за цикл — ПО ТАРИФУ (`plans.effective_tier`):
     # full = группа/триал/платный полный, delayed = платный медленный (и фолбэк).
     # Сверх лимита объявление пропускаем без записи в sent_notifications — придёт
@@ -141,6 +242,18 @@ class Settings(BaseSettings):
     # под спойлером, только номер — без имени. false = прежняя кнопка
     # «Связаться на сайте» и без запроса страницы mashina ради номера.
     bot_seller_phone_enabled: bool = True
+    # Ключ HMAC признака номера `listings.seller_phone_hash` (18.11.2026,
+    # services/phones.py). Секрет: с ним номер подбирается перебором. Пусто —
+    # признак не считается. Сменить ключ = все признаки разойдутся со старыми.
+    seller_phone_hash_key: str = ""
+    # Публичный id объявления в ссылках сайта (Sqids, 18.11.2026, services/public_ids.py):
+    # перемешанные 62 символа [a-zA-Z0-9]. НЕ МЕНЯТЬ после запуска — выданные ссылки
+    # перестанут открываться. Пусто — выключено (сайт ходит по числовому id).
+    public_id_alphabet: str = ""
+    # Фото в Telegram файлом, скачанным самим ботом (18.11.2026): Telegram
+    # запоминает неудачную загрузку по ссылке и потом отвечает из кэша ошибки.
+    # false = прежнее поведение (только ссылка, потом ссылка с ?cb=).
+    bot_photo_upload_enabled: bool = True
     # Защита от частых нажатий (план 01.11.2026, п. К).
     # Потоки: каждый запрос бота к базе идёт через пул потоков. Пул Python по
     # умолчанию — min(32, CPU+4) = 6 на проде, и медленный источник по нажатию
@@ -280,11 +393,11 @@ class Settings(BaseSettings):
     stale_listing_days: int = 30
     # Отсев выбросов цены по когорте «модель+год» при построении агрегатов: в
     # когортах ≥ outlier_min_cohort исключаем цены вне [median/K, median*K],
-    # K = outlier_price_median_multiple. K=4 сохраняет легитимный разброс по
+    # K = outlier_price_median_multiple. K=3 (было 4, решение 18.11.2026) сохраняет разброс по
     # комплектациям/пробегу, но режет мусор в десятки раз (Accord 2003 за $520k).
     # Когорты меньше порога не трогаем — там граница неосмысленна (полагаемся на
     # абсолютный предохранитель price_implausibly_high в нормализаторе).
-    outlier_price_median_multiple: float = 4.0
+    outlier_price_median_multiple: float = 3.0
     outlier_min_cohort: int = 5
     # Точечный валидатор lalafo: мы видим только новейшие 50 на марку, поэтому
     # живое объявление со временем уходит из ленты навсегда. Карточка отвечает
@@ -391,6 +504,9 @@ class Settings(BaseSettings):
     def admin_panel_enabled(self) -> bool:
         """Панель включена, только когда известен её публичный адрес."""
         return bool(self.admin_panel_url)
+
+    def site_login_url(self, token: str) -> str:
+        return f"{self.site_url.rstrip('/')}/login?t={token}"
 
     def admin_login_url(self, token: str) -> str:
         return f"{self.admin_panel_url.rstrip('/')}/login?t={token}"
