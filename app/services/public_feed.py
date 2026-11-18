@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app.bot.matching import MarketEstimate, is_complete_listing
 from app.core.config import get_settings
-from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, Source
+from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, ParserRun, Source
 from app.services.exchange import get_latest_usd_rate
 from app.services import best_picks
 from app.services.images import real_photo
@@ -695,21 +695,31 @@ def feed_page(
     return {"items": items, "next_cursor": next_cursor}
 
 
+def data_updated_at(session: Session) -> datetime | None:
+    """Когда последний раз успешно закончился обход любого источника.
+
+    Сайт пишет «обновлено N мин назад» вместо обещания «каждые 10 минут»
+    (решение 18.11.2026: не обещать того, чего нет). Ночью бот спит — честно
+    растёт и это число."""
+    return session.scalar(select(func.max(ParserRun.finished_at)).where(ParserRun.status == "completed"))
+
+
 def feed_count(session: Session, flt: FeedFilter) -> dict:
-    """«Показать N авто». С фильтром по оценке — оценка по просмотренной выборке."""
+    """«Показать N объявлений». С фильтром по оценке — оценка по просмотренной выборке."""
     now = _now()
+    updated_at = data_updated_at(session)
     base = _base_query(flt, now=now)
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
     if flt.deal == "any" or total == 0:
-        return {"count": total, "approximate": False}
+        return {"count": total, "approximate": False, "updated_at": updated_at}
     rows = list(
         session.scalars(_order(base, "fresh", None).limit(min(total, _DEAL_COUNT_SAMPLE))).all()
     )
     matched = sum(1 for item in _enrich(session, rows, now) if _deal_ok(item, flt.deal))
     if total <= _DEAL_COUNT_SAMPLE:
-        return {"count": matched, "approximate": False}
+        return {"count": matched, "approximate": False, "updated_at": updated_at}
     # Экстраполяция по свежей выборке: честно помечаем как приблизительное.
-    return {"count": round(matched / len(rows) * total), "approximate": True}
+    return {"count": round(matched / len(rows) * total), "approximate": True, "updated_at": updated_at}
 
 
 # --- значения для чипов фильтра ---------------------------------------------

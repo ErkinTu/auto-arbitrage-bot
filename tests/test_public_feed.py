@@ -20,6 +20,7 @@ from app.models import (
     DailyMarketStat,
     Listing,
     ListingPriceHistory,
+    ParserRun,
     Source,
 )
 from app.schemas import PublicListingDetail
@@ -267,7 +268,22 @@ def test_deal_filter_scans_past_non_matching(db) -> None:
         count = feed_count(s, FeedFilter(deal="good"))
     assert [i["id"] for i in page["items"]] == [good.id]
     assert page["next_cursor"] is None
-    assert count == {"count": 1, "approximate": False}
+    assert count == {"count": 1, "approximate": False, "updated_at": None}
+
+
+def test_count_reports_last_completed_scan(db) -> None:
+    """«Обновлено N мин назад»: конец последнего УСПЕШНОГО обхода, упавший не в счёт."""
+    Factory, ids = db
+    done = datetime(2026, 11, 18, 10, 0, tzinfo=timezone.utc)
+    with Factory() as s:
+        s.add_all([
+            ParserRun(source_id=ids["mashina"], mode="fresh", status="completed", finished_at=done - timedelta(hours=1)),
+            ParserRun(source_id=ids["lalafo"], mode="fresh", status="completed", finished_at=done),
+            ParserRun(source_id=ids["mashina"], mode="fresh", status="failed", finished_at=done + timedelta(hours=1)),
+        ])
+        s.commit()
+        got = feed_count(s, FeedFilter())["updated_at"]
+    assert got.replace(tzinfo=timezone.utc) == done
 
 
 def test_bad_cursor_is_400(client) -> None:

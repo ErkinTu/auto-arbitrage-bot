@@ -567,6 +567,8 @@ class PublicFeedPage(BaseModel):
 class PublicFeedCount(BaseModel):
     count: int
     approximate: bool
+    # Конец последнего успешного обхода любого источника (UTC) — «обновлено N мин назад».
+    updated_at: datetime | None = None
 
 
 class PublicHistogram(BaseModel):
