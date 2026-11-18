@@ -20,6 +20,7 @@ from app.models import (
     DailyMarketStat,
     Listing,
     ListingPriceHistory,
+    ParserRun,
     Source,
 )
 from app.schemas import PublicListingDetail
@@ -131,7 +132,7 @@ def client(db):
 
 def test_no_personal_data_in_public_schema() -> None:
     fields = set(PublicListingDetail.model_fields)
-    assert "seller_phone" not in fields
+    assert "seller_phone" not in fields and "seller_phone_hash" not in fields
     assert not {"raw_payload", "title", "description", "quality_flags"} & fields
 
 
@@ -160,6 +161,8 @@ def test_feed_returns_market_deviation(client) -> None:
         "diff_usd": -5000,
         "diff_percent": -20.0,
         "verdict": "good",
+        "mileage_accounted": True,
+        "mileage_range": "50–100 тыс. км",
     }
     assert item["source"] == "mashina"
 
@@ -267,7 +270,22 @@ def test_deal_filter_scans_past_non_matching(db) -> None:
         count = feed_count(s, FeedFilter(deal="good"))
     assert [i["id"] for i in page["items"]] == [good.id]
     assert page["next_cursor"] is None
-    assert count == {"count": 1, "approximate": False}
+    assert count == {"count": 1, "approximate": False, "updated_at": None}
+
+
+def test_count_reports_last_completed_scan(db) -> None:
+    """«Обновлено N мин назад»: конец последнего УСПЕШНОГО обхода, упавший не в счёт."""
+    Factory, ids = db
+    done = datetime(2026, 11, 18, 10, 0, tzinfo=timezone.utc)
+    with Factory() as s:
+        s.add_all([
+            ParserRun(source_id=ids["mashina"], mode="fresh", status="completed", finished_at=done - timedelta(hours=1)),
+            ParserRun(source_id=ids["lalafo"], mode="fresh", status="completed", finished_at=done),
+            ParserRun(source_id=ids["mashina"], mode="fresh", status="failed", finished_at=done + timedelta(hours=1)),
+        ])
+        s.commit()
+        got = feed_count(s, FeedFilter())["updated_at"]
+    assert got.replace(tzinfo=timezone.utc) == done
 
 
 def test_bad_cursor_is_400(client) -> None:
@@ -860,3 +878,47 @@ def test_favorites_are_watched_and_checked_by_background_pass(client, monkeypatc
         assert s.get(Listing, fav.id).is_active is False and s.get(Listing, other.id).is_active is True
         # Следующий тик раньше срока — проходов нет.
         assert lv.run_due(s, {"best": 1e6, "watched": 1e6}, clock=lambda: 1e6 + 60) == {}
+
+
+def test_mileage_basis_is_honest() -> None:
+    """«Пробег учтён / не учтён»: без пробега и далеко за открытой корзиной — не учтён."""
+    from app.services.public_feed import mileage_basis
+
+    assert mileage_basis(None) == (False, None)
+    assert mileage_basis(75_000) == (True, "50–100 тыс. км")
+    assert mileage_basis(250_000) == (True, "от 200 тыс. км")
+    assert mileage_basis(493_000) == (False, "от 200 тыс. км")  # Sonata 2019 из разбора 18.11
+
+
+def test_price_suspect_hidden_from_feed(db) -> None:
+    """Spark за $72 тыс.: пересчёт статистики пометил выброс — в ленте и счётчике его нет."""
+    Factory, ids = db
+    with Factory() as s:
+        ok = _listing(s, ids)
+        _listing(s, ids, current_price_usd=Decimal("72000"), price_suspect=True)
+        page = feed_page(s, FeedFilter(), limit=10)
+        count = feed_count(s, FeedFilter())
+    assert [i["id"] for i in page["items"]] == [ok.id]
+    assert count["count"] == 1
+
+
+def test_implausible_mileage_is_estimated_as_unknown(db) -> None:
+    """Audi A6 2004 с «270 км» не сравнивается с почти новыми: оценка по всей когорте, пробег не учтён."""
+    from app.bot.matching import market_estimate
+    from app.services.public_feed import batch_market_estimates, mileage_basis
+
+    Factory, ids = db
+    with Factory() as s:
+        for bucket, avg in (("0-50k", "40000"), ("150-200k", "10000")):
+            s.add(DailyMarketStat(
+                stat_date=date.today(), brand_id=ids["toyota"], car_model_id=ids["camry"], generation_id=None,
+                year=2004, mileage_bucket=bucket, customs_status="unknown", avg_price_usd=Decimal(avg),
+                median_price_usd=Decimal(avg), min_price_usd=Decimal(avg), max_price_usd=Decimal(avg), sample_count=10,
+            ))
+        s.commit()
+        car = _listing(s, ids, year=2004, mileage_km=270, current_price_usd=Decimal("20000"))
+        site = batch_market_estimates(s, [car], min_samples=5)[car.id]
+        bot = market_estimate(s, car, min_samples=5)
+    assert site.avg_usd == bot.avg_usd == 25000  # обе корзины, а не «0-50k» за $40k
+    assert mileage_basis(270, 2004) == (False, None)
+    assert mileage_basis(270, date.today().year) == (True, "до 50 тыс. км")  # новая машина из салона

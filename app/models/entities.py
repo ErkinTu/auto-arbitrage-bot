@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -173,6 +174,13 @@ class Listing(Base, TimestampMixin):
     # API, стирается при деактивации (services/phones.py). lalafo — из ленты
     # (`mobile`, если не `hide_phone`), mashina — со страницы по нажатию.
     seller_phone: Mapped[str | None] = mapped_column(String(20))
+    # Цена — выброс своей когорты (> K× или < 1/K медианы «модель+год», K =
+    # OUTLIER_PRICE_MEDIAN_MULTIPLE). Ставит/снимает пересчёт статистики; NULL —
+    # не проверялось (мелкая когорта, зарубежное, давно не видели). Лента прячет True.
+    price_suspect: Mapped[bool | None] = mapped_column(Boolean)
+    # Признак номера: HMAC-SHA256 цифр (services/phones.py). Не стирается при
+    # снятии, ставится сам при записи номера (слушатель внизу файла).
+    seller_phone_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     # Описание продавца для сайта (services/descriptions.py): по запросу со
     # страницы авто, телефоны замаскированы; вне payload_hash.
     description: Mapped[str | None] = mapped_column(Text)
@@ -392,6 +400,9 @@ class BotUser(Base, TimestampMixin):
     # REFERRAL_FRIENDS_PER_BONUS засчитанных друзей). Счётчик, а не флаг:
     # начисление идемпотентно — сравниваем с числом заслуженных бонусов.
     referral_bonuses_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Метка первого касания из t.me/<бот>?start=<метка> (`hrd`, `ig`, `site_345153`…);
+    # ставится один раз, на первом /start. Каждый переход — событие `start_link`.
+    start_source: Mapped[str | None] = mapped_column(String(64), index=True)
 
 
 class AdminLoginToken(Base):
@@ -720,3 +731,17 @@ class WatchedListing(Base):
 
     listing_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+@event.listens_for(Listing.seller_phone, "set")
+def _hash_seller_phone(target: Listing, value: str | None, _old: Any, _initiator: Any) -> None:
+    """Номер записан — обновить его признак; стёрт (None) — признак остаётся.
+
+    Одна точка вместо правки каждого пути записи (sync, лента lalafo, карточка):
+    новый путь не сможет «забыть» хэш. Bulk `update()` событие минует —
+    `bot/db.save_seller_phone` считает хэш сам."""
+    from app.services.phones import phone_hash
+
+    digest = phone_hash(value)
+    if digest is not None:
+        target.seller_phone_hash = digest

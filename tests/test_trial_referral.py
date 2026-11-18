@@ -479,6 +479,33 @@ def test_handle_start_logs_once_and_attaches_referrer(bot_db) -> None:
         assert s.scalar(select(BotUser.referrer_id).where(BotUser.telegram_id == 2)) is not None
 
 
+def test_start_source_tags_three_links_three_users(bot_db) -> None:
+    """Три перехода по трём меткам → три записи с разными источниками (план 18.11, № 5)."""
+    for tid, payload in ((11, "hrd"), (12, "IG"), (13, "site_345153")):
+        botdb.handle_start(tid, username=None, first_name=None, deep_link_payload=payload)
+    # Повторный переход по другой ссылке не перезаписывает первое касание, но пишется событием.
+    botdb.handle_start(11, username=None, first_name=None, deep_link_payload="reel")
+    # Мусор и пустой аргумент — без метки.
+    botdb.handle_start(14, username=None, first_name=None, deep_link_payload="bad payload!")
+    botdb.handle_start(15, username=None, first_name=None)
+
+    with bot_db() as s:
+        sources = dict(s.execute(select(BotUser.telegram_id, BotUser.start_source)).all())
+        links = s.scalars(select(UserEvent.payload).where(UserEvent.event == "start_link")).all()
+    assert sources == {11: "hrd", 12: "ig", 13: "site_345153", 14: None, 15: None}
+    assert {"source": "reel", "first": False} in links and len(links) == 4
+
+
+def test_parse_source() -> None:
+    from app.services.start_source import parse_source, source_channel
+
+    assert parse_source("ref_ab12") == "ref"
+    assert parse_source(" Market ") == "market"
+    assert parse_source("x" * 65) is None
+    assert parse_source("") is None
+    assert source_channel("site_345153") == "site"
+
+
 def test_activate_trial_grants_and_rewards_referrer(bot_db) -> None:
     with bot_db() as s:
         inviter = _add_user(s, 1)

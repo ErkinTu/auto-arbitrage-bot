@@ -494,6 +494,10 @@ class PublicMarket(BaseModel):
     diff_usd: int
     diff_percent: float
     verdict: Literal["good", "market", "high"]
+    # Пробег в оценке: учтён — сравнили с корзиной `mileage_range` («50–100 тыс. км»);
+    # не учтён (не указан или выше 300 тыс.) — сайт пишет это и красит бейдж серым.
+    mileage_accounted: bool = False
+    mileage_range: str | None = None
 
 
 class PublicDescription(BaseModel):
@@ -567,6 +571,8 @@ class PublicFeedPage(BaseModel):
 class PublicFeedCount(BaseModel):
     count: int
     approximate: bool
+    # Конец последнего успешного обхода любого источника (UTC) — «обновлено N мин назад».
+    updated_at: datetime | None = None
 
 
 class PublicHistogram(BaseModel):

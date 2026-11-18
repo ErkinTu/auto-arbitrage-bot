@@ -13,6 +13,26 @@ from app.models import DailyMarketStat, Listing
 from app.services.regions import is_foreign
 
 
+# Пробег вне этих рамок — ошибка ввода, а не пробег: «0», «1», «270 км» у
+# машины 2004 года. В оценке такой пробег считается неизвестным (иначе старая
+# машина сравнивается с почти новыми и выходит «−40% к рынку»), решение 18.11.2026.
+MIN_PLAUSIBLE_MILEAGE_KM = 1000
+MAX_PLAUSIBLE_MILEAGE_KM = 1_000_000
+
+
+def plausible_mileage(mileage_km: int | None, year: int | None, now: datetime | None = None) -> int | None:
+    """Пробег, которому можно верить, иначе None.
+
+    Меньше 1000 км допустимо только у машины текущего или прошлого года
+    (новая/почти новая); больше миллиона — опечатка."""
+    if mileage_km is None or mileage_km > MAX_PLAUSIBLE_MILEAGE_KM:
+        return None
+    if mileage_km >= MIN_PLAUSIBLE_MILEAGE_KM:
+        return mileage_km
+    current_year = (now or datetime.now(timezone.utc)).year
+    return mileage_km if year is not None and year >= current_year - 1 else None
+
+
 def mileage_bucket(mileage_km: int | None) -> str:
     if mileage_km is None:
         return "unknown"
@@ -88,17 +108,25 @@ def rebuild_daily_market_stats(
             cohort_bounds[cohort_key] = (med / k, med * k)
 
     groups: dict[tuple, list[Decimal]] = defaultdict(list)
+    now = datetime.now(timezone.utc)
     for listing in listings:
         price = Decimal(listing.current_price_usd)
         bounds = cohort_bounds.get((listing.brand_id, listing.car_model_id, listing.year))
-        if bounds is not None and not (bounds[0] <= price <= bounds[1]):
+        suspect = None if bounds is None else not (bounds[0] <= price <= bounds[1])
+        # Метка для ленты сайта (Spark за $72 тыс. — не «нет оценки», а скрыт).
+        # Пишем только при изменении: иначе каждый пересчёт трогал бы все строки.
+        if listing.price_suspect != suspect:
+            listing.price_suspect = suspect
+        if suspect:
             continue  # выброс относительно своей когорты — вне avg/median/sample_count
         key = (
             listing.brand_id,
             listing.car_model_id,
             listing.generation_id,
             listing.year,
-            mileage_bucket(listing.mileage_km),
+            # Неправдоподобный пробег («270 км» у машины 2004 г.) — в unknown, а не
+            # в 0-50k: иначе он завышает рынок почти новых машин.
+            mileage_bucket(plausible_mileage(listing.mileage_km, listing.year, now)),
             listing.customs_status,
         )
         groups[key].append(price)
