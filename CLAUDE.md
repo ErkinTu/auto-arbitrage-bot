@@ -562,6 +562,7 @@ AWS Lightsail, проект в `/home/ubuntu/car-analytics`, docker без sudo.
 | `docs/planning/BEST_PICKS.md` | **«Лучшее сейчас» (сайт `/public/best` + бот `/best`)**: допуск, ярусы при нехватке, скор, порядок 5 новых + старые; план проверки «снято ли» |
 | `docs/planning/PLATFORM_ADR.md` | ADR: админка + фронт + сайт (монорепо, этапы, ветки) |
 | `docs/planning/SITE_TODO.md` | **Сайт: бэкенд-часть — что осталось** (11.11.2026); бэклог сайта — `../analytics-front/docs/FRONT_TODO.md` |
+| `docs/planning/TELEGRAM_LOGIN.md` | **План: вход на сайт кнопкой «Войти через Telegram»** (запрос → код в боте → сессия по опросу); зачем — PWA на iPhone (18.11.2026, не начато) |
 | `docs/sources/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/sources/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `docs/payments/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `docs/payments/web-sdk-flow.png`, что нужно завести |
