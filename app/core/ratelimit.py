@@ -14,6 +14,7 @@ uvicorn запущен с `--proxy-headers` и доверяет Caddy (`FORWARDE
 
 from __future__ import annotations
 
+import hmac
 import math
 import threading
 import time
@@ -160,12 +161,26 @@ def policies(settings: Settings) -> dict[str, Policy]:
         "admin": Policy(
             "admin", settings.rate_limit_admin_per_minute, settings.rate_limit_admin_burst
         ),
+        "ssr": Policy("ssr", settings.rate_limit_ssr_per_minute, settings.rate_limit_ssr_burst),
     }
 
 
 def client_ip(scope: Scope) -> str:
     client = scope.get("client")
     return client[0] if client else "unknown"
+
+
+def is_ssr_without_visitor(scope: Scope, settings: Settings) -> bool:
+    """Запрос кэшированного рендера сайта: верный `X-SSR-Key` и нет IP посетителя.
+
+    С IP посетителя (`X-Forwarded-For`) рендер считается по этому IP, как и
+    раньше: ключ не открывает щедрое ведро тому, чей адрес известен."""
+    key = settings.ssr_shared_key
+    if not key:
+        return False
+    headers = dict(scope.get("headers") or [])
+    given = headers.get(b"x-ssr-key", b"")
+    return hmac.compare_digest(given, key.encode()) and b"x-forwarded-for" not in headers
 
 
 class RateLimitMiddleware:
@@ -195,8 +210,13 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        policy = policies(settings)[kind]
-        decision = self.bucket.hit(policy, client_ip(scope))
+        if kind != "admin" and is_ssr_without_visitor(scope, settings):
+            # Кэшированный рендер сайта: одно ведро на все такие запросы (их мало —
+            # раз в N секунд на страницу), глобальный потолок тяжёлых — как у всех.
+            policy, key = policies(settings)["ssr"], "ssr"
+        else:
+            policy, key = policies(settings)[kind], client_ip(scope)
+        decision = self.bucket.hit(policy, key)
         if decision.allowed and kind == "heavy" and settings.rate_limit_heavy_global_per_minute > 0:
             global_policy = Policy(
                 "heavy_global",
