@@ -17,6 +17,7 @@ from typing import Awaitable, Callable, Protocol
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup
 
+from app.bot import photo_upload
 from app.bot.digest import DIGEST_MAX_ITEMS, LEGACY_DIGEST_MAX_ITEMS, order_digest
 from app.bot.keyboards import block_menu_kb, card_kb, digest_kb, with_rows
 from app.bot.matching import PendingNotification
@@ -250,11 +251,30 @@ def forget_photo_ids(urls: list[str]) -> None:
         _photo_ids.pop(url, None)
 
 
-async def _send_photo(bot: BotLike, message: OutgoingMessage) -> None:
-    """send_photo по file_id из кэша, иначе по ссылке (и запомнить file_id).
+# Тексты отказа Telegram, означающие «картинку по ссылке не взял» (а не «наш баг
+# в подписи/кнопках»). Только по ним идём вниз по лесенке отправки.
+_PHOTO_FETCH_MARKERS = (
+    "failed to get http url content",
+    "wrong type of the web page content",
+    "webpage_",
+    "wrong file identifier",
+    "wrong remote file",
+    "image_process_failed",
+    "photo_invalid_dimensions",
+    "photo_as_inputfile_invalid",
+)
 
-    Отвергнутый file_id (Telegram его забыл) — не повод терять фото: забываем
-    и повторяем по ссылке.
+
+def is_photo_fetch_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _PHOTO_FETCH_MARKERS)
+
+
+async def _send_photo(bot: BotLike, message: OutgoingMessage) -> None:
+    """Лесенка (photo_upload): file_id из кэша → файл, скачанный самим ботом →
+    ссылка → ссылка с `?cb=`. Следующая ступень — только если Telegram не взял
+    картинку (`is_photo_fetch_error`); иные отказы (подпись, кнопки) и «чата
+    нет» уходят наверх сразу. Отвергнутый file_id — забываем и идём дальше.
     """
     url = message.photo_url
     cached = _photo_ids.get(url)
@@ -268,10 +288,26 @@ async def _send_photo(bot: BotLike, message: OutgoingMessage) -> None:
             if is_gone_chat(exc):
                 raise
             _photo_ids.pop(url, None)
-    sent = await bot.send_photo(
-        message.chat_id, photo=url, caption=message.text, reply_markup=message.reply_markup
-    )
-    _remember_photo(url, sent)
+    media: list = []
+    uploaded = await photo_upload.fetch_photo(url)
+    if uploaded is not None:
+        media.append(uploaded)
+    media.extend([url, photo_upload.cache_busted(url)])
+    last_error: TelegramBadRequest | None = None
+    for item in media:
+        try:
+            sent = await bot.send_photo(
+                message.chat_id, photo=item, caption=message.text, reply_markup=message.reply_markup
+            )
+        except TelegramBadRequest as exc:
+            if is_gone_chat(exc) or not is_photo_fetch_error(exc):
+                raise
+            last_error = exc
+            continue
+        _remember_photo(url, sent)
+        return
+    assert last_error is not None
+    raise last_error
 
 
 async def _deliver(bot: BotLike, message: OutgoingMessage) -> None:

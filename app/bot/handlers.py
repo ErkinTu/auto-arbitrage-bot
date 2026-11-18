@@ -14,7 +14,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 
-from app.bot import db, photos, throttle
+from app.bot import db, photo_upload, photos, throttle
 from app.bot.executors import run_click
 from app.bot import filter_panel as fp
 from app.bot import menu_screens as ms
@@ -947,15 +947,16 @@ async def _remember_phone(gallery: db.Gallery, card: photos.Card) -> str | None:
 
 
 async def _send_album(message: Message, album: list[str], reply_to: int) -> None:
-    """Один альбом (или хвост из одного фото) — по file_id из кэша, где он есть.
+    """Один альбом (или хвост из одного фото). Лесенка, как у карточек
+    (`photo_upload`): file_id из кэша, где он есть → файлы, скачанные самим ботом
+    → ссылки → ссылки с `?cb=`. Следующая ступень — только если Telegram не взял
+    картинку; ошибка последней ступени уходит наверх («не удалось загрузить»).
 
-    Кэш общий с карточками (`notifier`): повторный альбом Telegram не качает с
-    CDN. Отвергнутый file_id (Telegram его забыл) — забываем и повторяем по
-    ссылкам; ошибка по ссылкам уходит наверх (там «не удалось загрузить»).
+    Кэш file_id общий с карточками (`notifier`). Отвергнутый file_id —
+    забываем, фото докачиваем ступенями ниже.
     """
-    cached = [notifier.cached_photo_id(url) or url for url in album]
 
-    async def send(media: list[str]) -> list:
+    async def send(media: list) -> list:
         if len(media) == 1:  # альбом — минимум 2 фото
             sent = await message.answer_photo(media[0], reply_to_message_id=reply_to)
             return [sent]
@@ -964,14 +965,44 @@ async def _send_album(message: Message, album: list[str], reply_to: int) -> None
         )
         return list(sent or [])
 
-    if cached != album:
+    cached = {url: notifier.cached_photo_id(url) for url in album}
+    to_fetch = [url for url in album if cached[url] is None]
+    files = await photo_upload.fetch_many(to_fetch) if to_fetch else {}
+
+    def build(mode: str) -> list:
+        if mode == "cache":  # что есть в кэше, остальное файлом или ссылкой
+            return [cached[url] or files.get(url) or url for url in album]
+        if mode == "files":  # файлы вместо ссылок там, где скачали
+            return [files.get(url) or cached[url] or url for url in album]
+        if mode == "urls":
+            return [cached[url] or url for url in album]
+        return [cached[url] or photo_upload.cache_busted(url) for url in album]  # urls_cb
+
+    modes = ["cache"] if any(cached.values()) else []
+    modes += ["files"] if files else []
+    modes += ["urls", "urls_cb"]
+
+    sent: list = []
+    last_error: TelegramBadRequest | None = None
+    tried: list[list] = []
+    for mode in modes:
+        step = build(mode)
+        if mode != "urls_cb" and step in tried:
+            continue
+        tried.append(step)
         try:
-            sent = await send(cached)
-        except TelegramBadRequest:
-            notifier.forget_photo_ids(album)
-            sent = await send(album)
+            sent = await send(step)
+            break
+        except TelegramBadRequest as exc:
+            if not notifier.is_photo_fetch_error(exc):
+                raise
+            if mode == "cache":  # file_id отвергнут — дальше без кэша
+                notifier.forget_photo_ids(album)
+                cached = {url: None for url in album}
+            last_error = exc
     else:
-        sent = await send(album)
+        assert last_error is not None
+        raise last_error
     for url, item in zip(album, sent):
         sizes = getattr(item, "photo", None)
         if sizes:

@@ -282,9 +282,11 @@ def test_send_notifications_sends_photo_for_top() -> None:
 
 def test_send_notifications_photo_rejected_falls_back_to_text() -> None:
     """Битая картинка — не наш баг: карточка доходит текстом."""
+    # Лесенка (18.11.2026): ссылка и ссылка с ?cb= отвергнуты — только тогда текст.
     bot = FakeBot(
         photo_errors=[
-            TelegramBadRequest(method=None, message="Bad Request: wrong type of the web page content")
+            TelegramBadRequest(method=None, message="Bad Request: wrong type of the web page content"),
+            TelegramBadRequest(method=None, message="Bad Request: failed to get HTTP URL content"),
         ]
     )
     blocked: list[int] = []
@@ -298,6 +300,81 @@ def test_send_notifications_photo_rejected_falls_back_to_text() -> None:
     assert sent == 1
     assert bot.messages == [(42, format_notification(_rich_note()))]
     assert blocked == []
+
+
+# --- лесенка отправки фото (18.11.2026) ----------------------------------------
+
+
+def _fetch_error() -> TelegramBadRequest:
+    return TelegramBadRequest(method=None, message="Bad Request: failed to get HTTP URL content")
+
+
+def _stub_fetch(monkeypatch, result) -> None:
+    from app.bot import photo_upload
+
+    async def fake(url):
+        return result
+
+    monkeypatch.setattr(photo_upload, "fetch_photo", fake)
+
+
+def test_photo_ladder_prefers_downloaded_file(monkeypatch) -> None:
+    """Скачали сами — Telegram получает файл, ссылка ему не нужна."""
+    from aiogram.types import BufferedInputFile
+
+    file = BufferedInputFile(b"img", filename="photo.jpg")
+    _stub_fetch(monkeypatch, file)
+    bot = FakeBot()
+    asyncio.run(send_notifications(bot, [_rich_note(listing_id=901)], rich_cards=3))
+    assert [photo for _, photo, _ in bot.photos] == [file]
+
+
+def test_photo_ladder_falls_to_url_when_upload_rejected(monkeypatch) -> None:
+    from aiogram.types import BufferedInputFile
+
+    _stub_fetch(monkeypatch, BufferedInputFile(b"img", filename="photo.jpg"))
+    bot = FakeBot(photo_errors=[_fetch_error()])  # файл не принят
+    note = _rich_note(listing_id=902)
+    asyncio.run(send_notifications(bot, [note], rich_cards=3))
+    assert [photo for _, photo, _ in bot.photos] == [note.image_url]
+
+
+def test_photo_ladder_cache_busted_url_is_last_step() -> None:
+    """Telegram запомнил неудачу для адреса: тот же файл с ?cb= он берёт."""
+    bot = FakeBot(photo_errors=[_fetch_error()])  # скачать самим не вышло (conftest) -> ссылка, отказ
+    note = _rich_note(listing_id=903)
+    asyncio.run(send_notifications(bot, [note], rich_cards=3))
+    (_, photo, _), = bot.photos
+    assert photo.startswith(note.image_url + "?cb=")
+
+
+def test_photo_ladder_remembers_file_id_under_original_url() -> None:
+    """Дальше фото уходит по file_id, а не заново: ключ кэша — исходный адрес."""
+    from types import SimpleNamespace
+
+    from app.bot import notifier
+
+    sent_photo = SimpleNamespace(photo=[SimpleNamespace(file_id="FID")])
+
+    class _Bot(FakeBot):
+        async def send_photo(self, chat_id, photo, **kwargs):
+            await super().send_photo(chat_id, photo, **kwargs)
+            return sent_photo
+
+    note = _rich_note(listing_id=904, image_url="https://img5.lalafo.com/i/x.jpeg")
+    bot = _Bot(photo_errors=[_fetch_error()])
+    asyncio.run(send_notifications(bot, [note], rich_cards=3))
+    assert notifier.cached_photo_id("https://img5.lalafo.com/i/x.jpeg") == "FID"
+
+
+def test_photo_ladder_does_not_retry_our_own_errors() -> None:
+    """Битая разметка подписи — не вина картинки: без повторов ступенями."""
+    bot = FakeBot(
+        photo_errors=[TelegramBadRequest(method=None, message="Bad Request: can't parse entities")]
+    )
+    asyncio.run(send_notifications(bot, [_rich_note(listing_id=905)], rich_cards=3))
+    assert bot.photos == []  # одна попытка, дальше — текст
+    assert len(bot.messages) == 1
 
 
 def test_send_notifications_gone_chat_on_photo_is_not_retried_as_text() -> None:
