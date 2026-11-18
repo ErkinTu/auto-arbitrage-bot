@@ -96,6 +96,9 @@
 `PUBLIC_DEAL_THRESHOLD_PERCENT=5`). Расчёт — тот же, что у бота (пакетный
 `batch_market_estimates`, тест на совпадение `test_batch_estimates_match_bot`);
 отклонение больше `BOT_MAX_BELOW_MARKET_PERCENT` — оценки нет (мусор цены).
+`mileage_accounted` / `mileage_range` (18.11.2026) — учтён ли пробег: корзина статистики
+(«50–100 тыс. км»); пробег не указан или выше 300 тыс. (верхняя корзина открыта) — `false`,
+сайт пишет «пробег не учтён» и красит бейдж серым.
 
 **Чего в ответе нет никогда:** `seller_phone`, `raw_payloads`, `title`/описание
 источника, флаги качества (тест `test_no_personal_data_in_public_schema`).

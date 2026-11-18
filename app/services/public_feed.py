@@ -387,6 +387,32 @@ def _verdict(diff_percent: float) -> str:
     return "market"
 
 
+# Корзины пробега статистики (`stats.mileage_bucket`) → подпись «сравнили с
+# пробегом …». Верхняя корзина открыта: машину с 493 тыс. км она сравнивает с
+# «200 тыс. и больше», где основная масса — 200–300 тыс. Выше этой границы
+# честно говорим «пробег не учтён» и красим бейдж серым (решение 18.11.2026).
+_BUCKET_LABELS = {
+    "0-50k": "до 50 тыс. км",
+    "50-100k": "50–100 тыс. км",
+    "100-150k": "100–150 тыс. км",
+    "150-200k": "150–200 тыс. км",
+    "200k+": "от 200 тыс. км",
+}
+OPEN_BUCKET_MAX_KM = 300_000
+
+
+def mileage_basis(mileage_km: int | None) -> tuple[bool, str | None]:
+    """(учтён ли пробег в оценке, с каким пробегом сравнили).
+
+    Пробег не указан — оценка по всем корзинам модели+года: не учтён, подписи
+    нет. Пробег выше `OPEN_BUCKET_MAX_KM` — сравнили «от 200 тыс.», это не
+    поправка на пробег, а её видимость: тоже не учтён."""
+    if mileage_km is None:
+        return False, None
+    bucket = mileage_bucket(mileage_km)
+    return (bucket != "200k+" or mileage_km <= OPEN_BUCKET_MAX_KM), _BUCKET_LABELS[bucket]
+
+
 def _market(listing: Listing, estimate) -> dict | None:
     if estimate is None or not estimate.avg_usd:
         return None
@@ -403,6 +429,8 @@ def _market(listing: Listing, estimate) -> dict | None:
         "diff_usd": round(diff),
         "diff_percent": round(percent, 1),
         "verdict": _verdict(percent),
+        "mileage_accounted": mileage_basis(listing.mileage_km)[0],
+        "mileage_range": mileage_basis(listing.mileage_km)[1],
     }
 
 

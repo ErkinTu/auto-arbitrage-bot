@@ -161,6 +161,8 @@ def test_feed_returns_market_deviation(client) -> None:
         "diff_usd": -5000,
         "diff_percent": -20.0,
         "verdict": "good",
+        "mileage_accounted": True,
+        "mileage_range": "50–100 тыс. км",
     }
     assert item["source"] == "mashina"
 
@@ -876,3 +878,13 @@ def test_favorites_are_watched_and_checked_by_background_pass(client, monkeypatc
         assert s.get(Listing, fav.id).is_active is False and s.get(Listing, other.id).is_active is True
         # Следующий тик раньше срока — проходов нет.
         assert lv.run_due(s, {"best": 1e6, "watched": 1e6}, clock=lambda: 1e6 + 60) == {}
+
+
+def test_mileage_basis_is_honest() -> None:
+    """«Пробег учтён / не учтён»: без пробега и далеко за открытой корзиной — не учтён."""
+    from app.services.public_feed import mileage_basis
+
+    assert mileage_basis(None) == (False, None)
+    assert mileage_basis(75_000) == (True, "50–100 тыс. км")
+    assert mileage_basis(250_000) == (True, "от 200 тыс. км")
+    assert mileage_basis(493_000) == (False, "от 200 тыс. км")  # Sonata 2019 из разбора 18.11
