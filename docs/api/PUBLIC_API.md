@@ -96,6 +96,9 @@
 `PUBLIC_DEAL_THRESHOLD_PERCENT=5`). Расчёт — тот же, что у бота (пакетный
 `batch_market_estimates`, тест на совпадение `test_batch_estimates_match_bot`);
 отклонение больше `BOT_MAX_BELOW_MARKET_PERCENT` — оценки нет (мусор цены).
+`public_id` (18.11.2026) — публичный id для адресов сайта (`/car/Q041bg`, Sqids, `services/public_ids.py`);
+null — выключено (`PUBLIC_ID_ALPHABET` пуст). Ручки `/listings/{id}`, `/description`, `/media`, `/similar`,
+`?ids=` и `near=` принимают и публичный id, и (пока, ~60 дней) числовой. `id` в ответе остаётся.
 `mileage_accounted` / `mileage_range` (18.11.2026) — учтён ли пробег: корзина статистики
 («50–100 тыс. км»); пробег не указан или выше 300 тыс. (верхняя корзина открыта) — `false`,
 сайт пишет «пробег не учтён» и красит бейдж серым.

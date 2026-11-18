@@ -23,6 +23,7 @@ from app.models import (
     ParserRun,
     Source,
 )
+from app.core.config import get_settings
 from app.schemas import PublicListingDetail
 from app.services.public_feed import FeedFilter, decode_cursor, feed_count, feed_page
 
@@ -922,3 +923,47 @@ def test_implausible_mileage_is_estimated_as_unknown(db) -> None:
     assert site.avg_usd == bot.avg_usd == 25000  # обе корзины, а не «0-50k» за $40k
     assert mileage_basis(270, 2004) == (False, None)
     assert mileage_basis(270, date.today().year) == (True, "до 50 тыс. км")  # новая машина из салона
+
+
+# --- публичный id (Sqids, план 18.11 № 11) ---------------------------------------
+
+ALPHABET = "kZ3qP8xW1mN5vB7cR2tY9uI4oL6eA0sDfGhJjKlzXCVbnMQwErTyUiOpaSdFgH"
+
+
+@pytest.fixture()
+def sqids_on(monkeypatch):
+    monkeypatch.setattr(get_settings(), "public_id_alphabet", ALPHABET)
+
+
+def test_public_id_roundtrip_and_canonical(sqids_on) -> None:
+    from app.services.public_ids import decode, encode
+
+    pid = encode(345153)
+    assert pid and not pid.isdigit() and len(pid) >= 6
+    assert decode(pid) == 345153
+    assert decode("345153") == 345153  # старые числовые ссылки пока живут
+    assert decode("не-id") is None and decode("0") is None and decode("9" * 12) is None
+
+
+def test_public_id_off_without_alphabet(monkeypatch) -> None:
+    from app.services.public_ids import decode, encode
+
+    monkeypatch.setattr(get_settings(), "public_id_alphabet", "")
+    assert encode(5) is None and decode("Q041bg") is None and decode("5") == 5
+
+
+def test_listing_routes_accept_public_id(client, sqids_on) -> None:
+    from app.services.public_ids import encode
+
+    http, Factory, ids = client
+    with Factory() as s:
+        _stat(s, ids, avg="25000")
+        car = _listing(s, ids)
+    pid = encode(car.id)
+    feed = http.get("/api/v1/public/feed").json()["items"][0]
+    assert feed["public_id"] == pid
+    assert http.get(f"/api/v1/public/listings/{pid}").json()["id"] == car.id
+    assert http.get(f"/api/v1/public/listings/{car.id}").status_code == 200
+    assert http.get("/api/v1/public/listings/zzzzzzzzzz").status_code == 404
+    assert [x["id"] for x in http.get(f"/api/v1/public/listings?ids={pid},{car.id}").json()] == [car.id]
+    assert http.get(f"/api/v1/public/feed?sort=similar&near={pid}").status_code == 200

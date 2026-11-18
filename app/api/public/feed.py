@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.roles import current_viewer
@@ -18,6 +18,7 @@ from app.core.cache import cached_call
 from app.core.config import get_settings
 from app.db.session import get_session
 from app.schemas import PublicDescription, PublicFeedCount, PublicFeedFacets, PublicFeedHistograms, PublicFeedPage, PublicListing, PublicListingDetail, PublicMedia
+from app.services import public_ids
 from app.services.regions import REGION_LABELS
 from app.services.specs import SPEC_GROUPS, raw_values_for
 from app.services.site_auth import Viewer, role_at_least
@@ -54,6 +55,30 @@ def _int_list(raw: str | None, *, name: str, max_items: int = 20) -> list[int]:
     if len(values) > max_items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{name}: не больше {max_items}")
     return values
+
+
+def listing_ref(
+    listing_id: Annotated[str, Path(max_length=24, description="публичный id (Sqids) или, пока, число")],
+) -> int:
+    """id объявления из адреса: `/listings/Q041bg` (и старое `/listings/345153`)."""
+    value = public_ids.decode(listing_id)
+    if value is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Объявление не найдено")
+    return value
+
+
+ListingRef = Annotated[int, Depends(listing_ref)]
+
+
+def _ref_list(raw: str, *, name: str, max_items: int) -> list[int]:
+    """Избранное: id через запятую — публичные или числовые вперемешку."""
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if len(parts) > max_items:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{name}: не больше {max_items}")
+    values = [public_ids.decode(part) for part in parts]
+    if any(value is None for value in values):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{name}: неверный id")
+    return list(dict.fromkeys(values))  # type: ignore[arg-type]
 
 
 def _str_list(raw: str | None, *, max_items: int = 20) -> list[str]:
@@ -144,10 +169,13 @@ def get_feed(
     sort: Sort = "fresh",
     limit: Annotated[int, Query(ge=1, le=100)] = 24,
     cursor: Annotated[str | None, Query(max_length=200)] = None,
-    near: Annotated[int | None, Query(ge=1, description="sort=similar: id объявления-образца")] = None,
+    near: Annotated[str | None, Query(max_length=24, description="sort=similar: id объявления-образца (публичный или число)")] = None,
     session: Session = Depends(get_session),
 ) -> dict:
     limit = min(limit, get_settings().public_feed_max_limit)
+    near_id = public_ids.decode(near) if near else None
+    if near and near_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "near: неверный id")
     try:
         return cached_call(
             "public.feed",
@@ -158,7 +186,7 @@ def get_feed(
             sort=sort,
             limit=limit,
             cursor=cursor,
-            near=near if sort == "similar" else None,
+            near=near_id if sort == "similar" else None,
         )
     except CursorError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неверный курсор") from exc
@@ -218,7 +246,7 @@ def get_listings(
     Запрошенные id отмечаем для проверки «не снято ли» (services/liveness.py)."""
     from app.services.liveness import watch
 
-    id_list = _int_list(ids, name="ids", max_items=50)
+    id_list = _ref_list(ids, name="ids", max_items=50)
     watch(session, id_list)
     return cached_call(
         "public.listings",
@@ -231,7 +259,7 @@ def get_listings(
 
 @router.get("/listings/{listing_id}", response_model=PublicListingDetail)
 def get_listing(
-    listing_id: int,
+    listing_id: ListingRef,
     session: Session = Depends(get_session),
     viewer: Viewer = Depends(current_viewer),
 ) -> dict:
@@ -253,7 +281,7 @@ def get_listing(
 
 
 @router.get("/listings/{listing_id}/description", response_model=PublicDescription)
-def get_description(listing_id: int, session: Session = Depends(get_session)) -> dict:
+def get_description(listing_id: ListingRef, session: Session = Depends(get_session)) -> dict:
     """Описание продавца — по запросу со страницы авто (services/descriptions.py).
     Кэш 5 мин: одновременные открытия одной машины — один запрос к источнику."""
     from app.services.descriptions import listing_description
@@ -266,7 +294,7 @@ def get_description(listing_id: int, session: Session = Depends(get_session)) ->
 
 @router.get("/listings/{listing_id}/media", response_model=PublicMedia)
 def get_media(
-    listing_id: int,
+    listing_id: ListingRef,
     broken: Annotated[bool, Query(description="кадры галереи не грузятся — сверить раньше")] = False,
     session: Session = Depends(get_session),
 ) -> dict:
@@ -291,7 +319,7 @@ def get_media(
 
 @router.get("/listings/{listing_id}/similar", response_model=list[PublicListing])
 def get_similar(
-    listing_id: int,
+    listing_id: ListingRef,
     limit: Annotated[int, Query(ge=1, le=12)] = 8,
     session: Session = Depends(get_session),
 ) -> list[dict]:

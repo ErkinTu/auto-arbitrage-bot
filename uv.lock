@@ -201,6 +201,7 @@ dependencies = [
     { name = "httpx", extra = ["socks"] },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
+    { name = "sqids" },
     { name = "sqlalchemy" },
     { name = "tzdata" },
     { name = "uvicorn" },
@@ -220,6 +221,7 @@ requires-dist = [
     { name = "httpx", extras = ["socks"], specifier = ">=0.27,<1.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4.0" },
     { name = "pydantic-settings", specifier = ">=2.6,<3.0" },
+    { name = "sqids", specifier = ">=0.5.2" },
     { name = "sqlalchemy", specifier = ">=2.0,<3.0" },
     { name = "tzdata", specifier = ">=2024.1" },
     { name = "uvicorn", specifier = ">=0.30,<1.0" },
@@ -1058,6 +1060,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f8/5c/48a7d9495be3d1c651198fd99dbb6ce190e2274d0f28b9051307bdec6b85/socksio-1.0.0.tar.gz", hash = "sha256:f88beb3da5b5c38b9890469de67d0cb0f9d494b78b106ca1845f96c10b91c4ac", size = 19055, upload-time = "2020-04-17T15:50:34.664Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/37/c3/6eeb6034408dac0fa653d126c9204ade96b819c936e136c5e8a6897eee9c/socksio-1.0.0-py3-none-any.whl", hash = "sha256:95dc1f15f9b34e8d7b16f06d74b8ccf48f609af32ab33c608d08761c5dcbb1f3", size = 12763, upload-time = "2020-04-17T15:50:31.878Z" },
+]
+
+[[package]]
+name = "sqids"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/33/5b/98c1b37109210631875092d9e7cb7aef3fda2f03780dd999fe5854afa5f3/sqids-0.5.2.tar.gz", hash = "sha256:5ac08f0c5c9b6814bc2e7c79ee5931e0849d25d95c50e415771b022a44f58af9", size = 18213, upload-time = "2025-05-13T16:36:35.644Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/96/178018f3d5b871042e257e9e1db26c6aeb2a704e72cdc884cd2a8918ac2b/sqids-0.5.2-py3-none-any.whl", hash = "sha256:0089ba823e21fd44290c7225f02fb0b5140c36e41959c04d86d3f6f2513799be", size = 8870, upload-time = "2025-05-13T16:36:34.072Z" },
 ]
 
 [[package]]
