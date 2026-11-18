@@ -78,6 +78,7 @@ from app.services.referral import (
     parse_deep_link,
     referral_stats,
 )
+from app.services.phones import phone_hash
 from app.services.subscription import is_subscription_active
 from app.services.trial import is_trial_active, start_trial, trial_used
 
@@ -1369,10 +1370,12 @@ def mark_listing_gone(listing_id: int, reason: str, status_id: int | None = None
 
 def save_seller_phone(listing_id: int, phone: str | None) -> None:
     """Номер продавца, взятый по нажатию «Все фото» (None — продавец скрыл)."""
+    values: dict = {"seller_phone": phone}
+    digest = phone_hash(phone)  # bulk update минует событие ORM — признак считаем сами
+    if digest is not None:
+        values["seller_phone_hash"] = digest
     with SessionLocal() as session:
-        session.execute(
-            update(Listing).where(Listing.id == listing_id).values(seller_phone=phone)
-        )
+        session.execute(update(Listing).where(Listing.id == listing_id).values(**values))
         session.commit()
 
 

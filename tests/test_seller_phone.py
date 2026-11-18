@@ -115,3 +115,61 @@ def test_sync_clears_stored_mashina_placeholder() -> None:
     run_sync(session, _MashinaFeed([_mashina_raw(images=[], title="Toyota Camry 70 2.5 AT ")], {}), source, target, mode="fresh")
     session.refresh(listing)
     assert listing.image_url is None
+
+
+# --- признак номера (HMAC, план 18.11.2026, № 7) ------------------------------
+
+
+@pytest.fixture()
+def hash_key(monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "seller_phone_hash_key", "test-key")
+
+
+def test_phone_hash_is_stable_keyed_and_off_without_key(monkeypatch, hash_key) -> None:
+    from app.core.config import get_settings
+    from app.services.phones import phone_hash
+
+    digest = phone_hash("996500328668")
+    assert digest == phone_hash("996500328668") and len(digest) == 64
+    assert "328668" not in digest and phone_hash(None) is None
+    monkeypatch.setattr(get_settings(), "seller_phone_hash_key", "other")
+    assert phone_hash("996500328668") != digest  # без ключа номер не сопоставить
+    monkeypatch.setattr(get_settings(), "seller_phone_hash_key", "")
+    assert phone_hash("996500328668") is None
+
+
+def test_phone_hash_set_by_sync_and_survives_deactivation_and_hiding(hash_key) -> None:
+    from app.services.phones import phone_hash
+
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    _sync(session, source, target, _item(mobile="+996500328668"))
+    listing = session.scalar(select(Listing))
+    assert listing.seller_phone_hash == phone_hash("996500328668")
+
+    _sync(session, source, target, _item(hide_phone=True))  # продавец скрыл — номер стёрт
+    session.refresh(listing)
+    assert listing.seller_phone is None and listing.seller_phone_hash == phone_hash("996500328668")
+
+    deactivate_by_card(session, listing, reason="card_gone")  # снято — признак остаётся
+    session.commit()
+    session.refresh(listing)
+    assert listing.is_active is False and listing.seller_phone_hash == phone_hash("996500328668")
+
+
+def test_bot_saved_phone_gets_hash(hash_key, monkeypatch) -> None:
+    from sqlalchemy.orm import sessionmaker
+
+    from app.bot import db as botdb
+    from app.services.phones import phone_hash
+
+    session = _sync_session()
+    source, target = _lalafo_setup(session)
+    _sync(session, source, target, _item())
+    listing = session.scalar(select(Listing))
+    monkeypatch.setattr(botdb, "SessionLocal", sessionmaker(bind=session.get_bind()))
+    botdb.save_seller_phone(listing.id, "996700111222")
+    session.refresh(listing)
+    assert listing.seller_phone_hash == phone_hash("996700111222")

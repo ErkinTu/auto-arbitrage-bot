@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.config import get_settings
 from app.core.logging_setup import setup_logging
 from app.db.session import SessionLocal, init_db
-from app.models import Brand, NormalizationIssue, Source, SyncTarget
+from app.models import Brand, Listing, NormalizationIssue, Source, SyncTarget
 from app.services.catalog_service import (
     add_generation_alias,
     add_model_alias,
@@ -467,6 +467,35 @@ def command_lalafo_maintenance(_: argparse.Namespace) -> None:
     run_lalafo_maintenance()
 
 
+def command_phone_hash_backfill(args: argparse.Namespace) -> None:
+    """Признак номера (`seller_phone_hash`) объявлениям, у которых номер уже есть
+    (план 18.11.2026, № 7) — один раз после выката и после задания ключа.
+    Новые получают признак сами при записи номера. Только чтение номера и
+    запись признака; номера не печатаются."""
+    from app.services.phones import phone_hash
+
+    if not get_settings().seller_phone_hash_key:
+        raise SystemExit("SELLER_PHONE_HASH_KEY пуст — признак не считается")
+    done = 0
+    with SessionLocal() as session:
+        while True:
+            rows = session.execute(
+                select(Listing.id, Listing.seller_phone)
+                .where(Listing.seller_phone.is_not(None), Listing.seller_phone_hash.is_(None))
+                .order_by(Listing.id)
+                .limit(args.batch)
+            ).all()
+            if not rows:
+                break
+            for listing_id, phone in rows:
+                session.execute(
+                    update(Listing).where(Listing.id == listing_id).values(seller_phone_hash=phone_hash(phone))
+                )
+            session.commit()
+            done += len(rows)
+    print(f"признак номера проставлен: {done}")
+
+
 def command_fuel_backfill(args: argparse.Namespace) -> None:
     """Группа топлива для старых объявлений (план 01.11.2026, п. Е) — один раз
     после выката. lalafo — из `fuel_type` (секунды), mashina — полная разметка
@@ -700,6 +729,13 @@ def parser() -> argparse.ArgumentParser:
         help="Run lalafo card validator + stale fallback now (what worker does daily)",
     )
     maintenance.set_defaults(func=command_lalafo_maintenance)
+
+    phone_hash = sub.add_parser(
+        "phone-hash-backfill",
+        help="Fill listings.seller_phone_hash for listings that already have a phone (needs SELLER_PHONE_HASH_KEY)",
+    )
+    phone_hash.add_argument("--batch", type=int, default=2000)
+    phone_hash.set_defaults(func=command_phone_hash_backfill)
 
     fuel = sub.add_parser(
         "fuel-backfill",
