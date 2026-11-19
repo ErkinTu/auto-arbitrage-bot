@@ -761,3 +761,29 @@ class PushFilterPreview(BaseModel):
     # Без подписки: машин не показываем (только цифры), проверок в сутки — лимит.
     limited: bool = False
     free_left: int | None = None
+
+
+class EstimateLevelYear(BaseModel):
+    year: int
+    count: int
+
+
+class EstimateLevel(BaseModel):
+    """Один уровень точности оценки (`services/estimate_levels.py`)."""
+
+    level: int
+    label: str
+    available: bool
+    estimated_price: float | None
+    estimated_range: dict[str, float] | None
+    samples: int
+    confidence: str  # high | medium | low | none
+    window: str | None
+    years: list[EstimateLevelYear]
+    archive_count: int
+    year_step_percent: float | None
+    year_step_source: str | None  # data | default; у уровня 1 — None
+
+
+class EstimateLevels(BaseModel):
+    levels: list[EstimateLevel]

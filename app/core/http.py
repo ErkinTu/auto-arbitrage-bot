@@ -24,7 +24,7 @@ logger = logging.getLogger("app.http")
 _PUBLIC_CACHEABLE = ("/api/v1/catalog/", "/api/v1/public/")
 # Только подписчикам — кэш браузера этого человека, не общий.
 _PRIVATE_CACHEABLE = ("/api/v1/dashboard/", "/api/v1/market/")
-_NO_STORE = ("/api/v1/admin/", "/api/v1/payments/", "/api/v1/auth/")
+_NO_STORE = ("/api/v1/admin/", "/api/v1/payments/", "/api/v1/auth/", "/api/v1/me/")
 # Ответ зависит от роли (кука сессии) — общий кэш обязан различать по куке.
 _VARY_COOKIE = ("/api/v1/public/listings/",)
 
