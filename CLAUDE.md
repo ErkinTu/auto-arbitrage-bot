@@ -383,6 +383,15 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   номера; старым — `cli.py phone-hash-backfill`. В API/админку/логи не попадает. Ссылки «Открыть на …» в тексте карточки больше
   нет — только кнопка «Открыть ↗»; источник — последней строкой простым текстом.
 
+- **«Вероятно, та же машина»** (19.11.2026, `feature/photo-hash`, на проде нет): поток `photo-hash`
+  в worker хэширует (dHash) первые 3 фото активных объявлений, кроме новых < 1000 км
+  (`services/photo_hashes.py`, таблица `listing_photo_hashes`, только хэш — фото не храним;
+  `PHOTO_HASH_REQUESTS_PER_SECOND=5`, CDN обеих площадок — без прокси). Раз в час
+  `services/same_car.py` пересчитывает пары (`listing_same_car`, в обе стороны): та же
+  марка/модель/год + совпал кадр (≤ 8 бит) + пробег/топливо не противоречат. Решение владельца:
+  на сайте только «вероятно», ничего не скрываем (`same_car_count` в ленте, `same_car` в карточке).
+  Вручную — `cli.py photo-hash [--limit]`, `cli.py same-car-rebuild`. Замер — `docs/data/DUPLICATES_MEASURE_2026-11-19.md`.
+
 - **Фильтр по топливу** (на проде с 01.11.2026; `docs/planning/PLAN_2026-11-01.md § Е`):
   шаг 8 панели, несколько типов из `petrol | petrol_gas | hybrid | electric |
   diesel` (плагин = гибрид). **В ленте mashina топлива нет** — `listings.fuel_group`
