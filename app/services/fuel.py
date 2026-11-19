@@ -16,13 +16,16 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Literal
 
 PETROL = "petrol"
 PETROL_GAS = "petrol_gas"
 HYBRID = "hybrid"
 ELECTRIC = "electric"
 DIESEL = "diesel"
+
+# Параметр запроса «тип топлива» (оценка, 19.11.2026) — те же пять групп.
+FuelGroup = Literal["petrol", "petrol_gas", "hybrid", "electric", "diesel"]
 
 # Порядок — как в панели фильтра (порядок владельца).
 FUEL_GROUPS: tuple[str, ...] = (PETROL, PETROL_GAS, HYBRID, ELECTRIC, DIESEL)

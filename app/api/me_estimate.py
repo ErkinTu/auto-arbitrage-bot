@@ -19,6 +19,7 @@ from app.core.cache import cached_call
 from app.db.session import get_session
 from app.schemas import EstimateLevels
 from app.services.estimate_levels import estimate_levels
+from app.services.fuel import FuelGroup
 from app.services.site_auth import Viewer, role_at_least
 
 router = APIRouter(prefix="/api/v1/me", tags=["me"], dependencies=[Depends(require_subscriber)])
@@ -31,6 +32,7 @@ def get_estimate_levels(
     model_id: int = Query(ge=1),
     year: int = Query(ge=1900, le=2100),
     mileage_km: int | None = Query(default=None, ge=0, le=1_000_000),
+    fuel: FuelGroup | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> dict:
     levels = cached_call(
@@ -41,6 +43,7 @@ def get_estimate_levels(
         model_id=model_id,
         year=year,
         mileage_km=mileage_km,
+        fuel=fuel,
     )
     top = 3 if role_at_least(viewer.role, "admin") else 2
     return {"levels": [level for level in levels if level["level"] <= top]}

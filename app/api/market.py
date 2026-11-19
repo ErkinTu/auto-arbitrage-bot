@@ -5,6 +5,7 @@ from app.core.cache import cached_call
 from app.api.roles import require_subscriber
 from app.db.session import get_session
 from app.schemas import VehicleSummary
+from app.services.fuel import FuelGroup
 from app.services.vehicle_summary import Granularity, get_vehicle_summary
 
 # Графики и аналитика — подписчикам (роли сайта, PLATFORM_ADR.md). Гейт на
@@ -26,6 +27,8 @@ def vehicle_summary(
     # Шаг графиков. По умолчанию неделя: месячная точка на полугодовом окне
     # сглаживает ровно то, ради чего на график и смотрят.
     granularity: Granularity = Query(default="week"),
+    # Тип топлива (19.11.2026): None — все типы, как раньше.
+    fuel: FuelGroup | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> dict:
     try:
@@ -39,6 +42,7 @@ def vehicle_summary(
             generation_id=generation_id,
             mileage_km=mileage_km,
             granularity=granularity,
+            fuel=fuel,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

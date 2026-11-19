@@ -478,6 +478,13 @@ class PriceDistribution(BaseModel):
     total: int
 
 
+class VehicleSummaryFuel(BaseModel):
+    fuel: str | None  # None — топливо не указано
+    label: str
+    samples: int
+    median_usd: float
+
+
 class VehicleSummary(BaseModel):
     vehicle: VehicleHeader
     currency: str
@@ -494,6 +501,9 @@ class VehicleSummary(BaseModel):
     granularity: str
     trend: list[VehicleSummaryTrendPoint]
     intake: list[VehicleIntakePoint]
+    # Топливо (19.11.2026): выбранный тип (None — все) и сравнение типов в когорте.
+    fuel: str | None = None
+    fuels: list[VehicleSummaryFuel] = []
 
 
 # --- Публичный сайт (api/public/) --------------------------------------------

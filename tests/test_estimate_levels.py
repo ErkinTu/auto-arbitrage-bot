@@ -165,3 +165,30 @@ def test_roles_get_their_levels_only(env) -> None:
     client.cookies.clear()
     _login(client, Factory, 13, is_superuser=True)
     assert [lv["level"] for lv in client.get(url).json()["levels"]] == [1, 2, 3]
+
+
+def test_fuel_narrows_estimate_and_breakdown_compares_types(env) -> None:
+    """Топливо (19.11.2026): без него — как раньше; с ним — только этот тип; сравнение
+    типов всегда по всей когорте, неизвестное — отдельной строкой."""
+    client, Factory, ids = env
+    with Factory() as s:
+        for price in (20_000, 20_000, 20_000):
+            _car(s, ids, year=2019, price=price, fuel_group="petrol")
+        for price in (17_000, 17_000):
+            _car(s, ids, year=2019, price=price, fuel_group="petrol_gas")
+        _car(s, ids, year=2019, price=19_000, fuel_group=None)
+        every = get_vehicle_summary(s, brand_id=ids["brand"], model_id=ids["model"], year=2019)
+        gas = get_vehicle_summary(s, brand_id=ids["brand"], model_id=ids["model"], year=2019, fuel="petrol_gas")
+        levels = estimate_levels(s, brand_id=ids["brand"], model_id=ids["model"], year=2019, fuel="petrol")
+    assert every["samples"] == 6 and every["fuel"] is None
+    assert gas["samples"] == 2 and gas["estimated_price"] == 17_000 and gas["fuel"] == "petrol_gas"
+    assert gas["fuels"] == every["fuels"] == [
+        {"fuel": "petrol", "label": "Бензин", "samples": 3, "median_usd": 20_000.0},
+        {"fuel": "petrol_gas", "label": "Газ", "samples": 2, "median_usd": 17_000.0},
+        {"fuel": None, "label": "Не указано", "samples": 1, "median_usd": 19_000.0},
+    ]
+    assert levels[0]["samples"] == 3 and levels[0]["estimated_price"] == 20_000
+    base = f"/api/v1/public/estimate?brand_id={ids['brand']}&model_id={ids['model']}&year=2019"
+    assert client.get(base + "&fuel=petrol_gas").json()["samples"] == 2
+    assert client.get(base + "&fuel=kerosene").status_code == 422
+    assert client.get(base + "&fuel=electric").status_code == 404

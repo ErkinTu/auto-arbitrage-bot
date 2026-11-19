@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Brand, CarModel, DailyMarketStat, Generation, Listing, RawPayload
 from app.services.analytics import select_by_mileage
+from app.services.fuel import FUEL_GROUPS, FUEL_LABELS
 from app.services.images import extract_image_url as _extract_image_url
 from app.services.sources import listing_public_url
 
@@ -258,6 +259,7 @@ def _intake_points(
     generation_id: int | None,
     year: int,
     granularity: str,
+    fuel: str | None = None,
 ) -> list[dict]:
     """Сколько объявлений появилось у нас за период.
 
@@ -279,6 +281,8 @@ def _intake_points(
     ]
     if generation_id is not None:
         conditions.append(Listing.generation_id == generation_id)
+    if fuel is not None:
+        conditions.append(Listing.fuel_group == fuel)
 
     seen_at = session.scalars(select(Listing.first_seen_at).where(*conditions)).all()
     if not seen_at:
@@ -315,6 +319,27 @@ def _intake_points(
     return points
 
 
+def _fuel_breakdown(session: Session, conditions: list) -> list[dict]:
+    """Типы топлива в когорте: сколько объявлений и медиана цены (порядок — FUEL_GROUPS).
+    Неизвестное топливо — отдельной строкой `fuel=None`: видно, сколько машин выпадет
+    при выборе типа."""
+    rows = session.execute(select(Listing.fuel_group, Listing.current_price_usd).where(*conditions).limit(5000)).all()
+    prices: dict[str | None, list[float]] = defaultdict(list)
+    for group, price in rows:
+        prices[group if group in FUEL_GROUPS else None].append(float(price))
+    order = [*FUEL_GROUPS, None]
+    return [
+        {
+            "fuel": key,
+            "label": FUEL_LABELS[key] if key else "Не указано",
+            "samples": len(prices[key]),
+            "median_usd": round(float(median(prices[key])), 2),
+        }
+        for key in order
+        if prices.get(key)
+    ]
+
+
 def get_vehicle_summary(
     session: Session,
     *,
@@ -324,7 +349,18 @@ def get_vehicle_summary(
     generation_id: int | None = None,
     mileage_km: int | None = None,
     granularity: Granularity = "week",
+    fuel: str | None = None,
 ) -> dict:
+    """Оценка «Оценить авто» и сводка рынка по модели и году.
+
+    `fuel` (19.11.2026, решение владельца) — сузить когорту до типа топлива
+    (`listings.fuel_group`); без него — все типы, как раньше. Объявления без
+    известного топлива при выбранном типе не берутся. Динамика цены (`trend`)
+    строится по дневным агрегатам без топлива — она всегда по всем типам.
+    `fuels` — сравнение типов в той же когорте (без сужения), для переключателя.
+    """
+    if fuel is not None and fuel not in FUEL_GROUPS:
+        raise LookupError("Неизвестный тип топлива")
     brand = session.get(Brand, brand_id)
     car_model = session.get(CarModel, model_id)
     if not brand or not car_model:
@@ -342,6 +378,9 @@ def get_vehicle_summary(
     if generation_id is not None:
         conditions.append(Listing.generation_id == generation_id)
 
+    fuels = _fuel_breakdown(session, conditions)
+    if fuel is not None:
+        conditions.append(Listing.fuel_group == fuel)
     listings = session.scalars(select(Listing).where(*conditions).limit(1000)).all()
     if not listings:
         raise LookupError("Недостаточно похожих активных объявлений")
@@ -383,6 +422,7 @@ def get_vehicle_summary(
         generation_id=generation_id,
         year=year,
         granularity=granularity,
+        fuel=fuel,
     )
 
     return {
@@ -411,4 +451,6 @@ def get_vehicle_summary(
         "granularity": granularity,
         "trend": trend,
         "intake": intake,
+        "fuel": fuel,
+        "fuels": fuels,
     }

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.cache import cached_call
 from app.db.session import get_session
 from app.schemas import VehicleSummary
+from app.services.fuel import FuelGroup
 from app.services.vehicle_summary import Granularity, get_vehicle_summary
 
 router = APIRouter(prefix="/api/v1/public", tags=["public"])
@@ -27,6 +28,8 @@ def public_estimate(
     year: int = Query(ge=1900, le=2100),
     mileage_km: int | None = Query(default=None, ge=0, le=1_000_000),
     granularity: Granularity = Query(default="week"),
+    # Тип топлива (19.11.2026): None — все типы, как раньше.
+    fuel: FuelGroup | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> dict:
     try:
@@ -41,6 +44,7 @@ def public_estimate(
             generation_id=None,
             mileage_km=mileage_km,
             granularity=granularity,
+            fuel=fuel,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

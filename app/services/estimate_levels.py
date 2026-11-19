@@ -67,7 +67,16 @@ def _percentile(values: list[float], p: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
-def _cohort(session: Session, *, brand_id: int, model_id: int, years: tuple[int, int], active: bool, since=None):
+def _cohort(
+    session: Session,
+    *,
+    brand_id: int,
+    model_id: int,
+    years: tuple[int, int],
+    active: bool,
+    since=None,
+    fuel: str | None = None,
+):
     conditions = [
         Listing.analytics_eligible.is_(True),
         Listing.brand_id == brand_id,
@@ -76,6 +85,8 @@ def _cohort(session: Session, *, brand_id: int, model_id: int, years: tuple[int,
         Listing.year <= years[1],
         Listing.current_price_usd.is_not(None),
     ]
+    if fuel is not None:
+        conditions.append(Listing.fuel_group == fuel)
     if active:
         conditions.append(Listing.is_active.is_(True))
     else:
@@ -173,12 +184,14 @@ def estimate_levels(
     model_id: int,
     year: int,
     mileage_km: int | None = None,
+    fuel: str | None = None,
     now: datetime | None = None,
 ) -> list[dict]:
-    """Все три уровня. Кому что показать — решает ручка (по роли)."""
+    """Все три уровня. Кому что показать — решает ручка (по роли). `fuel` — тип
+    топлива (как у основной оценки): сужает все уровни, шаг года считается по нему же."""
     now = now or datetime.now(timezone.utc)
     wide = _cohort(
-        session, brand_id=brand_id, model_id=model_id, years=(year - SLOPE_SPAN, year + SLOPE_SPAN), active=True
+        session, brand_id=brand_id, model_id=model_id, years=(year - SLOPE_SPAN, year + SLOPE_SPAN), active=True, fuel=fuel
     )
     step, step_source = year_step(wide, year)
 
@@ -195,6 +208,7 @@ def estimate_levels(
         years=(year - YEAR_SPAN, year + YEAR_SPAN),
         active=False,
         since=now - timedelta(days=ARCHIVE_DAYS),
+        fuel=fuel,
     )
     active_ids = {item.id for item in wide if abs(item.year - year) <= YEAR_SPAN}
     archived = [point(item, archived=True) for item in _dedupe_archive(session, archive, active_ids)]
