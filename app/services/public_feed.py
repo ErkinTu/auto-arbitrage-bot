@@ -18,18 +18,21 @@ OFFSET давал бы дубли и пропуски на стыке стран
 from __future__ import annotations
 
 import base64
+import logging
 import binascii
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 
-from sqlalchemy import Integer, Select, and_, cast, exists, func, or_, select, true, tuple_
+from sqlalchemy import Integer, Select, and_, cast, delete, exists, func, or_, select, true, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, aliased
 
 from app.bot.matching import MarketEstimate, is_complete_listing
 from app.core.config import get_settings
-from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, ParserRun, Source
+from app.models import BestPin, Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, ParserRun, Source
 from app.services.exchange import get_latest_usd_rate
 from app.services import best_picks, public_ids, same_car
 from app.services.images import real_photo
@@ -38,6 +41,8 @@ from app.services.regions import REGION_LABELS, is_foreign, region_matches, regi
 from app.services.sources import listing_public_url
 from app.services.specs import group_labels, spec_group
 from app.services.stats import mileage_bucket, plausible_mileage
+
+logger = logging.getLogger(__name__)
 
 Sort = Literal["fresh", "price_asc", "price_desc", "similar"]
 
@@ -988,16 +993,7 @@ def _best_candidate(item: dict, listing: Listing, now: datetime) -> best_picks.C
     )
 
 
-def best_now(session: Session, *, limit: int = 12) -> list[dict]:
-    """«Лучшее сейчас» для сайта: выгодные по-настоящему, не самые дешёвые.
-
-    Правила и ярусы нехватки — `services/best_picks.py` и `docs/planning/BEST_PICKS.md`.
-    Сначала смотрим свежие за 24 ч; если набралось меньше `limit` — один раз расширяем
-    пул до 72 ч (ярусы 2–3 берут из него), иначе отдаём сколько есть. Без проверки
-    позиции у источника (её делает прогрев витрины бота), без побочных эффектов.
-    """
-    now = _now()
-    cfg = best_picks.current_config()
+def _best_scan(session: Session, now: datetime, cfg: best_picks.BestConfig, size: int) -> list[best_picks.Pick]:
     result: list[best_picks.Pick] = []
     for hours in (24, 72):
         base = _base_query(FeedFilter(with_photo=True), now=now).where(
@@ -1006,10 +1002,88 @@ def best_now(session: Session, *, limit: int = 12) -> list[dict]:
         rows = list(session.scalars(_order(base, "fresh", None).limit(_DEAL_SCAN_MAX)).all())
         by_id = {row.id: row for row in rows}
         cands = [c for c in (_best_candidate(i, by_id[i["id"]], now) for i in _enrich(session, rows, now)) if c]
-        result = best_picks.select(cands, size=limit, now_year=now.year, cfg=cfg)
-        if len(result) >= limit:
+        result = best_picks.select(cands, size=size, now_year=now.year, cfg=cfg)
+        if len(result) >= size:
             break
-    return [p.cand.ref for p in result]
+    return result
+
+
+def _stamp_best_pins(session: Session, ids: list[int], now: datetime, horizon: datetime) -> list[int]:
+    """Отметить «сейчас в первых местах», убрать просроченное и вернуть закреплённых
+    (по свежести вытеснения). Сбой учёта не должен ронять карусель."""
+    try:
+        if ids:
+            rows = [{"listing_id": i, "last_top_at": now} for i in ids]
+            if session.get_bind().dialect.name == "postgresql":
+                stmt = pg_insert(BestPin).values(rows)
+                session.execute(stmt.on_conflict_do_update(index_elements=["listing_id"], set_={"last_top_at": now}))
+            else:  # тесты (SQLite)
+                for row in rows:
+                    session.merge(BestPin(**row))
+        session.execute(delete(BestPin).where(BestPin.last_top_at < horizon))
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.warning("best pins: учёт не записан", exc_info=True)
+    return list(
+        session.scalars(
+            select(BestPin.listing_id)
+            .where(BestPin.last_top_at >= horizon, BestPin.listing_id.not_in(ids or [-1]))
+            .order_by(BestPin.last_top_at.desc(), BestPin.listing_id)
+        )
+    )
+
+
+def best_now(session: Session, *, limit: int = 24) -> list[dict]:
+    """«Лучшее сейчас» для сайта: выгодные по-настоящему, не самые дешёвые.
+
+    Правила и ярусы нехватки — `services/best_picks.py` и `docs/planning/BEST_PICKS.md`.
+    Сначала смотрим свежие за 24 ч; если набралось меньше `limit` — один раз расширяем
+    пул до 72 ч (ярусы 2–3 берут из него). Без проверки позиции у источника (её делает
+    прогрев витрины бота и `services/liveness.py`).
+
+    **Закрепление (решение владельца 19.11.2026, только сайт):** первые
+    `BEST_TOP_SLOTS` (12) мест — свежий расчёт. Машина, вытесненная оттуда новыми
+    находками, не пропадает: `BEST_PIN_HOURS` часов после последнего показа в первых
+    местах она стоит за ними (13–24), пока ещё «находка» (`best_picks.still_good`) и
+    не снята. Остаток до `limit` (≤ 24) — следующие места свежего расчёта. Учёт —
+    таблица `best_pins` (пишется здесь же, идемпотентно).
+    """
+    now = _now()
+    settings = get_settings()
+    cfg = best_picks.current_config()
+    fresh = _best_scan(session, now, cfg, limit)
+    top = fresh[: min(settings.best_top_slots, limit)]
+    result: list[dict] = [p.cand.ref for p in top]
+    taken = {item["id"] for item in result}
+    per_model = Counter((item["brand"], item["model"]) for item in result)
+
+    def add(item: dict) -> None:
+        key = (item["brand"], item["model"])
+        if len(result) >= limit or item["id"] in taken or per_model[key] >= cfg.max_per_model:
+            return
+        taken.add(item["id"])
+        per_model[key] += 1
+        result.append(item)
+
+    horizon = now - timedelta(hours=settings.best_pin_hours)
+    pinned_ids = _stamp_best_pins(session, [item["id"] for item in result], now, horizon)
+    if pinned_ids and len(result) < limit:
+        rows = list(
+            session.scalars(
+                _base_query(FeedFilter(with_photo=True), now=now).where(Listing.id.in_(pinned_ids))
+            ).all()
+        )
+        by_id = {row.id: row for row in rows}
+        items = {i["id"]: i for i in _enrich(session, rows, now)}
+        for listing_id in pinned_ids:  # порядок — кого вытеснили позже, тот выше
+            item = items.get(listing_id)
+            cand = _best_candidate(item, by_id[listing_id], now) if item else None
+            if cand is not None and best_picks.still_good(cand, now_year=now.year, cfg=cfg):
+                add(item)
+    for pick in fresh[len(top):]:
+        add(pick.cand.ref)
+    return result
 
 
 # --- гистограммы для ползунков ----------------------------------------------

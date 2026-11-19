@@ -330,7 +330,7 @@ def watched_ids(session: Session, now: datetime) -> list[int]:
 def best_ids(session: Session) -> list[int]:
     from app.services.public_feed import best_now
 
-    return [item["id"] for item in best_now(session, limit=12)]
+    return [item["id"] for item in best_now(session, limit=24)]
 
 
 # --- Фоновый цикл (поток в worker) --------------------------------------------

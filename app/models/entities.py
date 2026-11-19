@@ -796,6 +796,19 @@ class ListingSameCar(Base):
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class BestPin(Base):
+    """«Лучшее сейчас» на сайте: когда объявление последний раз стояло в первых
+    `BEST_TOP_SLOTS` местах (решение владельца 19.11.2026). Вытесненное новыми
+    находками не пропадает из карусели `BEST_PIN_HOURS` часов, а уезжает за первые
+    12 мест. Только сайт: витрина бота это не читает. Старые строки чистит сам
+    `public_feed.best_now`."""
+
+    __tablename__ = "best_pins"
+
+    listing_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_top_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
 @event.listens_for(Listing.seller_phone, "set")
 def _hash_seller_phone(target: Listing, value: str | None, _old: Any, _initiator: Any) -> None:
     """Номер записан — обновить его признак; стёрт (None) — признак остаётся.

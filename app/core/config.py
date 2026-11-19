@@ -217,6 +217,10 @@ class Settings(BaseSettings):
     best_min_year: int = 2005  # старше — не берём вообще
     best_old_min_score: float = 0.55  # не новые — только с хорошим скором
     best_max_per_model: int = 2
+    # Сайт: первые N мест — свежий расчёт; вытесненные оттуда держатся в карусели ещё
+    # `best_pin_hours` часов, уже за этими местами (решение владельца 19.11.2026).
+    best_top_slots: int = 12
+    best_pin_hours: int = 12
     # Потолок пушей одному чату за цикл — ПО ТАРИФУ (`plans.effective_tier`):
     # full = группа/триал/платный полный, delayed = платный медленный (и фолбэк).
     # Сверх лимита объявление пропускаем без записи в sent_notifications — придёт

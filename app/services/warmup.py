@@ -24,7 +24,7 @@ from app.db.session import SessionLocal
 logger = logging.getLogger(__name__)
 
 HOME_LIMIT = 24  # PAGE у сайта (useFeed.ts)
-BEST_LIMIT = 12
+BEST_LIMIT = 24  # = карусель сайта (12 свежих + закреплённые), public_feed.best_now
 
 
 SLOW_EVERY = 4  # «тяжёлые» ключи с TTL 300 с (best, фасеты, марки) — раз в 4 прохода (~3 мин)

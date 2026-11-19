@@ -231,7 +231,7 @@ def get_feed_facets(session: Session = Depends(get_session)) -> dict:
 
 @router.get("/best", response_model=list[PublicListing])
 def get_best(
-    limit: Annotated[int, Query(ge=1, le=24)] = 12,
+    limit: Annotated[int, Query(ge=1, le=24)] = 24,
     session: Session = Depends(get_session),
 ) -> list[dict]:
     return cached_call("public.best", best_now, session, limit=limit)

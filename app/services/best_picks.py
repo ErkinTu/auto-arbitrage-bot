@@ -175,6 +175,20 @@ def _admit(c: Candidate, *, now_year: int, cfg: BestConfig, tiers: tuple[Tier, .
     return None
 
 
+def still_good(c: Candidate, *, now_year: int, cfg: BestConfig | None = None) -> bool:
+    """Закреплённое (сайт, вытеснено из первых мест) остаётся в карусели, пока оно
+    всё ещё «находка»: те же требования к данным и фото, скидка в самом широком
+    коридоре ярусов. Окно свежести не проверяем — закрепление ровно про то, чтобы
+    машина не исчезала по таймеру ярусов."""
+    cfg = cfg or current_config()
+    widest = TIERS[-1]
+    if c.year is None or c.year < cfg.min_year or c.photos < cfg.min_photos:
+        return False
+    if not c.has_mileage or not c.has_date:
+        return False
+    return widest.lo <= c.discount <= widest.hi
+
+
 def rank(
     cands: Iterable[Candidate],
     *,

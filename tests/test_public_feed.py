@@ -645,7 +645,7 @@ def test_warmup_fills_exactly_the_keys_the_home_page_requests(client, monkeypatc
         "/api/v1/public/feed?with_photo=true&sort=fresh&limit=24",
         "/api/v1/public/feed/count?with_photo=true",
         "/api/v1/public/feed/histograms?with_photo=true",
-        "/api/v1/public/best?limit=12",
+        "/api/v1/public/best?limit=24",
         "/api/v1/public/feed/facets",
         "/api/v1/catalog/brands",
     ):
@@ -690,6 +690,47 @@ def test_site_best_filters_orders_and_does_not_pad(client) -> None:
         _listing(s, ids, current_price_usd=Decimal("18350"), image_urls=photos)
     body = http.get("/api/v1/public/best").json()
     assert [i["id"] for i in body] == [good.id]
+
+
+def test_site_best_pins_displaced_after_top(client, monkeypatch) -> None:
+    """Закрепление (решение владельца 19.11.2026): вытесненное из первых мест не
+    пропадает, а уезжает за них на BEST_PIN_HOURS; снятое и просроченное — уходит."""
+    from app.core.config import get_settings
+    from app.models import BestPin
+    from app.services.public_feed import best_now
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "best_top_slots", 1)
+    monkeypatch.setattr(settings, "best_max_per_model", 10)
+    http, Factory, ids = client
+    photos = [f"https://cdn.example/{i}.jpg" for i in range(5)]
+    dated = dict(image_urls=photos, source_created_at=_now() - timedelta(hours=1))
+    with Factory() as s:
+        _stat(s, ids, avg="25000", samples=60)
+        old = _listing(s, ids, current_price_usd=Decimal("18250"), first_seen_at=_now() - timedelta(hours=5), **dated)
+        assert [i["id"] for i in best_now(s, limit=24)] == [old.id]
+        # Новая находка с тем же скором, но свежее — занимает первое место.
+        new = _listing(s, ids, current_price_usd=Decimal("18250"), first_seen_at=_now(), **dated)
+        assert [i["id"] for i in best_now(s, limit=24)] == [new.id, old.id]
+        # Без закрепления старое ушло бы целиком: лимит 1 = только первые места.
+        assert [i["id"] for i in best_now(s, limit=1)] == [new.id]
+        # Снятое из закреплённых пропадает.
+        s.get(Listing, old.id).is_active = False
+        s.commit()
+        assert [i["id"] for i in best_now(s, limit=24)] == [new.id]
+        s.get(Listing, old.id).is_active = True
+        s.commit()
+        assert [i["id"] for i in best_now(s, limit=24)] == [new.id, old.id]
+        # Перестало быть находкой (цена поднялась до −2 %) — тоже уходит.
+        s.get(Listing, old.id).current_price_usd = Decimal("24500")
+        s.commit()
+        assert [i["id"] for i in best_now(s, limit=24)] == [new.id]
+        s.get(Listing, old.id).current_price_usd = Decimal("18250")
+        # Срок закрепления вышел — уходит и строка учёта.
+        s.get(BestPin, old.id).last_top_at = _now() - timedelta(hours=settings.best_pin_hours + 1)
+        s.commit()
+        assert [i["id"] for i in best_now(s, limit=24)] == [new.id]
+        assert s.get(BestPin, old.id) is None
 
 
 def test_feed_thumbs_cover_first_light_and_capped(client) -> None:
