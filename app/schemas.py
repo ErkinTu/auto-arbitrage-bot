@@ -281,6 +281,15 @@ class AdminUserNotifications(BaseModel):
     last_sent_at: datetime | None
 
 
+class AdminSiteSession(BaseModel):
+    """Вход на сайт: устройство и время, без IP и без токена."""
+
+    device: str | None
+    created_at: datetime | None
+    last_seen_at: datetime | None
+    expires_at: datetime | None
+
+
 class AdminUserDetail(BaseModel):
     id: int
     telegram_id: int
@@ -298,6 +307,11 @@ class AdminUserDetail(BaseModel):
     access_blocks: list[AdminAccessBlock]
     events: list[AdminUserEvent]
     notifications: AdminUserNotifications
+    # Сайт (раздел /admin, 19.11.2026): откуда пришёл, пауза, оплачено всего, входы на сайт.
+    start_source: str | None = None
+    paused_at: datetime | None = None
+    paid_total: dict[str, float] = {}
+    site_sessions: list[AdminSiteSession] = []
 
 
 class AdminFunnelStep(BaseModel):

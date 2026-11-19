@@ -79,6 +79,14 @@
 	}
 	# Вход и личное (фильтры уведомлений в профиле): кука сессии, любые методы.
 	@auth_api path /api/v1/auth/* /api/v1/me/*
+	# Раздел /admin сайта (19.11.2026): только чтение и только экраны пользователей —
+	# список, карточка, сводка, воронка. Гейт — current_admin на роутере (сессия сайта
+	# с is_superuser, роль на каждом запросе, сессия админа 1 ч), ответы no-store.
+	# Вход/выход старой панели (admin/auth/*), объявления, рынок — здесь закрыты.
+	@site_admin {
+		method GET HEAD
+		path /api/v1/admin/users /api/v1/admin/users/* /api/v1/admin/overview /api/v1/admin/stats/funnel
+	}
 	@health path /health
 	@api_rest path /api/*
 
@@ -105,6 +113,13 @@ Disallow: /
 		request_body {
 			max_size 64KB
 		}
+		reverse_proxy api:8000 {
+			transport http {
+				response_header_timeout 15s
+			}
+		}
+	}
+	handle @site_admin {
 		reverse_proxy api:8000 {
 			transport http {
 				response_header_timeout 15s

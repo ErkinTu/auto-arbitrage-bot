@@ -36,6 +36,7 @@ from app.models import (
     AccessBlock,
     Payment,
     SentNotification,
+    SiteSession,
     UserBlock,
     UserEvent,
     UserFilter,
@@ -289,6 +290,17 @@ def get_user(session: Session, user_id: int) -> dict:
         session.scalar(select(func.count(BotUser.id)).where(BotUser.referrer_id == user.id)) or 0
     )
     referrer = session.get(BotUser, user.referrer_id) if user.referrer_id else None
+    # Оплачено всего — по валютам, только прошедшие оплаты (status=paid).
+    paid_total: dict[str, float] = {}
+    for item in payments:
+        if item.status == "paid":
+            paid_total[item.currency] = round(paid_total.get(item.currency, 0.0) + float(item.amount), 2)
+    # Действующие входы на сайт (истёкшие — не показываем): устройство и время, без IP/токена.
+    site_sessions = session.scalars(
+        select(SiteSession)
+        .where(SiteSession.user_id == user.id, SiteSession.expires_at > now)
+        .order_by(SiteSession.created_at.desc())
+    ).all()
 
     return {
         "id": user.id,
@@ -381,6 +393,18 @@ def get_user(session: Session, user_id: int) -> dict:
             "sent_count": notifications_count,
             "last_sent_at": _aware(last_notification_at),
         },
+        "start_source": user.start_source,
+        "paused_at": _aware(user.paused_at),
+        "paid_total": paid_total,
+        "site_sessions": [
+            {
+                "device": item.device,
+                "created_at": _aware(item.created_at),
+                "last_seen_at": _aware(item.last_seen_at),
+                "expires_at": _aware(item.expires_at),
+            }
+            for item in site_sessions
+        ],
     }
 
 

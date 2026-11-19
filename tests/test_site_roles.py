@@ -233,6 +233,36 @@ def test_admin_via_site_session_sees_admin_api(env, monkeypatch) -> None:
     assert client.get("/api/v1/market/vehicle-summary?brand_id=1&model_id=1&year=2019").status_code == 404  # админ ≥ подписчик: гейт пройден
 
 
+def test_site_admin_user_card_is_safe_and_revocable(env) -> None:
+    """Раздел /admin сайта (19.11.2026): карточка с оплатами и входами на сайт, без
+    токенов; no-store; снятый флаг админа закрывает доступ сразу, той же сессией."""
+    from app.models import Payment
+
+    client, Factory = env
+    user = _user(Factory, 400, start_source="ig")
+    with Factory() as s:
+        s.add_all([
+            Payment(user_id=user.id, order_id="o1", amount=Decimal("990"), currency="KGS", status="paid", period_days=30),
+            Payment(user_id=user.id, order_id="o2", amount=Decimal("990"), currency="KGS", status="pending", period_days=30),
+        ])
+        s.commit()
+    _login(client, Factory, 400)  # у пользователя есть вход на сайт
+    client.cookies.clear()
+    admin = _user(Factory, 401, is_superuser=True)
+    _login(client, Factory, 401)
+    response = client.get(f"/api/v1/admin/users/{user.id}")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    card = response.json()
+    assert card["start_source"] == "ig" and card["paid_total"] == {"KGS": 990.0}
+    assert len(card["payments"]) == 2 and len(card["site_sessions"]) == 1
+    assert "token" not in response.text.lower()
+    with Factory() as s:
+        s.get(BotUser, admin.id).is_superuser = False
+        s.commit()
+    assert client.get(f"/api/v1/admin/users/{user.id}").status_code == 401
+
+
 def test_dev_login_refuses_non_local_site(monkeypatch) -> None:
     """Тестовые юзеры (в т.ч. админ) не должны появиться на проде случайно."""
     import argparse
