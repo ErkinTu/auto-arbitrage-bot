@@ -540,6 +540,8 @@ class PublicListing(BaseModel):
     first_seen_at: datetime
     is_active: bool
     deactivated_at: datetime | None
+    # Сколько ещё объявлений «вероятно, той же машины» (совпало фото; services/same_car.py).
+    same_car_count: int = 0
 
 
 class PublicPricePoint(BaseModel):
@@ -554,6 +556,8 @@ class PublicListingDetail(PublicListing):
     price_history: list[PublicPricePoint]
     # Гостю и пользователю без подписки история (график) не отдаётся.
     price_history_locked: bool = False
+    # «Вероятно, та же машина»: другие объявления с теми же фото (и снятые) — ближе первыми.
+    same_car: list[PublicListing] = []
 
 
 class PublicMedia(BaseModel):

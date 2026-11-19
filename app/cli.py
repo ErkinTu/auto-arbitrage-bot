@@ -496,6 +496,22 @@ def command_phone_hash_backfill(args: argparse.Namespace) -> None:
     print(f"признак номера проставлен: {done}")
 
 
+def command_photo_hash(args: argparse.Namespace) -> None:
+    """Хэши фото сейчас, не дожидаясь потока worker-а (проверка, догон после простоя)."""
+    from app.services.photo_hashes import hash_pass, make_client
+
+    with SessionLocal() as session, make_client() as client:
+        print(hash_pass(session, client, limit=args.limit))
+
+
+def command_same_car_rebuild(args: argparse.Namespace) -> None:
+    """Пересчитать пары «вероятно, та же машина» сейчас."""
+    from app.services.same_car import rebuild
+
+    with SessionLocal() as session:
+        print(rebuild(session))
+
+
 def command_price_history_cleanup(args: argparse.Namespace) -> None:
     """Ложные «смены цены» (курс, а не продавец) из истории цен — разбор 16.11.2026.
     Без `--apply` — только счёт. Запускать синхронно с `</dev/null`."""
@@ -753,6 +769,13 @@ def parser() -> argparse.ArgumentParser:
     )
     phone_hash.add_argument("--batch", type=int, default=2000)
     phone_hash.set_defaults(func=command_phone_hash_backfill)
+
+    photo_hash = sub.add_parser("photo-hash", help="Hash first photos of active listings now (same-car detection)")
+    photo_hash.add_argument("--limit", type=int, default=200)
+    photo_hash.set_defaults(func=command_photo_hash)
+
+    same_car_cmd = sub.add_parser("same-car-rebuild", help="Recompute 'probably the same car' pairs from photo hashes")
+    same_car_cmd.set_defaults(func=command_same_car_rebuild)
 
     cleanup = sub.add_parser(
         "price-history-cleanup",

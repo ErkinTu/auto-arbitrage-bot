@@ -605,6 +605,12 @@ def main() -> None:
     from app.services.liveness import liveness_loop
 
     threading.Thread(target=liveness_loop, name="liveness", daemon=True).start()
+    # Хэши фото (services/photo_hashes.py) — тоже своим потоком: скачивание идёт часами.
+    from app.services.photo_hashes import photo_hash_loop
+    from app.services.same_car import rebuild_if_due as same_car_if_due
+
+    threading.Thread(target=photo_hash_loop, name="photo-hash", daemon=True).start()
+    last_same_car_at: datetime | None = None
     last_rebuild_at: datetime | None = None
     last_maintenance_date: date | None = None
     last_fuel_label_date: date | None = None
@@ -635,6 +641,12 @@ def main() -> None:
                 last_rebuild_at = rebuilt_at
         except Exception:
             logger.exception("stats rebuild failed")
+        try:
+            same_car_at = same_car_if_due(last_same_car_at)
+            if same_car_at is not None:
+                last_same_car_at = same_car_at
+        except Exception:
+            logger.exception("same car rebuild failed")
         try:
             reminded_date = send_renewal_reminders_if_due(last_reminder_date)
             if reminded_date is not None:

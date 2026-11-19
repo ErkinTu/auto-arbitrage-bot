@@ -762,6 +762,40 @@ class WatchedListing(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class ListingPhotoHash(Base):
+    """Перцептивные хэши первых кадров объявления (services/photo_hashes.py, 19.11.2026).
+
+    Отдельной таблицей, а не колонкой `listings`: не трогаем горячую таблицу при
+    каждом хэшировании и выкате. Сами фото не храним — только dHash (64 бита) кадра.
+    `cover_url` — обложка, по которой считали: сменилась (продавец перезалил) —
+    хэшируем заново. `frames` = 0 — ни один кадр не скачался (повтор через сутки).
+    """
+
+    __tablename__ = "listing_photo_hashes"
+
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), primary_key=True)
+    cover_url: Mapped[str | None] = mapped_column(Text)
+    # dHash кадров по порядку (целые 0..2^64-1); пропущенный кадр — не пишется.
+    hashes: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
+    frames: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    hashed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ListingSameCar(Base):
+    """«Вероятно, та же машина» (services/same_car.py, план 18.11 № 20): пары
+    объявлений с совпавшим фото при той же марке, модели и годе. Пара лежит в обе
+    стороны (поиск по `listing_id`). Пересчитывается целиком раз в час worker-ом;
+    ничего не скрывает — только метка на сайте."""
+
+    __tablename__ = "listing_same_car"
+
+    listing_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    other_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Наименьшее расстояние dHash между кадрами пары (0 — тот же снимок).
+    distance: Mapped[int] = mapped_column(Integer, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 @event.listens_for(Listing.seller_phone, "set")
 def _hash_seller_phone(target: Listing, value: str | None, _old: Any, _initiator: Any) -> None:
     """Номер записан — обновить его признак; стёрт (None) — признак остаётся.

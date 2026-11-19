@@ -143,6 +143,18 @@ class Settings(BaseSettings):
     liveness_open_minutes: int = 60  # страница авто по открытию
     liveness_max_per_pass: int = 200
 
+    # Хэши фото для поиска той же машины (services/photo_hashes.py, 19.11.2026):
+    # первые кадры активных объявлений, только хэш. CDN mashina и lalafo
+    # отдают картинки без прокси; входящий трафик Lightsail бесплатный.
+    photo_hash_enabled: bool = True
+    photo_hash_frames: int = 3
+    photo_hash_requests_per_second: float = 5.0
+    photo_hash_batch: int = 100
+    # Пары «вероятно, та же машина» (services/same_car.py): порог dHash из замера 19.11
+    # (та же машина 0–4, разные 16–31) и как часто пересчитывать.
+    same_car_max_distance: int = 8
+    same_car_rebuild_minutes: int = 60
+
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
 
     telegram_bot_token: str = ""
