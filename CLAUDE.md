@@ -49,7 +49,8 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   `--proxy-headers`. Лимитер и кэш — память процесса: при `--workers > 1` — Redis.
   Аудит, контракт ленты для сайта, порядок открытия — `docs/api/PUBLIC_API.md`.
 - **Роли сайта** (ветка `feature/roles`, 09.11.2026, на проде нет): guest (лента
-  с оценкой) / user (вошёл через `/login` в боте) / subscriber (доступ как у
+  с оценкой) / user (вошёл кнопкой «Войти через Telegram» — `services/site_tg_login.py`,
+  или по ссылке `/login` из бота) / subscriber (доступ как у
   пушей: группа, оплата, триал — графики и аналитика) / admin (`is_superuser`).
   Гейт — `api/roles.py` на роутере; роль считается на каждом запросе
   (`services/site_auth.py`), в сессии не хранится. `PLATFORM_ADR.md § Роли`.
@@ -562,7 +563,7 @@ AWS Lightsail, проект в `/home/ubuntu/car-analytics`, docker без sudo.
 | `docs/planning/BEST_PICKS.md` | **«Лучшее сейчас» (сайт `/public/best` + бот `/best`)**: допуск, ярусы при нехватке, скор, порядок 5 новых + старые; план проверки «снято ли» |
 | `docs/planning/PLATFORM_ADR.md` | ADR: админка + фронт + сайт (монорепо, этапы, ветки) |
 | `docs/planning/SITE_TODO.md` | **Сайт: бэкенд-часть — что осталось** (11.11.2026); бэклог сайта — `../analytics-front/docs/FRONT_TODO.md` |
-| `docs/planning/TELEGRAM_LOGIN.md` | **План: вход на сайт кнопкой «Войти через Telegram»** (запрос → код в боте → сессия по опросу); зачем — PWA на iPhone (18.11.2026, не начато) |
+| `docs/planning/TELEGRAM_LOGIN.md` | **Вход на сайт кнопкой «Войти через Telegram»** (запрос → код в боте → сессия по опросу); зачем — PWA на iPhone. Сделано 19.11.2026 (`feature/tg-login`) |
 | `docs/sources/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/sources/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `docs/payments/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `docs/payments/web-sdk-flow.png`, что нужно завести |
