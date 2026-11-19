@@ -491,6 +491,35 @@ class SiteLoginToken(Base):
     )
 
 
+class SiteLoginRequest(Base):
+    """Вход на сайт кнопкой «Войти через Telegram» (18.11.2026, `services/site_tg_login.py`).
+
+    Сайт заводит запрос → человек открывает бота по `t.me/<бот>?start=login_<nonce>`
+    и выбирает код, который видит на экране → сайт, опрашивающий по `poll`-токену,
+    получает сессию. Сессию берёт тот браузер, где нажали кнопку (PWA на iPhone,
+    встроенный браузер Telegram), а не тот, где откроется ссылка. Оба секрета —
+    sha256, как у `site_login_tokens`. Срок — `SITE_TG_LOGIN_TTL_MINUTES`.
+    """
+
+    __tablename__ = "site_login_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    nonce_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    poll_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    # Код на экране сайта (2 цифры): в боте человек выбирает его из трёх —
+    # защита от «подтверди вход» по чужой ссылке.
+    code: Mapped[str] = mapped_column(String(4), nullable=False)
+    # pending → confirmed → consumed; или denied / истёк по expires_at.
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    # Первый, кто открыл ссылку в боте: подтвердить может только он.
+    claimed_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("bot_users.id", ondelete="CASCADE"))
+    device: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SiteSession(Base):
     """Сессия сайта в httpOnly-куке `sk_session` (sha256 в базе, отзыв удалением).
 

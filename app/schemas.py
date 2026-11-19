@@ -643,6 +643,27 @@ class SiteMe(BaseModel):
     session_expires_at: datetime | None = None
 
 
+class TgLoginStart(BaseModel):
+    """Начало входа кнопкой: открыть `bot_url`, показать `code`, опрашивать с `poll_token`."""
+
+    bot_url: str
+    code: str
+    poll_token: str
+    expires_at: datetime
+
+
+class TgLoginPollRequest(BaseModel):
+    poll_token: str = Field(min_length=10, max_length=100)
+
+
+class TgLoginPoll(BaseModel):
+    """pending — ждём; confirmed — вошли (cookie уже поставлена, `me` — кто);
+    denied — в боте нажали «Не я» или не тот код; expired — истёк или уже использован."""
+
+    status: Literal["pending", "confirmed", "denied", "expired"]
+    me: SiteMe | None = None
+
+
 # --- Фильтры уведомлений (профиль сайта = фильтры бота) ------------------------
 
 

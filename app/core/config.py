@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     # Вход на сайт через бота (`/login`): срок ссылки и сессии обычного
     # пользователя (7 дней). Админу — `site_admin_session_ttl_hours` (1 ч).
     site_login_token_ttl_minutes: int = 10
+    # Вход кнопкой «Войти через Telegram»: сколько живёт запрос входа (подтвердить в
+    # боте и вернуться на сайт), `services/site_tg_login.py`.
+    site_tg_login_ttl_minutes: int = 5
     site_session_ttl_days: int = 7
     # Админ на сайте — короткая сессия (база пользователей с телефона); у старой
     # панели своя `admin_session_ttl_hours`. Решение владельца 11.11.2026: 1 ч.

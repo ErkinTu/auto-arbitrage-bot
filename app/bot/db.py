@@ -1217,6 +1217,22 @@ def issue_site_login_token(telegram_id: int) -> str | None:
         return issue_login_token(session, telegram_id)
 
 
+def claim_site_login(nonce: str, telegram_id: int):
+    """Открыли ссылку «Войти через Telegram» — закрепить запрос (services/site_tg_login.py)."""
+    from app.services.site_tg_login import claim
+
+    with SessionLocal() as session:
+        return claim(session, nonce, telegram_id)
+
+
+def answer_site_login(request_id: int, telegram_id: int, choice: str) -> str:
+    """Выбран код (или «Не я») в сообщении входа на сайт."""
+    from app.services.site_tg_login import answer
+
+    with SessionLocal() as session:
+        return answer(session, request_id, telegram_id, choice)
+
+
 def issue_admin_login_token(telegram_id: int) -> str | None:
     """Выдаёт одноразовый токен входа в панель; None — если человек не админ.
 

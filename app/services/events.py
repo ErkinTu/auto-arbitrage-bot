@@ -28,6 +28,7 @@ EVENT_RESUMED = "resumed"  # /play (payload: сколько часов был н
 EVENT_PAUSE_REMINDER = "pause_reminder"  # ежедневное «вы на паузе»
 EVENT_MENU_OPEN = "menu_open"  # /menu и «⚙️ Меню»: пользуются ли меню вообще
 EVENT_START_LINK = "start_link"  # /start по ссылке с меткой источника (services/start_source.py)
+EVENT_SITE_LOGIN = "site_login"  # вход на сайт (payload: method = link | button)
 
 # Порядок = порядок воронки в отчёте.
 FUNNEL_EVENTS = (

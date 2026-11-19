@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import BotUser, SiteLoginToken, SiteSession
+from app.services.events import EVENT_SITE_LOGIN, log_event
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +211,18 @@ def exchange_login_token(session: Session, token: str, *, user_agent: str | None
     user = session.get(BotUser, row.user_id)
     if user is None:
         raise LoginError("user gone")
+    return open_site_session(session, user, user_agent=user_agent, method="link")
 
+
+def open_site_session(
+    session: Session, user: BotUser, *, user_agent: str | None, method: str
+) -> tuple[str, Viewer]:
+    """Новая сессия сайта (общая для входа по ссылке `/login` и кнопкой, `site_tg_login`).
+
+    Роль в сессии не хранится — `role_of` считает её по статусу и подписке в боте
+    на каждом запросе. Коммитит сам. Возвращает (raw-токен для cookie, кто вошёл).
+    """
+    now = _now()
     session.execute(
         delete(SiteSession).where(SiteSession.user_id == user.id, SiteSession.expires_at <= now)
     )
@@ -220,10 +232,11 @@ def exchange_login_token(session: Session, token: str, *, user_agent: str | None
     session.add(new)
     session.flush()
     closed = _trim_sessions(session, user.id, new.id)
+    log_event(session, user.id, EVENT_SITE_LOGIN, {"method": method})
     session.commit()
     if closed:
         logger.info("Вход на сайт: лимит устройств — закрыто старых сессий: %s", closed)
-    logger.info("Вход на сайт: сессия открыта, telegram_id=%s", user.telegram_id)
+    logger.info("Вход на сайт (%s): сессия открыта, telegram_id=%s", method, user.telegram_id)
     return raw, Viewer(role=role_of(user, now), user=user, session_expires_at=session_expires_at, session_id=new.id)
 
 

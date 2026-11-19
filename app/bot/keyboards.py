@@ -46,6 +46,23 @@ def play_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+class SiteLoginCB(CallbackData, prefix="tgl"):
+    """Вход на сайт кнопкой: выбор кода с экрана или «Не я» (services/site_tg_login.py)."""
+
+    request_id: int
+    choice: str  # двузначный код или "no"
+
+
+def site_login_kb(request_id: int, options: list[str]) -> InlineKeyboardMarkup:
+    """Три кода в ряд (один верный) и «Не я» отдельной строкой."""
+    builder = InlineKeyboardBuilder()
+    for code in options:
+        builder.button(text=code, callback_data=SiteLoginCB(request_id=request_id, choice=code))
+    builder.button(text="✖️ Это не я", callback_data=SiteLoginCB(request_id=request_id, choice="no"))
+    builder.adjust(len(options), 1)
+    return builder.as_markup()
+
+
 class TrialCB(CallbackData, prefix="trial"):
     action: str  # "start"
 
