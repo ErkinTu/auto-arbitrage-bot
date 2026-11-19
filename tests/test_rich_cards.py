@@ -663,3 +663,25 @@ def test_access_button_shows_status_then_plans(monkeypatch) -> None:
     texts = [text for text, _ in message.answers]
     assert texts[0].startswith("❌ Подписка неактивна")
     assert message.answers[-1][1] is not None  # кнопки тарифов
+
+
+def test_start_with_site_login_link_asks_for_code_without_onboarding(monkeypatch) -> None:
+    """`/start login_<nonce>` (кнопка «Войти через Telegram» на сайте): только выбор кода."""
+    from types import SimpleNamespace
+
+    from app.bot import handlers
+    from app.bot.keyboards import SiteLoginCB
+    from app.services.site_tg_login import BotPrompt
+
+    prompt = BotPrompt(request_id=7, device="Chrome · Android", created_at=datetime.now(timezone.utc), options=["12", "47", "83"])
+    seen = {}
+    monkeypatch.setattr(handlers.db, "handle_start", lambda *args, **kwargs: _start_info())
+    monkeypatch.setattr(handlers.db, "claim_site_login", lambda nonce, tg: seen.setdefault("nonce", nonce) and prompt)
+    message = _HandlerMessage()
+    asyncio.run(handlers.cmd_start(message, SimpleNamespace(args="login_AbC123")))
+    assert seen["nonce"] == "AbC123"
+    assert message.bot.photos == [] and len(message.answers) == 1
+    text, markup = message.answers[0]
+    assert "Chrome · Android" in text
+    buttons = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert [SiteLoginCB.unpack(b).choice for b in buttons] == ["12", "47", "83", "no"]

@@ -1,6 +1,17 @@
 # Вход через Telegram — кнопкой на самом сайте (план 18.11.2026)
 
-Статус: **план, не начато.** Затрагивает бота, API и сайт (`../analytics-front`).
+Статус: **сделано 19.11.2026, не выкачено** — бэк и фронт `feature/tg-login` (от прода `feature/ssr-cache`).
+Затрагивает бота, API и сайт (`../analytics-front`). Миграция — новая таблица `site_login_requests`
+(создаёт `migrate`, ALTER не нужен); новых переменных окружения нет (нужны уже заданные `SITE_URL`,
+`BOT_USERNAME`; срок — `SITE_TG_LOGIN_TTL_MINUTES`, по умолчанию 5).
+
+**Как сделано** (отличия от плана ниже): сервис `services/site_tg_login.py`, ручки `POST /api/v1/auth/tg/start`
+(лимит 10 подряд, дальше 2/мин с IP; проверка Origin) и `POST /api/v1/auth/tg/poll`; бот — `/start login_<nonce>`
+(без онбординга) и кнопки `tgl:<id>:<код|no>` (в `ENTRY_CALLBACK_PREFIXES` — вход открыт всем, как `/login`);
+ссылка закрепляется за первым открывшим её telegram_id; неверный код = отказ; общий `site_auth.open_site_session`
+для обоих способов входа, событие `site_login` (`method`: `link` | `button`), `start_source = site_login`.
+QR для компьютера не делали (бюджет JS). Проверка на устройствах из матрицы ниже — ещё не проходили (нужен
+живой Telegram: локально проверено с тест-ботом через вызов сервиса).
 Учёт: бэкенд — `SITE_TODO.md`, фронт — `../analytics-front/docs/FRONT_TODO.md`.
 
 ## Зачем

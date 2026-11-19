@@ -24,6 +24,7 @@ from app.services.referral import DEEP_LINK_PREFIX
 # Telegram: параметр start — до 64 символов из [A-Za-z0-9_-].
 _PAYLOAD_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SOURCE_REFERRAL = "ref"
+SOURCE_SITE_LOGIN = "site_login"
 
 
 def parse_source(payload: str | None) -> str | None:
@@ -35,6 +36,8 @@ def parse_source(payload: str | None) -> str | None:
         return None
     if payload.lower().startswith(DEEP_LINK_PREFIX):
         return SOURCE_REFERRAL
+    if payload.startswith("login_"):
+        return SOURCE_SITE_LOGIN  # вход на сайт кнопкой: nonce в метку не пишем
     return payload.lower()
 
 

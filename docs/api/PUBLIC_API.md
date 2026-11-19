@@ -96,6 +96,10 @@
 `PUBLIC_DEAL_THRESHOLD_PERCENT=5`). Расчёт — тот же, что у бота (пакетный
 `batch_market_estimates`, тест на совпадение `test_batch_estimates_match_bot`);
 отклонение больше `BOT_MAX_BELOW_MARKET_PERCENT` — оценки нет (мусор цены).
+Вход на сайт кнопкой (19.11.2026, `docs/planning/TELEGRAM_LOGIN.md`): `POST /auth/tg/start` →
+`{bot_url, code, poll_token, expires_at}`; `POST /auth/tg/poll {poll_token}` → `{status: pending|confirmed|denied|expired, me}`,
+при `confirmed` — `Set-Cookie` сессии (один раз). Для мобильного приложения не годится (cookie сайта) — у него свой вход позже.
+
 `public_id` (18.11.2026) — публичный id для адресов сайта (`/car/Q041bg`, Sqids, `services/public_ids.py`);
 null — выключено (`PUBLIC_ID_ALPHABET` пуст). Ручки `/listings/{id}`, `/description`, `/media`, `/similar`,
 `?ids=` и `near=` принимают и публичный id, и (пока, ~60 дней) числовой. `id` в ответе остаётся.

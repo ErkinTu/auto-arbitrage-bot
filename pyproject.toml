@@ -9,6 +9,7 @@ dependencies = [
     "cryptography>=43,<46",  # RSA-SHA256 подпись запросов/webhook Finik
     "fastapi>=0.115,<1.0",
     "httpx[socks]>=0.27,<1.0",
+    "pillow>=11,<13",
     "psycopg[binary]>=3.2,<4.0",
     "pydantic-settings>=2.6,<3.0",
     "sqids>=0.5.2",

@@ -31,7 +31,7 @@ from app.bot.matching import MarketEstimate, is_complete_listing
 from app.core.config import get_settings
 from app.models import Brand, CarModel, DailyMarketStat, Listing, ListingPriceHistory, ParserRun, Source
 from app.services.exchange import get_latest_usd_rate
-from app.services import best_picks, public_ids
+from app.services import best_picks, public_ids, same_car
 from app.services.images import real_photo
 from app.services.normalizer import MAX_PLAUSIBLE_PRICE_USD, MIN_PLAUSIBLE_PRICE_USD
 from app.services.regions import REGION_LABELS, is_foreign, region_matches, region_of
@@ -599,7 +599,8 @@ def _enrich(session: Session, listings: list[Listing], now: datetime) -> list[di
     brands, models, sources = _names(session, listings)
     drops = _price_drops(session, listings, now)
     rate = get_latest_usd_rate(session)
-    return [
+    same = same_car.counts(session, [listing.id for listing in listings])
+    items = [
         serialize(
             listing,
             brands.get(listing.brand_id, ""),
@@ -611,6 +612,10 @@ def _enrich(session: Session, listings: list[Listing], now: datetime) -> list[di
         )
         for listing in listings
     ]
+    for item in items:
+        # «Вероятно, та же машина» (services/same_car.py): чип в карточке ленты.
+        item["same_car_count"] = same.get(item["id"], 0)
+    return items
 
 
 def _deal_ok(item: dict, deal: Deal) -> bool:
@@ -920,6 +925,8 @@ def listing_detail(session: Session, listing_id: int) -> dict:
     ).all()
     item["images"] = gallery
     item["video_id"] = listing.video_id
+    # Та же машина в других объявлениях (активные и снятые за 90 дней).
+    item["same_car"] = listings_by_ids(session, same_car.other_ids(session, listing_id)[:10])
     item["price_history"] = [
         {"at": at, "price_usd": round(float(price))} for at, price in history
     ]

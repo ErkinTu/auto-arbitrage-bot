@@ -49,7 +49,8 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   `--proxy-headers`. Лимитер и кэш — память процесса: при `--workers > 1` — Redis.
   Аудит, контракт ленты для сайта, порядок открытия — `docs/api/PUBLIC_API.md`.
 - **Роли сайта** (ветка `feature/roles`, 09.11.2026, на проде нет): guest (лента
-  с оценкой) / user (вошёл через `/login` в боте) / subscriber (доступ как у
+  с оценкой) / user (вошёл кнопкой «Войти через Telegram» — `services/site_tg_login.py`,
+  или по ссылке `/login` из бота) / subscriber (доступ как у
   пушей: группа, оплата, триал — графики и аналитика) / admin (`is_superuser`).
   Гейт — `api/roles.py` на роутере; роль считается на каждом запросе
   (`services/site_auth.py`), в сессии не хранится. `PLATFORM_ADR.md § Роли`.
@@ -382,6 +383,15 @@ httpx, pydantic-settings. Зависимости через **uv**. Линт/т�
   номера; старым — `cli.py phone-hash-backfill`. В API/админку/логи не попадает. Ссылки «Открыть на …» в тексте карточки больше
   нет — только кнопка «Открыть ↗»; источник — последней строкой простым текстом.
 
+- **«Вероятно, та же машина»** (19.11.2026, `feature/photo-hash`, на проде нет): поток `photo-hash`
+  в worker хэширует (dHash) первые 3 фото активных объявлений, кроме новых < 1000 км
+  (`services/photo_hashes.py`, таблица `listing_photo_hashes`, только хэш — фото не храним;
+  `PHOTO_HASH_REQUESTS_PER_SECOND=5`, CDN обеих площадок — без прокси). Раз в час
+  `services/same_car.py` пересчитывает пары (`listing_same_car`, в обе стороны): та же
+  марка/модель/год + совпал кадр (≤ 8 бит) + пробег/топливо не противоречат. Решение владельца:
+  на сайте только «вероятно», ничего не скрываем (`same_car_count` в ленте, `same_car` в карточке).
+  Вручную — `cli.py photo-hash [--limit]`, `cli.py same-car-rebuild`. Замер — `docs/data/DUPLICATES_MEASURE_2026-11-19.md`.
+
 - **Фильтр по топливу** (на проде с 01.11.2026; `docs/planning/PLAN_2026-11-01.md § Е`):
   шаг 8 панели, несколько типов из `petrol | petrol_gas | hybrid | electric |
   diesel` (плагин = гибрид). **В ленте mashina топлива нет** — `listings.fuel_group`
@@ -562,7 +572,7 @@ AWS Lightsail, проект в `/home/ubuntu/car-analytics`, docker без sudo.
 | `docs/planning/BEST_PICKS.md` | **«Лучшее сейчас» (сайт `/public/best` + бот `/best`)**: допуск, ярусы при нехватке, скор, порядок 5 новых + старые; план проверки «снято ли» |
 | `docs/planning/PLATFORM_ADR.md` | ADR: админка + фронт + сайт (монорепо, этапы, ветки) |
 | `docs/planning/SITE_TODO.md` | **Сайт: бэкенд-часть — что осталось** (11.11.2026); бэклог сайта — `../analytics-front/docs/FRONT_TODO.md` |
-| `docs/planning/TELEGRAM_LOGIN.md` | **План: вход на сайт кнопкой «Войти через Telegram»** (запрос → код в боте → сессия по опросу); зачем — PWA на iPhone (18.11.2026, не начато) |
+| `docs/planning/TELEGRAM_LOGIN.md` | **Вход на сайт кнопкой «Войти через Telegram»** (запрос → код в боте → сессия по опросу); зачем — PWA на iPhone. Сделано 19.11.2026 (`feature/tg-login`) |
 | `docs/sources/LALAFO.md` | Источник lalafo.kg: API, ловушки данных, прод-чеклист |
 | `docs/sources/LALAFO_PROXY.md` | Доступ к lalafo с прода: Cloudflare-блок, эксперименты, варианты выхода |
 | `docs/payments/FINIK_FLOW.md` | Finik простым языком: идея, что с чем связано, поток по схеме `docs/payments/web-sdk-flow.png`, что нужно завести |

@@ -15,10 +15,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 
 from app.bot import db, photo_upload, photos, throttle
+from app.services.site_tg_login import parse_nonce as parse_login_nonce
 from app.bot.executors import run_click
 from app.bot import filter_panel as fp
 from app.bot import menu_screens as ms
 from app.bot.keyboards import (
+    SiteLoginCB,
+    site_login_kb,
     FilterAddCB,
     FilterEditCB,
     filter_pick_kb,
@@ -62,6 +65,8 @@ from app.bot.keyboards import (
     trial_kb,
 )
 from app.bot.messages import (
+    SITE_LOGIN_RESULT_TEXTS,
+    site_login_prompt_text,
     filter_updated_text,
     photos_contact_text,
     whatsapp_greeting,
@@ -156,6 +161,12 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
         first_name=message.from_user.first_name,
         deep_link_payload=command.args if command else None,
     )
+    # Вход на сайт кнопкой «Войти через Telegram» (`login_<nonce>`): человек пришёл
+    # подтвердить вход — только это, без онбординга и витрины.
+    nonce = parse_login_nonce(command.args if command else None)
+    if nonce is not None:
+        await _site_login_prompt(message, nonce)
+        return
 
     # Постоянное меню едет с первым же сообщением: reply-клавиатура держится в
     # чате, пока её не заменят, так что повторять её в каждом ответе незачем.
@@ -186,6 +197,35 @@ async def cmd_start(message: Message, command: CommandObject | None = None) -> N
         START_TRIAL_PROMPT_TEXT if shown else DEMO_UNAVAILABLE_TEXT,
         reply_markup=trial_kb(settings.trial_days),
     )
+
+
+async def _site_login_prompt(message: Message, nonce: str) -> None:
+    prompt = await asyncio.to_thread(db.claim_site_login, nonce, message.from_user.id)
+    if isinstance(prompt, str):
+        await message.answer(SITE_LOGIN_RESULT_TEXTS[prompt])
+        return
+    await message.answer(
+        site_login_prompt_text(prompt.device, prompt.created_at),
+        reply_markup=site_login_kb(prompt.request_id, prompt.options),
+    )
+
+
+@router.callback_query(SiteLoginCB.filter())
+async def cb_site_login(callback: CallbackQuery, callback_data: SiteLoginCB) -> None:
+    """Выбран код с экрана сайта или «Это не я». Кнопки после ответа убираем."""
+    result = await asyncio.to_thread(
+        db.answer_site_login, callback_data.request_id, callback.from_user.id, callback_data.choice
+    )
+    if result == "denied" and callback_data.choice != "no":
+        text = "Код не совпал — вход отменён. Начните заново на сайте: «Войти через Telegram»."
+    else:
+        text = SITE_LOGIN_RESULT_TEXTS[result]
+    await callback.answer()
+    if callback.message is not None:
+        try:
+            await callback.message.edit_text(text)
+        except TelegramBadRequest:
+            await callback.message.answer(text)
 
 
 async def _send_start_showcase(message: Message) -> bool:

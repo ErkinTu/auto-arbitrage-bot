@@ -10,8 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.api.roles import current_viewer
 from app.db.session import get_session
-from app.schemas import AdminLoginRequest, SiteDevice, SiteMe
+from app.schemas import AdminLoginRequest, SiteDevice, SiteMe, TgLoginPoll, TgLoginPollRequest, TgLoginStart
 from app.core.config import get_settings
+from app.core.ratelimit import Policy, client_ip, limiter
+from app.services import site_tg_login
 from app.services.admin_auth import too_many_attempts
 from app.services.site_auth import (
     SESSION_COOKIE,
@@ -59,6 +61,11 @@ def exchange(
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "Ссылка недействительна. Отправьте боту /login ещё раз."
         ) from exc
+    _set_session_cookie(response, raw, viewer)
+    return _me(viewer)
+
+
+def _set_session_cookie(response: Response, raw: str, viewer: Viewer) -> None:
     max_age = max(0, int((viewer.session_expires_at - datetime.now(timezone.utc)).total_seconds()))
     response.set_cookie(
         SESSION_COOKIE,
@@ -72,7 +79,48 @@ def exchange(
         samesite="lax",
         path="/",
     )
-    return _me(viewer)
+
+
+# --- вход кнопкой «Войти через Telegram» (services/site_tg_login.py) ----------------
+
+# Запросов входа с одного IP: 10 подряд, дальше 1 в 30 с — с запасом на «не открылось,
+# ещё раз», но без раздувания таблицы. Опрос — обычный публичный лимит (раз в 2 с = 30/мин).
+_TG_START_POLICY = Policy("tg_login_start", per_minute=2, burst=10)
+
+
+@router.post("/tg/start", response_model=TgLoginStart)
+def tg_login_start(request: Request, session: Session = Depends(get_session)) -> dict:
+    """Начать вход: ссылка на бота, код для экрана, токен опроса (только этому браузеру)."""
+    _same_origin(request)
+    if not limiter.hit(_TG_START_POLICY, client_ip(request.scope)).allowed:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Слишком много попыток входа. Подождите минуту.")
+    try:
+        started = site_tg_login.start_request(session, user_agent=request.headers.get("user-agent"))
+    except site_tg_login.LoginUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Вход через Telegram сейчас недоступен") from exc
+    return {
+        "bot_url": started.bot_url,
+        "code": started.code,
+        "poll_token": started.poll_token,
+        "expires_at": started.expires_at,
+    }
+
+
+@router.post("/tg/poll", response_model=TgLoginPoll)
+def tg_login_poll(
+    payload: TgLoginPollRequest,
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_session),
+) -> dict:
+    """Ждём подтверждения в боте. `confirmed` — один раз: тогда же ставится cookie сессии."""
+    _same_origin(request)
+    state, opened = site_tg_login.poll(session, payload.poll_token, user_agent=request.headers.get("user-agent"))
+    if opened is None:
+        return {"status": state, "me": None}
+    raw, viewer = opened
+    _set_session_cookie(response, raw, viewer)
+    return {"status": state, "me": _me(viewer)}
 
 
 @router.get("/me", response_model=SiteMe)

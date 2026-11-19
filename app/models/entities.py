@@ -491,6 +491,35 @@ class SiteLoginToken(Base):
     )
 
 
+class SiteLoginRequest(Base):
+    """Вход на сайт кнопкой «Войти через Telegram» (18.11.2026, `services/site_tg_login.py`).
+
+    Сайт заводит запрос → человек открывает бота по `t.me/<бот>?start=login_<nonce>`
+    и выбирает код, который видит на экране → сайт, опрашивающий по `poll`-токену,
+    получает сессию. Сессию берёт тот браузер, где нажали кнопку (PWA на iPhone,
+    встроенный браузер Telegram), а не тот, где откроется ссылка. Оба секрета —
+    sha256, как у `site_login_tokens`. Срок — `SITE_TG_LOGIN_TTL_MINUTES`.
+    """
+
+    __tablename__ = "site_login_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    nonce_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    poll_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    # Код на экране сайта (2 цифры): в боте человек выбирает его из трёх —
+    # защита от «подтверди вход» по чужой ссылке.
+    code: Mapped[str] = mapped_column(String(4), nullable=False)
+    # pending → confirmed → consumed; или denied / истёк по expires_at.
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    # Первый, кто открыл ссылку в боте: подтвердить может только он.
+    claimed_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("bot_users.id", ondelete="CASCADE"))
+    device: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SiteSession(Base):
     """Сессия сайта в httpOnly-куке `sk_session` (sha256 в базе, отзыв удалением).
 
@@ -731,6 +760,40 @@ class WatchedListing(Base):
 
     listing_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ListingPhotoHash(Base):
+    """Перцептивные хэши первых кадров объявления (services/photo_hashes.py, 19.11.2026).
+
+    Отдельной таблицей, а не колонкой `listings`: не трогаем горячую таблицу при
+    каждом хэшировании и выкате. Сами фото не храним — только dHash (64 бита) кадра.
+    `cover_url` — обложка, по которой считали: сменилась (продавец перезалил) —
+    хэшируем заново. `frames` = 0 — ни один кадр не скачался (повтор через сутки).
+    """
+
+    __tablename__ = "listing_photo_hashes"
+
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id", ondelete="CASCADE"), primary_key=True)
+    cover_url: Mapped[str | None] = mapped_column(Text)
+    # dHash кадров по порядку (целые 0..2^64-1); пропущенный кадр — не пишется.
+    hashes: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
+    frames: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    hashed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ListingSameCar(Base):
+    """«Вероятно, та же машина» (services/same_car.py, план 18.11 № 20): пары
+    объявлений с совпавшим фото при той же марке, модели и годе. Пара лежит в обе
+    стороны (поиск по `listing_id`). Пересчитывается целиком раз в час worker-ом;
+    ничего не скрывает — только метка на сайте."""
+
+    __tablename__ = "listing_same_car"
+
+    listing_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    other_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Наименьшее расстояние dHash между кадрами пары (0 — тот же снимок).
+    distance: Mapped[int] = mapped_column(Integer, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 @event.listens_for(Listing.seller_phone, "set")
